@@ -130,12 +130,18 @@ describe("scoped approvals", () => {
 
 describe("bash complexity and fallback", () => {
 	it("detects complex shell commands", () => {
-		expect(__test__.isComplexBashCommand("cat file.txt")).toBe(false);
+		expect(__test__.hasComplexBashSyntax("cat file.txt")).toBe(false);
 		expect(__test__.isComplexBashCommand("cat file.txt && rm -rf tmp")).toBe(true);
 		expect(__test__.isComplexBashCommand("echo hi | wc -l")).toBe(true);
 	});
 
-	it("splits simple pipelines but rejects other shell syntax", () => {
+	it("recognizes shell syntax forbidden for simple pipelines", () => {
+		expect(__test__.hasForbiddenSimplePipelineSyntax("rg foo src | head -10")).toBe(false);
+		expect(__test__.hasForbiddenSimplePipelineSyntax("rg foo src && head -10")).toBe(true);
+		expect(__test__.hasForbiddenSimplePipelineSyntax("rg foo src > out.txt")).toBe(true);
+	});
+
+	it("splits simple pipelines but rejects unsupported edge cases", () => {
 		expect(__test__.splitSimplePipeline("rg foo src | head -10")).toEqual(["rg foo src", "head -10"]);
 		expect(__test__.splitSimplePipeline("find . -type f | rg permissions | head")).toEqual([
 			"find . -type f",
@@ -143,6 +149,11 @@ describe("bash complexity and fallback", () => {
 			"head",
 		]);
 		expect(__test__.splitSimplePipeline("rg 'foo|bar' src")).toEqual(["rg 'foo|bar' src"]);
+		expect(__test__.splitSimplePipeline('rg "foo|bar" src | head')).toEqual(['rg "foo|bar" src', "head"]);
+		expect(__test__.splitSimplePipeline(String.raw`rg foo \| head`)).toEqual([String.raw`rg foo \| head`]);
+		expect(__test__.splitSimplePipeline("| head -10")).toBeUndefined();
+		expect(__test__.splitSimplePipeline("rg foo src |")).toBeUndefined();
+		expect(__test__.splitSimplePipeline("rg 'foo src | head -10")).toBeUndefined();
 		expect(__test__.splitSimplePipeline("rg foo src && head -10")).toBeUndefined();
 	});
 

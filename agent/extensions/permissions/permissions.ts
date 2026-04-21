@@ -882,22 +882,40 @@ function sandboxFallbackModeForPolicy(mode: PermissionMode): "normal" | "ask-all
 	return "normal";
 }
 
+const COMPLEX_BASH_SYNTAX_RE = /(^|[^\\])(?:&&|\|\||[;|<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/;
+const SIMPLE_PIPELINE_FORBIDDEN_SYNTAX_RE = /(^|[^\\])(?:&&|\|\||[;<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/;
+const DANGEROUS_BASH_CHECKS = [
+	{ re: /\brm\b/i, reason: "Deletes files" },
+	{ re: /\bmv\b/i, reason: "Moves or renames" },
+	{ re: /\bsudo\b/i, reason: "Elevated privileges" },
+	{ re: /\b(chmod|chown)\b/i, reason: "Changes permissions or ownership" },
+	{ re: /\bkill\b/i, reason: "Terminates processes" },
+	{ re: /\bcurl\b.+(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|PUT|DELETE|PATCH))/i, reason: "HTTP write operation" },
+] as const;
+
+type ShellQuoteState = "none" | "single" | "double";
+
+function hasComplexBashSyntax(command: string): boolean {
+	return COMPLEX_BASH_SYNTAX_RE.test(command);
+}
+
+function hasForbiddenSimplePipelineSyntax(command: string): boolean {
+	return SIMPLE_PIPELINE_FORBIDDEN_SYNTAX_RE.test(command);
+}
+
 function isComplexBashCommand(command: string): boolean {
 	// Detect shell chaining, redirection, substitution, and control flow.
-	return /(^|[^\\])(?:&&|\|\||[;|<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/.test(command);
+	return hasComplexBashSyntax(command);
 }
 
 function splitSimplePipeline(command: string): string[] | undefined {
 	const trimmed = command.trim();
 	if (!trimmed) return undefined;
-	if (/(^|[^\\])(?:&&|\|\||[;<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/.test(command)) {
-		return undefined;
-	}
+	if (hasForbiddenSimplePipelineSyntax(command)) return undefined;
 
 	const parts: string[] = [];
 	let current = "";
-	let inSingle = false;
-	let inDouble = false;
+	let quoteState: ShellQuoteState = "none";
 	let escaped = false;
 
 	for (let i = 0; i < command.length; i++) {
@@ -909,25 +927,25 @@ function splitSimplePipeline(command: string): string[] | undefined {
 			continue;
 		}
 
-		if (ch === "\\" && !inSingle) {
+		if (ch === "\\" && quoteState !== "single") {
 			current += ch;
 			escaped = true;
 			continue;
 		}
 
-		if (ch === '"' && !inSingle) {
-			inDouble = !inDouble;
+		if (ch === '"' && quoteState !== "single") {
+			quoteState = quoteState === "double" ? "none" : "double";
 			current += ch;
 			continue;
 		}
 
-		if (ch === "'" && !inDouble) {
-			inSingle = !inSingle;
+		if (ch === "'" && quoteState !== "double") {
+			quoteState = quoteState === "single" ? "none" : "single";
 			current += ch;
 			continue;
 		}
 
-		if (ch === "|" && !inSingle && !inDouble) {
+		if (ch === "|" && quoteState === "none") {
 			const segment = current.trim();
 			if (!segment) return undefined;
 			parts.push(segment);
@@ -938,7 +956,7 @@ function splitSimplePipeline(command: string): string[] | undefined {
 		current += ch;
 	}
 
-	if (escaped || inSingle || inDouble) return undefined;
+	if (escaped || quoteState !== "none") return undefined;
 	const tail = current.trim();
 	if (!tail) return undefined;
 	parts.push(tail);
@@ -986,15 +1004,7 @@ function approvalsCoverBash(
 }
 
 function detectDangerousBashPattern(command: string): string | undefined {
-	const checks: Array<{ re: RegExp; reason: string }> = [
-		{ re: /\brm\b/i, reason: "Deletes files" },
-		{ re: /\bmv\b/i, reason: "Moves or renames" },
-		{ re: /\bsudo\b/i, reason: "Elevated privileges" },
-		{ re: /\b(chmod|chown)\b/i, reason: "Changes permissions or ownership" },
-		{ re: /\bkill\b/i, reason: "Terminates processes" },
-		{ re: /\bcurl\b.+(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|PUT|DELETE|PATCH))/i, reason: "HTTP write operation" },
-	];
-	for (const check of checks) {
+	for (const check of DANGEROUS_BASH_CHECKS) {
 		if (check.re.test(command)) return check.reason;
 	}
 	return undefined;
@@ -1761,6 +1771,8 @@ export const __test__ = {
 	canonicalizePathToken,
 	approvalsCoverPaths,
 	approvalsCoverBash,
+	hasComplexBashSyntax,
+	hasForbiddenSimplePipelineSyntax,
 	isComplexBashCommand,
 	splitSimplePipeline,
 	isAllowedSimpleBashCommand,
