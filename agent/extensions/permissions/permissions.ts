@@ -50,8 +50,10 @@
  *
  * Rule fields:
  *   tool               — tool name or "*" for any tool
- *   match              — optional regex; for bash matches the command string,
- *                        for other tools matches the path argument
+ *   match              — optional matcher for command/path target:
+ *                        - advanced: regex (if regex metacharacters are present)
+ *                        - bash shorthand: "rg" (word boundary), "rg *" (prefix)
+ *                        - non-bash shorthand: case-insensitive substring
  *   action             — "allow" | "block" | "ask"
  *   reason             — optional human-readable string for prompts/notifications
  *   externalPathAction — "inherit" (default) | "allow" | "ask" | "block"
@@ -367,22 +369,64 @@ function getMatchTarget(toolName: string, input: Record<string, unknown>): strin
 	}
 }
 
+function hasRegexMeta(pattern: string): boolean {
+	return /[.^$+?(){}[\]\\|]/.test(pattern);
+}
+
+function matchSimpleBashPattern(pattern: string, command: string): boolean {
+	const trimmedPattern = pattern.trim();
+	const trimmedCommand = command.trim();
+	if (!trimmedPattern) return false;
+
+	// Readable shorthand: "rg *" -> command prefix "rg"
+	if (trimmedPattern.endsWith(" *")) {
+		const prefix = trimmedPattern.slice(0, -2).trim();
+		if (!prefix) return false;
+		return trimmedCommand === prefix || trimmedCommand.startsWith(`${prefix} `);
+	}
+
+	// Readable shorthand: "rg" -> word boundary match (equivalent to /\brg\b/i)
+	if (!trimmedPattern.includes(" ")) {
+		const escaped = trimmedPattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		return new RegExp(`\\b${escaped}\\b`, "i").test(command);
+	}
+
+	// Fallback: literal substring for multi-word readable entries
+	return command.toLowerCase().includes(trimmedPattern.toLowerCase());
+}
+
+function ruleMatch(rule: Rule, toolName: string, target: string): boolean {
+	const pattern = rule.match;
+	if (pattern === undefined) return true;
+
+	// Keep regex support for advanced rules.
+	if (hasRegexMeta(pattern)) {
+		try {
+			return new RegExp(pattern, "i").test(target);
+		} catch {
+			return false;
+		}
+	}
+
+	// Shorthand matcher for bash readability (e.g. "rg", "rg *")
+	if (toolName === "bash") {
+		return matchSimpleBashPattern(pattern, target);
+	}
+
+	// Non-bash readable fallback: case-insensitive substring
+	return target.toLowerCase().includes(pattern.toLowerCase());
+}
+
 /** Returns the first rule that matches, or undefined if none match. */
 function matchRule(rules: Rule[], toolName: string, input: Record<string, unknown>): Rule | undefined {
 	const target = getMatchTarget(toolName, input);
 
 	for (const rule of rules) {
 		if (rule.tool !== "*" && rule.tool !== toolName) continue;
-
 		if (rule.match !== undefined) {
 			if (target === undefined) continue;
-			try {
-				if (!new RegExp(rule.match, "i").test(target)) continue;
-			} catch {
-				continue;
-			}
+			if (!ruleMatch(rule, toolName, target)) continue;
 		}
-
 		return rule;
 	}
 
@@ -1480,4 +1524,8 @@ export const __test__ = {
 	isComplexBashCommand,
 	detectDangerousBashPattern,
 	sandboxFallbackModeForPolicy,
+	hasRegexMeta,
+	matchSimpleBashPattern,
+	ruleMatch,
+	matchRule,
 };

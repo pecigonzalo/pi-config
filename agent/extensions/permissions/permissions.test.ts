@@ -145,3 +145,24 @@ describe("bash complexity and fallback", () => {
 		expect(__test__.sandboxFallbackModeForPolicy("full-access")).toBe("normal");
 	});
 });
+
+describe("simple matcher shorthand", () => {
+	it("treats bash 'rg' as word-boundary shorthand", () => {
+		const rule = { tool: "bash", match: "rg", action: "allow" as const };
+		expect(__test__.ruleMatch(rule, "bash", "rg foo src")).toBe(true);
+		expect(__test__.ruleMatch(rule, "bash", "xrg foo src")).toBe(false);
+	});
+
+	it("treats bash 'rg *' as command-prefix shorthand", () => {
+		const rule = { tool: "bash", match: "rg *", action: "allow" as const };
+		expect(__test__.ruleMatch(rule, "bash", "rg foo src")).toBe(true);
+		expect(__test__.ruleMatch(rule, "bash", "rg")).toBe(true);
+		expect(__test__.ruleMatch(rule, "bash", "grep foo src")).toBe(false);
+	});
+
+	it("keeps regex behavior when regex metacharacters are used", () => {
+		const rule = { tool: "bash", match: "^git\\b", action: "allow" as const };
+		expect(__test__.ruleMatch(rule, "bash", "git status")).toBe(true);
+		expect(__test__.ruleMatch(rule, "bash", "xgit status")).toBe(false);
+	});
+});
