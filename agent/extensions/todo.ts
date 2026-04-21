@@ -521,11 +521,11 @@ export default function (pi: ExtensionAPI) {
 			"Manage a todo graph. Actions: list, add, update, toggle, read, archive, link, unlink, history, clear, set_wip_limit",
 		promptSnippet: "Track multi-step work with a persistent todo graph.",
 		promptGuidelines: [
-			"Use `todo` for non-trivial requests with multiple meaningful steps, multiple files, or investigation followed by implementation and verification.",
-			"Create or update todos before substantive work so progress stays visible throughout the turn.",
+			"Use `todo` only for genuinely multi-step work where progress tracking is useful, such as investigation followed by implementation and verification, changes spanning multiple files with coordination, or tasks with blockers and dependencies.",
+			"Do not use `todo` for small or straightforward work, including single-file edits, review-and-commit requests, simple checks or verification runs, quick follow-up fixes, or purely conversational responses.",
+			"Before starting complex multi-step work, create or update the relevant todo items so progress stays visible throughout the turn.",
 			"Keep in-progress work focused and update todo status promptly when a task starts, pauses, or finishes.",
 			"Use parent and blocker links when sequencing matters or one task depends on another.",
-			"Skip `todo` for trivial single-step requests or purely conversational answers.",
 		],
 		parameters: TodoParams,
 
