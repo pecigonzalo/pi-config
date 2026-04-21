@@ -151,7 +151,7 @@ interface ApprovalsSettings {
 
 interface ApprovalRecord {
 	tool: string;
-	scopeType: "path-prefix" | "tool";
+	scopeType: "path-prefix" | "tool" | "bash-exact" | "bash-prefix";
 	scopeValue: string;
 	projectRoot?: string;
 	agentName?: string;
@@ -663,6 +663,44 @@ function pruneExpiredApprovals(
 	return approvals.filter((a) => now - a.createdAt <= maxAgeMs);
 }
 
+function isComplexBashCommand(command: string): boolean {
+	// Detect shell chaining, redirection, substitution, and control flow.
+	return /(^|[^\\])(?:&&|\|\||[;|<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/.test(command);
+}
+
+function getBashCommandPrefix(command: string): string | undefined {
+	const trimmed = command.trim();
+	if (!trimmed) return undefined;
+	const m = trimmed.match(/^([^\s;|&<>`$()]+(?:\s+[^\s;|&<>`$()]+)?)/);
+	return m?.[1]?.trim();
+}
+
+function bashApprovalMatches(
+	approval: ApprovalRecord,
+	command: string,
+	projectRoot: string,
+	agentName: string,
+	settings: ReturnType<typeof getApprovalsSettings>,
+): boolean {
+	if (approval.tool !== "bash" && approval.tool !== "*") return false;
+	if (settings.scopeByProject && approval.projectRoot !== projectRoot) return false;
+	if (settings.scopeByAgent && approval.agentName !== agentName) return false;
+	if (approval.scopeType === "bash-exact") return approval.scopeValue === command;
+	if (approval.scopeType === "bash-prefix") return command.startsWith(approval.scopeValue);
+	return false;
+}
+
+function approvalsCoverBash(
+	approvals: ApprovalRecord[],
+	command: string,
+	projectRoot: string,
+	agentName: string,
+	settings: ReturnType<typeof getApprovalsSettings>,
+): boolean {
+	if (!command.trim()) return false;
+	return approvals.some((a) => bashApprovalMatches(a, command, projectRoot, agentName, settings));
+}
+
 // ─── Agent name detection ─────────────────────────────────────────────────────
 
 function detectAgentName(pi: ExtensionAPI): string {
@@ -686,22 +724,23 @@ export default function (pi: ExtensionAPI) {
 		default: false,
 	});
 
-	const localCwd = process.cwd();
-	const localBash = createBashTool(localCwd);
+	const bashToolTemplate = createBashTool(process.cwd());
 	let sandboxManager: any;
 	let sandboxAvailable = false;
 	let sandboxEnabled = false;
 	let sandboxReason = "inactive";
+	let sandboxMode: "normal" | "ask-all-bash" | "block-all-bash" = "normal";
 	let sandboxConfig: SandboxRuntimeConfigLike | undefined;
 
 	pi.registerTool({
-		...localBash,
+		...bashToolTemplate,
 		label: "bash",
 		async execute(id, params, signal, onUpdate, ctx) {
+			const localBash = createBashTool(ctx.cwd);
 			if (!sandboxEnabled || !sandboxAvailable || !sandboxManager) {
 				return localBash.execute(id, params, signal, onUpdate, ctx);
 			}
-			const sandboxedBash = createBashTool(localCwd, {
+			const sandboxedBash = createBashTool(ctx.cwd, {
 				operations: createSandboxedBashOps(sandboxManager),
 			});
 			return sandboxedBash.execute(id, params, signal, onUpdate, ctx);
@@ -715,6 +754,7 @@ export default function (pi: ExtensionAPI) {
 
 	const sessionAllows = new Set<string>();
 	const sessionPathApprovals: ApprovalRecord[] = [];
+	const sessionBashApprovals: ApprovalRecord[] = [];
 	const approvalsFile = path.join(getAgentDir(), "permissions-approvals.json");
 
 	const loadApprovals = () => {
@@ -737,17 +777,20 @@ export default function (pi: ExtensionAPI) {
 
 	async function initializeSandbox(ctx: ExtensionContext) {
 		sandboxEnabled = false;
+		sandboxMode = "normal";
 		sandboxReason = "inactive";
 		sandboxConfig = undefined;
-
-		if ((pi.getFlag("no-sandbox") as boolean) === true) {
-			sandboxReason = "disabled by --no-sandbox";
-			return;
-		}
 
 		const policy = activePolicy(config, agentName);
 		const compiled = compileSandboxConfig(policy, ctx.cwd, config.sandbox);
 		sandboxConfig = compiled.config;
+
+		if ((pi.getFlag("no-sandbox") as boolean) === true) {
+			sandboxReason = "disabled by --no-sandbox";
+			sandboxMode = policy.mode === "plan" ? "block-all-bash" : policy.mode === "workspace-write" ? "ask-all-bash" : "normal";
+			return;
+		}
+
 		if (!compiled.enabled) {
 			sandboxReason = compiled.reason;
 			return;
@@ -755,6 +798,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (process.platform !== "darwin" && process.platform !== "linux") {
 			sandboxReason = `unsupported platform: ${process.platform}`;
+			sandboxMode = policy.mode === "plan" ? "block-all-bash" : policy.mode === "workspace-write" ? "ask-all-bash" : "normal";
 			return;
 		}
 
@@ -765,6 +809,7 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			sandboxAvailable = false;
 			sandboxReason = "backend not installed";
+			sandboxMode = policy.mode === "plan" ? "block-all-bash" : policy.mode === "workspace-write" ? "ask-all-bash" : "normal";
 			if (ctx.hasUI) {
 				ctx.ui.notify("Bash sandbox unavailable: install dependencies in ~/.pi/agent/extensions/permissions/", "warning");
 			}
@@ -774,12 +819,14 @@ export default function (pi: ExtensionAPI) {
 		try {
 			await sandboxManager.initialize(compiled.config);
 			sandboxEnabled = true;
+			sandboxMode = "normal";
 			sandboxReason = compiled.reason;
 			if (ctx.hasUI) {
 				ctx.ui.notify(`Bash sandbox active (${compiled.reason})`, "info");
 			}
 		} catch (err) {
 			sandboxEnabled = false;
+			sandboxMode = policy.mode === "plan" ? "block-all-bash" : policy.mode === "workspace-write" ? "ask-all-bash" : "normal";
 			sandboxReason = `init failed: ${err instanceof Error ? err.message : String(err)}`;
 			if (ctx.hasUI) {
 				ctx.ui.notify(`Bash sandbox failed: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -790,12 +837,14 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		sessionAllows.clear();
 		sessionPathApprovals.length = 0;
+		sessionBashApprovals.length = 0;
 		reload(ctx.cwd);
 		await initializeSandbox(ctx);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
 		reload(ctx.cwd);
+		await initializeSandbox(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -816,6 +865,7 @@ export default function (pi: ExtensionAPI) {
 		toolName: string,
 		input: Record<string, unknown>,
 		note: string | undefined,
+		projectRoot: string,
 		ctx: ExtensionContext,
 	): Promise<{ block: boolean; reason: string } | undefined> {
 		if (!ctx.hasUI) {
@@ -832,6 +882,43 @@ export default function (pi: ExtensionAPI) {
 		if (preview) lines.push(`Details: ${preview}`);
 		if (note)    lines.push(`Note:    ${note}`);
 		lines.push(`Profile: ${agentName}`);
+
+		if (toolName === "bash") {
+			const command = typeof input.command === "string" ? input.command : "";
+			const prefix = getBashCommandPrefix(command);
+			const options = ["Allow once", "Allow exact command for this session", ...(prefix ? ["Allow command prefix for this session"] : []), "Block"];
+			const choice = await ctx.ui.select(`⚠️  Permission required\n\n${lines.join("\n")}`, options);
+
+			if (choice === "Block" || choice === undefined) {
+				return { block: true, reason: "Blocked by user" };
+			}
+
+			if (choice === "Allow exact command for this session") {
+				sessionBashApprovals.push({
+					tool: "bash",
+					scopeType: "bash-exact",
+					scopeValue: command,
+					projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
+					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
+					createdAt: Date.now(),
+				});
+				ctx.ui.notify("✓ Bash exact command allowed for this session", "info");
+			}
+
+			if (choice === "Allow command prefix for this session" && prefix) {
+				sessionBashApprovals.push({
+					tool: "bash",
+					scopeType: "bash-prefix",
+					scopeValue: prefix,
+					projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
+					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
+					createdAt: Date.now(),
+				});
+				ctx.ui.notify(`✓ Bash prefix allowed for this session: ${prefix}`, "info");
+			}
+
+			return undefined;
+		}
 
 		const choice = await ctx.ui.select(`⚠️  Permission required\n\n${lines.join("\n")}`, [
 			"Allow once",
@@ -932,11 +1019,26 @@ export default function (pi: ExtensionAPI) {
 	// ── Main gate ─────────────────────────────────────────────────────────────
 
 	pi.on("tool_call", async (event, ctx) => {
-		if (sessionAllows.has(event.toolName)) return undefined;
-
 		const input = event.input as Record<string, unknown>;
 		const policy = activePolicy(config, agentName);
 		const projectRoot = canonicalizePath(ctx.cwd);
+
+		if (event.toolName === "bash") {
+			const command = typeof input.command === "string" ? input.command : "";
+			const effectiveApprovals = [...persistentApprovals, ...sessionBashApprovals];
+			if (approvalsCoverBash(effectiveApprovals, command, projectRoot, agentName, approvalsSettings)) {
+				return undefined;
+			}
+			if (sandboxMode === "block-all-bash") {
+				return { block: true, reason: `Bash blocked: sandbox unavailable in ${policy.mode} mode` };
+			}
+			if (sandboxMode === "ask-all-bash") {
+				return askPermission(event.toolName, input, "Sandbox unavailable: confirmation required for all bash commands", projectRoot, ctx);
+			}
+		} else if (sessionAllows.has(event.toolName)) {
+			return undefined;
+		}
+
 		const rule = policy.rules.length > 0 ? matchRule(policy.rules, event.toolName, input) : undefined;
 
 		if (rule) {
@@ -947,11 +1049,18 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (rule.action === "ask") {
-				return askPermission(event.toolName, input, rule.reason, ctx);
+				return askPermission(event.toolName, input, rule.reason, projectRoot, ctx);
 			}
 
 			// action === "allow" — still check external path unless opted out
 			if (rule.action === "allow") {
+				if (event.toolName === "bash") {
+					const command = typeof input.command === "string" ? input.command : "";
+					if (isComplexBashCommand(command)) {
+						return askPermission(event.toolName, input, "Complex shell command requires confirmation", projectRoot, ctx);
+					}
+				}
+
 				const epa = rule.externalPathAction ?? "inherit";
 				if (epa === "allow") return undefined; // explicit bypass
 
@@ -994,11 +1103,12 @@ export default function (pi: ExtensionAPI) {
 			const hasAgentOverride = agentName !== "default" && config.agents?.[agentName] !== undefined;
 			const isFullOverride = hasAgentOverride && config.agents![agentName].inherit === false;
 			const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
+			const bashExecutionMode = sandboxEnabled ? "sandboxed" : sandboxMode === "normal" ? "local" : `local (${sandboxMode})`;
 
 			if (!ctx.hasUI) {
 				const summary = rules.map((r) => `[${r.action}] ${r.tool}${r.match ? ` /${r.match}/` : ""}`).join(", ");
 				ctx.ui.notify(
-					`Permissions (${profileLabel}): mode=${mode}, ${summary || "none"}, externalPath: ${externalPath}, sandbox: ${sandboxStatus}, approvals: ${sessionPathApprovals.length} session/${persistentApprovals.length} saved`,
+					`Permissions (${profileLabel}): mode=${mode}, ${summary || "none"}, externalPath: ${externalPath}, sandbox: ${sandboxStatus}, bashMode: ${bashExecutionMode}, approvals: ${sessionPathApprovals.length + sessionBashApprovals.length} session/${persistentApprovals.length} saved`,
 					"info",
 				);
 				return;
@@ -1017,6 +1127,10 @@ export default function (pi: ExtensionAPI) {
 				if (sessionAllows.size > 0) {
 					lines.push("");
 					lines.push(`  ${theme.fg("warning", "Session tool allows:")} ${theme.fg("dim", [...sessionAllows].join(", "))}`);
+				}
+				if (sessionBashApprovals.length > 0) {
+					lines.push("");
+					lines.push(`  ${theme.fg("warning", "Session bash approvals:")} ${theme.fg("dim", `${sessionBashApprovals.length}`)}`);
 				}
 
 				if (sessionPathApprovals.length > 0 || persistentApprovals.length > 0) {
@@ -1048,6 +1162,7 @@ export default function (pi: ExtensionAPI) {
 				const epColor = externalPath === "block" ? "error" : externalPath === "ask" ? "warning" : "dim";
 				lines.push(`  ${theme.fg("muted", "External path:  ")}${theme.fg(epColor, externalPath)}${theme.fg("dim", " (structured tools)")}`);
 				lines.push(`  ${theme.fg("muted", "Bash sandbox:   ")}${theme.fg(sandboxEnabled ? "success" : "dim", sandboxStatus)}`);
+				lines.push(`  ${theme.fg("muted", "Bash exec mode: ")}${theme.fg(sandboxEnabled ? "success" : "warning", bashExecutionMode)}`);
 				if (sandboxConfig?.filesystem) {
 					const fsCfg = sandboxConfig.filesystem;
 					lines.push(`  ${theme.fg("muted", "  denyRead:     ")}${theme.fg("dim", (fsCfg.denyRead ?? []).join(", ") || "(none)")}`);
@@ -1130,6 +1245,7 @@ export default function (pi: ExtensionAPI) {
 			if (resetSession) {
 				sessionAllows.clear();
 				sessionPathApprovals.length = 0;
+				sessionBashApprovals.length = 0;
 			}
 
 			if (resetSaved) {
