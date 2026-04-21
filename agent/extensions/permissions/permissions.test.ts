@@ -135,6 +135,35 @@ describe("bash complexity and fallback", () => {
 		expect(__test__.isComplexBashCommand("echo hi | wc -l")).toBe(true);
 	});
 
+	it("splits simple pipelines but rejects other shell syntax", () => {
+		expect(__test__.splitSimplePipeline("rg foo src | head -10")).toEqual(["rg foo src", "head -10"]);
+		expect(__test__.splitSimplePipeline("find . -type f | rg permissions | head")).toEqual([
+			"find . -type f",
+			"rg permissions",
+			"head",
+		]);
+		expect(__test__.splitSimplePipeline("rg 'foo|bar' src")).toEqual(["rg 'foo|bar' src"]);
+		expect(__test__.splitSimplePipeline("rg foo src && head -10")).toBeUndefined();
+	});
+
+	it("allows pipelines only when every segment is individually allowed", () => {
+		const rules = [
+			{ tool: "bash", match: "rg *", action: "allow" as const },
+			{ tool: "bash", match: "find *", action: "allow" as const },
+			{ tool: "bash", match: "head *", action: "allow" as const },
+			{ tool: "bash", match: "sort *", action: "allow" as const },
+			{ tool: "bash", action: "ask" as const },
+		];
+
+		expect(__test__.isAllowedSimpleBashCommand("rg foo src", rules)).toBe(true);
+		expect(__test__.isAllowedSimpleBashCommand("sed -n 1,10p file", rules)).toBe(false);
+		expect(__test__.isAllowedBashPipeline("rg foo src | head -10", rules)).toBe(true);
+		expect(__test__.isAllowedBashPipeline("find . -type f | rg foo | sort", rules)).toBe(true);
+		expect(__test__.isAllowedBashPipeline("rg foo src | sed -n 1,10p", rules)).toBe(false);
+		expect(__test__.isAllowedBashPipeline("rg foo src | rm -rf tmp", rules)).toBe(false);
+		expect(__test__.isAllowedBashPipeline("rg foo src && head -10", rules)).toBe(false);
+	});
+
 	it("detects dangerous bash patterns", () => {
 		expect(__test__.detectDangerousBashPattern("rm -rf tmp")).toBe("Deletes files");
 		expect(__test__.detectDangerousBashPattern("sudo ls")).toBe("Elevated privileges");

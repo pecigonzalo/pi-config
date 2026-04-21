@@ -14,7 +14,7 @@
  *   2. --agent-name CLI flag
  *   3. Falls back to "default" profile
  *
- * To wire up with the subagent extension, set PI_AGENT_NAME in the spawn env:
+ * To wire up with the task extension, set PI_AGENT_NAME in the spawn env:
  *   proc = spawn(cmd, args, { env: { ...process.env, PI_AGENT_NAME: agent.name } })
  *
  * Config format:
@@ -820,6 +820,12 @@ function dedupeApprovals(approvals: ApprovalRecord[]): ApprovalRecord[] {
 	return result;
 }
 
+function formatApprovalScope(approval: ApprovalRecord): string {
+	if (approval.scopeType === "path-prefix") return approval.scopeValue;
+	if (approval.scopeType === "bash-prefix") return `bash-prefix:${approval.scopeValue} *`;
+	return `${approval.scopeType}:${approval.scopeValue}`;
+}
+
 function pruneExpiredApprovals(
 	approvals: ApprovalRecord[],
 	settings: ReturnType<typeof getApprovalsSettings>,
@@ -841,11 +847,76 @@ function isComplexBashCommand(command: string): boolean {
 	return /(^|[^\\])(?:&&|\|\||[;|<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/.test(command);
 }
 
-function getBashCommandPrefix(command: string): string | undefined {
+function splitSimplePipeline(command: string): string[] | undefined {
 	const trimmed = command.trim();
 	if (!trimmed) return undefined;
-	const m = trimmed.match(/^([^\s;|&<>`$()]+(?:\s+[^\s;|&<>`$()]+)?)/);
-	return m?.[1]?.trim();
+	if (/(^|[^\\])(?:&&|\|\||[;<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/.test(command)) {
+		return undefined;
+	}
+
+	const parts: string[] = [];
+	let current = "";
+	let inSingle = false;
+	let inDouble = false;
+	let escaped = false;
+
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+
+		if (escaped) {
+			current += ch;
+			escaped = false;
+			continue;
+		}
+
+		if (ch === "\\" && !inSingle) {
+			current += ch;
+			escaped = true;
+			continue;
+		}
+
+		if (ch === '"' && !inSingle) {
+			inDouble = !inDouble;
+			current += ch;
+			continue;
+		}
+
+		if (ch === "'" && !inDouble) {
+			inSingle = !inSingle;
+			current += ch;
+			continue;
+		}
+
+		if (ch === "|" && !inSingle && !inDouble) {
+			const segment = current.trim();
+			if (!segment) return undefined;
+			parts.push(segment);
+			current = "";
+			continue;
+		}
+
+		current += ch;
+	}
+
+	if (escaped || inSingle || inDouble) return undefined;
+	const tail = current.trim();
+	if (!tail) return undefined;
+	parts.push(tail);
+	return parts;
+}
+
+function isAllowedSimpleBashCommand(command: string, rules: Rule[]): boolean {
+	const trimmed = command.trim();
+	if (!trimmed) return false;
+	if (detectDangerousBashPattern(trimmed)) return false;
+	const rule = matchRule(rules, "bash", { command: trimmed });
+	return rule?.action === "allow";
+}
+
+function isAllowedBashPipeline(command: string, rules: Rule[]): boolean {
+	const parts = splitSimplePipeline(command);
+	if (!parts || parts.length < 2) return false;
+	return parts.every((part) => isAllowedSimpleBashCommand(part, rules));
 }
 
 function bashApprovalMatches(
@@ -1111,20 +1182,34 @@ export default function (pi: ExtensionAPI) {
 
 		if (toolName === "bash") {
 			const command = typeof input.command === "string" ? input.command : "";
-			const prefix = getBashCommandPrefix(command);
-			const exactRulePreview = `bash:bash-exact:${command}`;
-			const prefixRulePreview = prefix ? `bash:bash-prefix:${prefix}` : undefined;
-			const bashLines = [...lines, `Rule (exact): ${exactRulePreview}`];
-			if (prefixRulePreview) bashLines.push(`Rule (prefix): ${prefixRulePreview}`);
+			const tokens = command.trim().split(/\s+/).filter(Boolean);
+			const prefixCandidates: string[] = [];
+			if (tokens[0]) prefixCandidates.push(tokens[0]);
+			if (tokens[0] && tokens[1] && !tokens[1].startsWith("-")) prefixCandidates.push(`${tokens[0]} ${tokens[1]}`);
+			const uniquePrefixCandidates = dedupeStrings(prefixCandidates);
 
-			const options = ["Allow once", "Allow exact command for this session", ...(prefix ? ["Allow command prefix for this session"] : []), "Block"];
+			const bashLines = [
+				`Command: ${command.length > 120 ? `${command.slice(0, 120)}…` : command}`,
+				`Profile: ${agentName}`,
+			];
+			if (note) bashLines.push(`Note: ${note}`);
+			if (uniquePrefixCandidates.length > 0) {
+				bashLines.push(`Prefix options: ${uniquePrefixCandidates.map((p) => `${p} *`).join(" | ")}`);
+			}
+
+			const prefixOptionToValue = new Map<string, string>();
+			for (const candidate of uniquePrefixCandidates) {
+				prefixOptionToValue.set(`Allow prefix for this session (${candidate} *)`, candidate);
+			}
+			const allowExactLabel = "Allow exact command for this session";
+			const options = ["Allow once", allowExactLabel, ...prefixOptionToValue.keys(), "Block"];
 			const choice = await ctx.ui.select(`⚠️  Permission required\n\n${bashLines.join("\n")}`, options);
 
 			if (choice === "Block" || choice === undefined) {
 				return { block: true, reason: "Blocked by user" };
 			}
 
-			if (choice === "Allow exact command for this session") {
+			if (choice === allowExactLabel) {
 				sessionBashApprovals.push({
 					tool: "bash",
 					scopeType: "bash-exact",
@@ -1133,19 +1218,20 @@ export default function (pi: ExtensionAPI) {
 					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
 					createdAt: Date.now(),
 				});
-				ctx.ui.notify(`✓ Bash session rule added: ${exactRulePreview}`, "info");
+				ctx.ui.notify(`✓ Bash session rule added: bash-exact:${command}`, "info");
 			}
 
-			if (choice === "Allow command prefix for this session" && prefix) {
+			const selectedPrefix = typeof choice === "string" ? prefixOptionToValue.get(choice) : undefined;
+			if (selectedPrefix) {
 				sessionBashApprovals.push({
 					tool: "bash",
 					scopeType: "bash-prefix",
-					scopeValue: prefix,
+					scopeValue: selectedPrefix,
 					projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
 					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
 					createdAt: Date.now(),
 				});
-				ctx.ui.notify(`✓ Bash session rule added: ${prefixRulePreview}`, "info");
+				ctx.ui.notify(`✓ Bash session rule added: bash-prefix:${selectedPrefix} (matches: ${selectedPrefix} *)`, "info");
 			}
 
 			return undefined;
@@ -1291,7 +1377,7 @@ export default function (pi: ExtensionAPI) {
 			if (rule.action === "allow") {
 				if (event.toolName === "bash") {
 					const command = typeof input.command === "string" ? input.command : "";
-					if (isComplexBashCommand(command)) {
+					if (!isAllowedBashPipeline(command, policy.rules) && isComplexBashCommand(command)) {
 						return askPermission(event.toolName, input, "Complex shell command requires confirmation", projectRoot, ctx);
 					}
 				}
@@ -1378,7 +1464,7 @@ export default function (pi: ExtensionAPI) {
 						`${theme.fg("accent", `${persistentApprovals.length} saved`)}`,
 					);
 					for (const approval of persistentApprovals.slice(0, 5)) {
-						const scope = approval.scopeType === "path-prefix" ? approval.scopeValue : `${approval.scopeType}:${approval.scopeValue}`;
+						const scope = formatApprovalScope(approval);
 						const scopeSuffix = [
 							approval.projectRoot ? `project=${approval.projectRoot}` : undefined,
 							approval.agentName ? `agent=${approval.agentName}` : undefined,
@@ -1530,7 +1616,7 @@ export default function (pi: ExtensionAPI) {
 				if (approvalsSettings.scopeByAgent && a.agentName !== agentName) return false;
 				return true;
 			});
-			const format = (a: ApprovalRecord) => `${a.tool}:${a.scopeType}:${a.scopeValue}`;
+			const format = (a: ApprovalRecord) => `${a.tool}:${formatApprovalScope(a)}`;
 
 			if (!ctx.hasUI) {
 				ctx.ui.notify(
@@ -1635,6 +1721,9 @@ export const __test__ = {
 	approvalsCoverPaths,
 	approvalsCoverBash,
 	isComplexBashCommand,
+	splitSimplePipeline,
+	isAllowedSimpleBashCommand,
+	isAllowedBashPipeline,
 	detectDangerousBashPattern,
 	sandboxFallbackModeForPolicy,
 	compileSandboxConfig,
