@@ -217,6 +217,14 @@ interface SandboxRuntimeConfigLike {
 	};
 }
 
+interface SandboxManagerLike {
+	initialize(config: SandboxRuntimeConfigLike): Promise<void>;
+	wrapWithSandbox(command: string): Promise<string>;
+	reset(): Promise<void>;
+}
+
+type ResolvedApprovalsSettings = ReturnType<typeof getApprovalsSettings>;
+
 // ─── Tools that operate on filesystem paths ───────────────────────────────────
 
 const FILESYSTEM_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls"]);
@@ -651,10 +659,10 @@ function compileSandboxConfig(
 	};
 }
 
-function createSandboxedBashOps(SandboxManager: any): BashOperations {
+function createSandboxedBashOps(sandboxManager: SandboxManagerLike): BashOperations {
 	return {
 		async exec(command, cwd, { onData, signal, timeout }) {
-			const wrappedCommand = await SandboxManager.wrapWithSandbox(command);
+			const wrappedCommand = await sandboxManager.wrapWithSandbox(command);
 
 			return new Promise((resolve, reject) => {
 				const child = spawn("bash", ["-c", wrappedCommand], {
@@ -787,7 +795,7 @@ function approvalScopeMatch(
 	targetPath: string,
 	projectRoot: string,
 	agentName: string,
-	settings: ReturnType<typeof getApprovalsSettings>,
+	settings: ResolvedApprovalsSettings,
 ): boolean {
 	if (approval.tool !== toolName && approval.tool !== "*") return false;
 	if (settings.scopeByProject && approval.projectRoot !== projectRoot) return false;
@@ -802,7 +810,7 @@ function approvalsCoverPaths(
 	paths: string[],
 	projectRoot: string,
 	agentName: string,
-	settings: ReturnType<typeof getApprovalsSettings>,
+	settings: ResolvedApprovalsSettings,
 ): boolean {
 	if (paths.length === 0) return true;
 	return paths.every((p) => approvals.some((a) => approvalScopeMatch(a, toolName, p, projectRoot, agentName, settings)));
@@ -828,7 +836,7 @@ function formatApprovalScope(approval: ApprovalRecord): string {
 
 function pruneExpiredApprovals(
 	approvals: ApprovalRecord[],
-	settings: ReturnType<typeof getApprovalsSettings>,
+	settings: ResolvedApprovalsSettings,
 	now = Date.now(),
 ): ApprovalRecord[] {
 	if (!settings.maxAgeDays || settings.maxAgeDays <= 0) return approvals;
@@ -924,7 +932,7 @@ function bashApprovalMatches(
 	command: string,
 	projectRoot: string,
 	agentName: string,
-	settings: ReturnType<typeof getApprovalsSettings>,
+	settings: ResolvedApprovalsSettings,
 ): boolean {
 	if (approval.tool !== "bash" && approval.tool !== "*") return false;
 	if (settings.scopeByProject && approval.projectRoot !== projectRoot) return false;
@@ -939,7 +947,7 @@ function approvalsCoverBash(
 	command: string,
 	projectRoot: string,
 	agentName: string,
-	settings: ReturnType<typeof getApprovalsSettings>,
+	settings: ResolvedApprovalsSettings,
 ): boolean {
 	if (!command.trim()) return false;
 	return approvals.some((a) => bashApprovalMatches(a, command, projectRoot, agentName, settings));
@@ -984,7 +992,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const bashToolTemplate = createBashTool(process.cwd());
-	let sandboxManager: any;
+	let sandboxManager: SandboxManagerLike | undefined;
 	let sandboxAvailable = false;
 	let sandboxEnabled = false;
 	let sandboxReason = "inactive";
