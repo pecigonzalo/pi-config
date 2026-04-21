@@ -85,9 +85,20 @@ import * as path from "node:path";
 export type PermissionMode = "plan" | "workspace-write" | "full-access";
 export type ExternalPathPolicy = "allow" | "ask" | "block";
 
+const FILESYSTEM_TOOL_NAMES = ["read", "write", "edit", "grep", "find", "ls"] as const;
+type FilesystemToolName = (typeof FILESYSTEM_TOOL_NAMES)[number];
+type KnownToolName = "bash" | FilesystemToolName;
+type RuleToolName = KnownToolName | "*" | (string & {});
+type PermissionToolName = Exclude<RuleToolName, "*">;
+
+type PermissionToolInput = {
+	path?: unknown;
+	command?: unknown;
+};
+
 export interface Rule {
 	/** Tool name to match, or "*" for any tool. */
-	tool: string;
+	tool: RuleToolName;
 	/**
 	 * Optional regex pattern. For "bash" matched against the command string.
 	 * For "write", "edit", "read", "grep", "find", "ls" matched against the path.
@@ -168,7 +179,7 @@ interface ApprovalsSettings {
 }
 
 interface ApprovalRecord {
-	tool: string;
+	tool: RuleToolName;
 	scopeType: "path-prefix" | "tool" | "bash-exact" | "bash-prefix";
 	scopeValue: string;
 	projectRoot?: string;
@@ -227,7 +238,11 @@ type ResolvedApprovalsSettings = ReturnType<typeof getApprovalsSettings>;
 
 // ─── Tools that operate on filesystem paths ───────────────────────────────────
 
-const FILESYSTEM_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls"]);
+const FILESYSTEM_TOOLS = new Set<FilesystemToolName>(FILESYSTEM_TOOL_NAMES);
+
+function isFilesystemToolName(toolName: PermissionToolName): toolName is FilesystemToolName {
+	return FILESYSTEM_TOOLS.has(toolName as FilesystemToolName);
+}
 
 // ─── Config loading ───────────────────────────────────────────────────────────
 
@@ -371,18 +386,35 @@ function loadConfig(cwd: string): PermissionsConfig {
 
 // ─── Rule evaluation ──────────────────────────────────────────────────────────
 
+function getCommandInput(input: PermissionToolInput): string | undefined {
+	return typeof input.command === "string" ? input.command : undefined;
+}
+
+function getPathInput(input: PermissionToolInput): string | undefined {
+	return typeof input.path === "string" ? input.path : undefined;
+}
+
+function asPermissionToolInput(input: unknown): PermissionToolInput {
+	if (!input || typeof input !== "object") return {};
+	return input as PermissionToolInput;
+}
+
+function asPermissionToolName(toolName: string): PermissionToolName {
+	return toolName;
+}
+
 /** Returns the string to match patterns against for a given tool call. */
-function getMatchTarget(toolName: string, input: Record<string, unknown>): string | undefined {
+function getMatchTarget(toolName: PermissionToolName, input: PermissionToolInput): string | undefined {
 	switch (toolName) {
 		case "bash":
-			return input.command as string | undefined;
+			return getCommandInput(input);
 		case "write":
 		case "edit":
 		case "read":
 		case "grep":
 		case "find":
 		case "ls":
-			return input.path as string | undefined;
+			return getPathInput(input);
 		default:
 			return undefined;
 	}
@@ -414,7 +446,7 @@ function matchSimpleBashPattern(pattern: string, command: string): boolean {
 	return command.toLowerCase().includes(trimmedPattern.toLowerCase());
 }
 
-function ruleMatch(rule: Rule, toolName: string, target: string): boolean {
+function ruleMatch(rule: Rule, toolName: PermissionToolName, target: string): boolean {
 	const pattern = rule.match;
 	if (pattern === undefined) return true;
 
@@ -437,7 +469,7 @@ function ruleMatch(rule: Rule, toolName: string, target: string): boolean {
 }
 
 /** Returns the first rule that matches, or undefined if none match. */
-function matchRule(rules: Rule[], toolName: string, input: Record<string, unknown>): Rule | undefined {
+function matchRule(rules: Rule[], toolName: PermissionToolName, input: PermissionToolInput): Rule | undefined {
 	const target = getMatchTarget(toolName, input);
 
 	for (const rule of rules) {
@@ -767,8 +799,8 @@ function isPathOutsideCwd(rawPath: string, cwd: string): boolean {
  * that are outside cwd. Bash is intentionally excluded: shell parsing is too
  * fragile for reliable security enforcement. Use a sandbox backend for bash.
  */
-function getExternalPaths(toolName: string, input: Record<string, unknown>, cwd: string): string[] {
-	if (!FILESYSTEM_TOOLS.has(toolName)) return [];
+function getExternalPaths(toolName: PermissionToolName, input: PermissionToolInput, cwd: string): string[] {
+	if (!isFilesystemToolName(toolName)) return [];
 
 	const target = getMatchTarget(toolName, input);
 	if (!target || !isPathOutsideCwd(target, cwd)) return [];
@@ -791,7 +823,7 @@ function getApprovalsSettings(config: PermissionsConfig): Required<Pick<Approval
 
 function approvalScopeMatch(
 	approval: ApprovalRecord,
-	toolName: string,
+	toolName: PermissionToolName,
 	targetPath: string,
 	projectRoot: string,
 	agentName: string,
@@ -806,7 +838,7 @@ function approvalScopeMatch(
 
 function approvalsCoverPaths(
 	approvals: ApprovalRecord[],
-	toolName: string,
+	toolName: PermissionToolName,
 	paths: string[],
 	projectRoot: string,
 	agentName: string,
@@ -1167,8 +1199,8 @@ export default function (pi: ExtensionAPI) {
 	// ── Ask helper ────────────────────────────────────────────────────────────
 
 	async function askPermission(
-		toolName: string,
-		input: Record<string, unknown>,
+		toolName: PermissionToolName,
+		input: PermissionToolInput,
 		note: string | undefined,
 		projectRoot: string,
 		ctx: ExtensionContext,
@@ -1189,7 +1221,7 @@ export default function (pi: ExtensionAPI) {
 		lines.push(`Profile: ${agentName}`);
 
 		if (toolName === "bash") {
-			const command = typeof input.command === "string" ? input.command : "";
+			const command = getCommandInput(input) ?? "";
 			const tokens = command.trim().split(/\s+/).filter(Boolean);
 			const prefixCandidates: string[] = [];
 			if (tokens[0]) prefixCandidates.push(tokens[0]);
@@ -1267,8 +1299,8 @@ export default function (pi: ExtensionAPI) {
 
 	async function applyExternalPathPolicy(
 		policy: "ask" | "block",
-		toolName: string,
-		input: Record<string, unknown>,
+		toolName: PermissionToolName,
+		input: PermissionToolInput,
 		externalPaths: string[],
 		projectRoot: string,
 		ctx: ExtensionContext,
@@ -1344,12 +1376,13 @@ export default function (pi: ExtensionAPI) {
 	// ── Main gate ─────────────────────────────────────────────────────────────
 
 	pi.on("tool_call", async (event, ctx) => {
-		const input = event.input as Record<string, unknown>;
+		const input = asPermissionToolInput(event.input);
+		const toolName = asPermissionToolName(event.toolName);
 		const policy = activePolicy(config, agentName);
 		const projectRoot = canonicalizePath(ctx.cwd);
 
-		if (event.toolName === "bash") {
-			const command = typeof input.command === "string" ? input.command : "";
+		if (toolName === "bash") {
+			const command = getCommandInput(input) ?? "";
 			const effectiveApprovals = [...persistentApprovals, ...sessionBashApprovals];
 			if (approvalsCoverBash(effectiveApprovals, command, projectRoot, agentName, approvalsSettings)) {
 				return undefined;
@@ -1358,35 +1391,35 @@ export default function (pi: ExtensionAPI) {
 				return { block: true, reason: `Bash blocked: sandbox unavailable in ${policy.mode} mode` };
 			}
 			if (sandboxMode === "ask-all-bash") {
-				return askPermission(event.toolName, input, "Sandbox unavailable: confirmation required for all bash commands", projectRoot, ctx);
+				return askPermission(toolName, input, "Sandbox unavailable: confirmation required for all bash commands", projectRoot, ctx);
 			}
 			const dangerousReason = detectDangerousBashPattern(command);
 			if (dangerousReason) {
-				return askPermission(event.toolName, input, dangerousReason, projectRoot, ctx);
+				return askPermission(toolName, input, dangerousReason, projectRoot, ctx);
 			}
-		} else if (sessionAllows.has(event.toolName)) {
+		} else if (sessionAllows.has(toolName)) {
 			return undefined;
 		}
 
-		const rule = policy.rules.length > 0 ? matchRule(policy.rules, event.toolName, input) : undefined;
+		const rule = policy.rules.length > 0 ? matchRule(policy.rules, toolName, input) : undefined;
 
 		if (rule) {
 			if (rule.action === "block") {
 				const reason = rule.reason ?? `Blocked by permissions policy (profile: ${agentName})`;
-				if (ctx.hasUI) ctx.ui.notify(`🚫 ${event.toolName}: ${reason}`, "warning");
+				if (ctx.hasUI) ctx.ui.notify(`🚫 ${toolName}: ${reason}`, "warning");
 				return { block: true, reason };
 			}
 
 			if (rule.action === "ask") {
-				return askPermission(event.toolName, input, rule.reason, projectRoot, ctx);
+				return askPermission(toolName, input, rule.reason, projectRoot, ctx);
 			}
 
 			// action === "allow" — still check external path unless opted out
 			if (rule.action === "allow") {
-				if (event.toolName === "bash") {
-					const command = typeof input.command === "string" ? input.command : "";
+				if (toolName === "bash") {
+					const command = getCommandInput(input) ?? "";
 					if (!isAllowedBashPipeline(command, policy.rules) && isComplexBashCommand(command)) {
-						return askPermission(event.toolName, input, "Complex shell command requires confirmation", projectRoot, ctx);
+						return askPermission(toolName, input, "Complex shell command requires confirmation", projectRoot, ctx);
 					}
 				}
 
@@ -1394,11 +1427,11 @@ export default function (pi: ExtensionAPI) {
 				if (epa === "allow") return undefined; // explicit bypass
 
 				const externalPolicy = epa === "inherit" ? policy.externalPath : epa;
-				const externalPaths = externalPolicy === "allow" ? [] : getExternalPaths(event.toolName, input, ctx.cwd);
+				const externalPaths = externalPolicy === "allow" ? [] : getExternalPaths(toolName, input, ctx.cwd);
 				if (externalPolicy !== "allow" && externalPaths.length > 0) {
 					const effectiveApprovals = [...persistentApprovals, ...sessionPathApprovals];
-					if (!approvalsCoverPaths(effectiveApprovals, event.toolName, externalPaths, projectRoot, agentName, approvalsSettings)) {
-						return applyExternalPathPolicy(externalPolicy, event.toolName, input, externalPaths, projectRoot, ctx);
+					if (!approvalsCoverPaths(effectiveApprovals, toolName, externalPaths, projectRoot, agentName, approvalsSettings)) {
+						return applyExternalPathPolicy(externalPolicy, toolName, input, externalPaths, projectRoot, ctx);
 					}
 				}
 				return undefined;
@@ -1407,11 +1440,11 @@ export default function (pi: ExtensionAPI) {
 
 		// No rule matched — check external path policy
 		if (policy.externalPath !== "allow") {
-			const externalPaths = getExternalPaths(event.toolName, input, ctx.cwd);
+			const externalPaths = getExternalPaths(toolName, input, ctx.cwd);
 			if (externalPaths.length > 0) {
 				const effectiveApprovals = [...persistentApprovals, ...sessionPathApprovals];
-				if (!approvalsCoverPaths(effectiveApprovals, event.toolName, externalPaths, projectRoot, agentName, approvalsSettings)) {
-					return applyExternalPathPolicy(policy.externalPath, event.toolName, input, externalPaths, projectRoot, ctx);
+				if (!approvalsCoverPaths(effectiveApprovals, toolName, externalPaths, projectRoot, agentName, approvalsSettings)) {
+					return applyExternalPathPolicy(policy.externalPath, toolName, input, externalPaths, projectRoot, ctx);
 				}
 			}
 		}
