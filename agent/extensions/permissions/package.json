@@ -1,0 +1,9 @@
+{
+  "name": "permissions",
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "^0.0.49"
+  },
+  "pi": {
+    "extensions": ["./permissions.ts"]
+  }
+}

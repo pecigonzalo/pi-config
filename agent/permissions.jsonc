@@ -1,0 +1,227 @@
+{
+  "default": {
+    // Named preset: plan | workspace-write | full-access
+    "mode": "workspace-write",
+    "rules": [
+      // ── Read: protect secrets and credentials ───────────────────────────────
+      // .env.example is safe to read — allow it before the broader .env block
+      {
+        "tool": "read",
+        "match": "\\.env\\.example$",
+        "action": "allow",
+      },
+      // Block .env, .env.local, .env.production, etc.
+      {
+        "tool": "read",
+        "match": "\\.env(\\..+)?$",
+        "action": "block",
+        "reason": "May contain secrets",
+      },
+      // Block private keys and certificates
+      {
+        "tool": "read",
+        "match": "\\.(pem|key|p12|pfx|crt|ca-bundle)$",
+        "action": "block",
+        "reason": "Private key or certificate",
+      },
+      // Block ~/.aws/credentials, ~/.ssh/*, etc.
+      {
+        "tool": "read",
+        "match": "(^|[/])(\\.aws[/]|\\.ssh[/])",
+        "action": "block",
+        "reason": "Credentials directory",
+      },
+      // ── Write / Edit: protect secrets and git internals ─────────────────────
+      // Note: enforcing "local repo only" for write/edit requires cwd context
+      // which the current rule engine does not have. Add an explicit block for
+      // out-of-project absolute paths in a project-local .pi/permissions.json
+      // if needed.
+      {
+        "tool": "write",
+        "match": "\\.env\\.example$",
+        "action": "allow",
+      },
+      {
+        "tool": "write",
+        "match": "\\.env(\\..+)?$",
+        "action": "block",
+        "reason": "Env file protected",
+      },
+      {
+        "tool": "write",
+        "match": "\\.(pem|key|p12|pfx)$",
+        "action": "block",
+        "reason": "Key file protected",
+      },
+      {
+        "tool": "write",
+        "match": "(^|[/])\\.git[/]",
+        "action": "block",
+        "reason": "Git internals",
+      },
+      {
+        "tool": "edit",
+        "match": "\\.env\\.example$",
+        "action": "allow",
+      },
+      {
+        "tool": "edit",
+        "match": "\\.env(\\..+)?$",
+        "action": "block",
+        "reason": "Env file protected",
+      },
+      {
+        "tool": "edit",
+        "match": "\\.(pem|key|p12|pfx)$",
+        "action": "block",
+        "reason": "Key file protected",
+      },
+      {
+        "tool": "edit",
+        "match": "(^|[/])\\.git[/]",
+        "action": "block",
+        "reason": "Git internals",
+      },
+      // ── Bash: safe read-only and informational commands → allow ─────────────
+      {
+        "tool": "bash",
+        "match": "^(cat|rg|find|wc|grep|head|uniq|ls|sort|tail|tee|echo|pwd|which|file|diff|stat|du|df|date|uname|env|printenv|type|true|false)\\b",
+        "action": "allow",
+      },
+      {
+        "tool": "bash",
+        "match": "^cp\\b",
+        "action": "allow",
+      },
+      // ── Bash: git — ask before history-rewriting or remote-pushing ops ──────
+      {
+        "tool": "bash",
+        "match": "\\bgit\\s+push\\b",
+        "action": "ask",
+        "reason": "Pushes to remote",
+      },
+      {
+        "tool": "bash",
+        "match": "\\bgit\\s+reset\\s+--hard\\b",
+        "action": "ask",
+        "reason": "Destructive history reset",
+      },
+      {
+        "tool": "bash",
+        "match": "^git\\b",
+        "action": "allow",
+      },
+      // ── Bash: common build / test / package-manager commands → allow ─────────
+      {
+        "tool": "bash",
+        "match": "^(go|gofmt|golangci-lint|govulncheck)\\b",
+        "action": "allow",
+      },
+      {
+        "tool": "bash",
+        "match": "^(node|npm|npx|bun|bunx|yarn|pnpm|corepack)\\b",
+        "action": "allow",
+      },
+      {
+        "tool": "bash",
+        "match": "^(python3?|pip3?|uv|ruff|mypy|pytest|poetry)\\b",
+        "action": "allow",
+      },
+      {
+        "tool": "bash",
+        "match": "^(cargo|rustc|rustfmt|clippy)\\b",
+        "action": "allow",
+      },
+      {
+        "tool": "bash",
+        "match": "^(make|task|just)\\b",
+        "action": "allow",
+      },
+      {
+        "tool": "bash",
+        "match": "^(terraform|tofu)\\s+(init|plan|validate|fmt|show|output|state\\s+list)\\b",
+        "action": "allow",
+      },
+      {
+        "tool": "bash",
+        "match": "^(terraform|tofu)\\s+(apply|destroy|import|workspace\\s+(new|delete))\\b",
+        "action": "ask",
+        "reason": "Modifies infrastructure state",
+      },
+      // ── Bash: ask before destructive or privileged operations ───────────────
+      {
+        "tool": "bash",
+        "match": "\\brm\\b",
+        "action": "ask",
+        "reason": "Deletes files",
+      },
+      {
+        "tool": "bash",
+        "match": "\\bmv\\b",
+        "action": "ask",
+        "reason": "Moves or renames",
+      },
+      {
+        "tool": "bash",
+        "match": "\\bsudo\\b",
+        "action": "ask",
+        "reason": "Elevated privileges",
+      },
+      {
+        "tool": "bash",
+        "match": "\\b(chmod|chown)\\b",
+        "action": "ask",
+        "reason": "Changes permissions or ownership",
+      },
+      {
+        "tool": "bash",
+        "match": "\\bkill\\b",
+        "action": "ask",
+        "reason": "Terminates processes",
+      },
+      {
+        "tool": "bash",
+        "match": "\\bcurl\\b.+(-X\\s*(POST|PUT|DELETE|PATCH)|--request\\s+(POST|PUT|DELETE|PATCH))",
+        "action": "ask",
+        "reason": "HTTP write operation",
+      },
+      // ── Bash: catch-all — ask for anything not explicitly matched ────────────
+      // Mirrors opencode's safe default of asking before unknown commands.
+      // Add explicit `allow` rules in .pi/permissions.json for project-specific tools.
+      {
+        "tool": "bash",
+        "action": "ask",
+      },
+    ],
+    // Restrict structured filesystem tools (read/write/edit/grep/find/ls) to the current project.
+    // Explicit "allow" rules take precedence over this. Bash is not covered here.
+    "externalPath": "ask",
+    "sessionGuard": {
+      "confirmNewSession": true,
+      "confirmSwitchSession": true,
+      "confirmFork": false,
+      "dirtyRepo": "warn",
+    },
+  },
+  // Optional bash sandbox backend. If the sandbox runtime is installed,
+  // workspace-write and plan modes enable it automatically unless disabled.
+  //
+  // "sandbox": {
+  //   "enabled": true,
+  //   "network": true,
+  //   "allowSshAuthSock": true,
+  //   "allowUnixSockets": ["/path/to/ssh-agent.sock"],
+  //   "allowAllUnixSockets": false,
+  //   "allowWrite": ["/tmp"],
+  //   "denyRead": ["~/.ssh", "~/.aws", "~/.gnupg"],
+  //   "denyWrite": [".env", ".env.*", "*.pem", "*.key"]
+  // }
+  "sandbox": {
+    "enabled": true,
+    "allowSshAuthSock": true,
+    "denyRead": [
+      "~/.aws",
+      "~/.gnupg"
+    ],
+  },
+}

@@ -1,0 +1,1042 @@
+/**
+ * Permissions Extension
+ *
+ * A configurable, rule-based permission system for controlling tool access.
+ * Supports default rules, per-agent profile overrides, and an external-path
+ * policy that restricts file operations to the current project directory.
+ *
+ * Config file locations (both are merged; project-local wins on conflict):
+ *   ~/.pi/agent/permissions.jsonc     — global
+ *   .pi/permissions.jsonc             — project-local
+ *
+ * Agent name resolution (first match wins):
+ *   1. PI_AGENT_NAME environment variable
+ *   2. --agent-name CLI flag
+ *   3. Falls back to "default" profile
+ *
+ * To wire up with the subagent extension, set PI_AGENT_NAME in the spawn env:
+ *   proc = spawn(cmd, args, { env: { ...process.env, PI_AGENT_NAME: agent.name } })
+ *
+ * Config format:
+ * {
+ *   "default": {
+ *     "rules": [
+ *       // action: what to do when this rule matches
+ *       // externalPathAction: override the global externalPath policy for a
+ *       //   structured filesystem rule. "inherit" (default) defers to the
+ *       //   global policy; "allow" skips the external-path check entirely.
+ *       { "tool": "read",  "match": "\\.env$", "action": "block", "reason": "Protected" },
+ *       { "tool": "write", "match": "\\.env$", "action": "block", "reason": "Protected" },
+ *       { "tool": "read",  "match": "\\.env\\.example$", "action": "allow", "externalPathAction": "allow" }
+ *     ],
+ *     // What to do when a structured filesystem tool (read/write/edit/grep/find/ls)
+ *     // targets a path outside the current working directory.
+ *     // Bash is intentionally excluded here: shell path extraction is too fragile
+ *     // for reliable enforcement and should be handled by an OS sandbox backend.
+ *     // Explicit "allow" rules with externalPathAction: "allow" bypass this.
+ *     //   "allow"  — no restriction (default)
+ *     //   "ask"    — prompt when path is outside cwd
+ *     //   "block"  — block when path is outside cwd
+ *     "externalPath": "ask"
+ *   },
+ *   "agents": {
+ *     "reviewer": {
+ *       "inherit": false,
+ *       "rules": [...],
+ *       "externalPath": "block"
+ *     }
+ *   }
+ * }
+ *
+ * Rule fields:
+ *   tool               — tool name or "*" for any tool
+ *   match              — optional regex; for bash matches the command string,
+ *                        for other tools matches the path argument
+ *   action             — "allow" | "block" | "ask"
+ *   reason             — optional human-readable string for prompts/notifications
+ *   externalPathAction — "inherit" (default) | "allow" | "ask" | "block"
+ *                        Overrides the global externalPath policy for this rule.
+ *                        Only meaningful for structured filesystem tools when
+ *                        action is "allow". Bash ignores this for now.
+ *
+ * Rules are evaluated in order; the first matching rule wins.
+ * If no rule matches, the externalPath policy is checked for structured
+ * filesystem tools, then the call is allowed.
+ *
+ * Per-agent profiles:
+ *   inherit      — true (default): agent rules are prepended to default rules
+ *                  false: agent rules completely replace default rules
+ *   externalPath — overrides the default externalPath policy for this agent
+ *                  (structured filesystem tools only)
+ */
+
+import { spawn } from "node:child_process";
+import type { ExtensionAPI, ExtensionContext, BashOperations } from "@mariozechner/pi-coding-agent";
+import { createBashTool, getAgentDir } from "@mariozechner/pi-coding-agent";
+import { matchesKey, Key, Text } from "@mariozechner/pi-tui";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+export type PermissionMode = "plan" | "workspace-write" | "full-access";
+export type ExternalPathPolicy = "allow" | "ask" | "block";
+
+export interface Rule {
+	/** Tool name to match, or "*" for any tool. */
+	tool: string;
+	/**
+	 * Optional regex pattern. For "bash" matched against the command string.
+	 * For "write", "edit", "read", "grep", "find", "ls" matched against the path.
+	 * Omit to match all invocations of the tool.
+	 */
+	match?: string;
+	/** What to do when this rule matches. */
+	action: "allow" | "block" | "ask";
+	/** Human-readable reason shown in prompts and block notifications. */
+	reason?: string;
+	/**
+	 * Overrides the global externalPath policy for this specific rule.
+	 * Only meaningful when action is "allow".
+	 *   "inherit" (default) — defer to the global externalPath setting
+	 *   "allow"             — skip the external-path check (e.g. build tools)
+	 *   "ask"               — ask even if the global policy is "allow"
+	 *   "block"             — block even if the global policy is "allow"
+	 */
+	externalPathAction?: "inherit" | "allow" | "ask" | "block";
+}
+
+export interface AgentProfile {
+	/**
+	 * If true (default), these rules are prepended to the default rules.
+	 * If false, these rules completely replace the default rules.
+	 */
+	inherit?: boolean;
+	/** Optional named mode preset for this agent profile. */
+	mode?: PermissionMode;
+	rules?: Rule[];
+	/** Overrides the default externalPath policy for this agent. */
+	externalPath?: ExternalPathPolicy;
+}
+
+export interface PermissionsConfig {
+	default?: {
+		/** Optional named mode preset. Defaults to "workspace-write". */
+		mode?: PermissionMode;
+		rules?: Rule[];
+		/**
+		 * What to do when a structured filesystem tool targets a path outside the
+		 * current working directory. Rules with externalPathAction: "allow"
+		 * bypass this. If omitted, the selected mode supplies the default.
+		 */
+		externalPath?: ExternalPathPolicy;
+	};
+	agents?: Record<string, AgentProfile>;
+	sandbox?: SandboxSettings;
+}
+
+interface EffectivePolicy {
+	mode: PermissionMode;
+	rules: Rule[];
+	externalPath: ExternalPathPolicy;
+}
+
+interface ApprovalRecord {
+	tool: string;
+	pathPrefix: string;
+}
+
+interface ApprovalFile {
+	approvals: ApprovalRecord[];
+}
+
+interface SandboxSettings {
+	enabled?: boolean;
+	network?: boolean;
+	allowSshAuthSock?: boolean;
+	allowUnixSockets?: string[];
+	allowAllUnixSockets?: boolean;
+	allowWrite?: string[];
+	denyRead?: string[];
+	denyWrite?: string[];
+}
+
+interface SandboxRuntimeConfigLike {
+	network?: {
+		allowedDomains?: string[];
+		deniedDomains?: string[];
+		allowUnixSockets?: string[];
+		allowAllUnixSockets?: boolean;
+	};
+	filesystem?: {
+		denyRead?: string[];
+		allowRead?: string[];
+		allowWrite?: string[];
+		denyWrite?: string[];
+	};
+}
+
+// ─── Tools that operate on filesystem paths ───────────────────────────────────
+
+const FILESYSTEM_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls"]);
+
+// ─── Config loading ───────────────────────────────────────────────────────────
+
+function parseJsonc(text: string): unknown {
+	let noComments = "";
+	let inString = false;
+	let stringQuote = "";
+	let escaping = false;
+
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		const next = text[i + 1];
+
+		if (inString) {
+			noComments += ch;
+			if (escaping) {
+				escaping = false;
+			} else if (ch === "\\") {
+				escaping = true;
+			} else if (ch === stringQuote) {
+				inString = false;
+				stringQuote = "";
+			}
+			continue;
+		}
+
+		if (ch === '"' || ch === "'") {
+			inString = true;
+			stringQuote = ch;
+			noComments += ch;
+			continue;
+		}
+
+		if (ch === "/" && next === "/") {
+			while (i < text.length && text[i] !== "\n") i++;
+			if (i < text.length) noComments += "\n";
+			continue;
+		}
+
+		if (ch === "/" && next === "*") {
+			i += 2;
+			while (i < text.length - 1 && !(text[i] === "*" && text[i + 1] === "/")) i++;
+			i++;
+			continue;
+		}
+
+		noComments += ch;
+	}
+
+	let cleaned = "";
+	inString = false;
+	stringQuote = "";
+	escaping = false;
+
+	for (let i = 0; i < noComments.length; i++) {
+		const ch = noComments[i];
+
+		if (inString) {
+			cleaned += ch;
+			if (escaping) {
+				escaping = false;
+			} else if (ch === "\\") {
+				escaping = true;
+			} else if (ch === stringQuote) {
+				inString = false;
+				stringQuote = "";
+			}
+			continue;
+		}
+
+		if (ch === '"' || ch === "'") {
+			inString = true;
+			stringQuote = ch;
+			cleaned += ch;
+			continue;
+		}
+
+		if (ch === ",") {
+			let j = i + 1;
+			while (j < noComments.length && /\s/.test(noComments[j])) j++;
+			if (j < noComments.length && (noComments[j] === "}" || noComments[j] === "]")) {
+				continue;
+			}
+		}
+
+		cleaned += ch;
+	}
+
+	return JSON.parse(cleaned);
+}
+
+/** Reads a .json or .jsonc file with support for comments and trailing commas. */
+function readJsonFile(filePath: string): unknown | undefined {
+	try {
+		const raw = fs.readFileSync(filePath, "utf-8");
+		return parseJsonc(raw);
+	} catch {
+		return undefined;
+	}
+}
+
+function loadConfig(cwd: string): PermissionsConfig {
+	const globalPath = path.join(getAgentDir(), "permissions.jsonc");
+	const projectPath = path.join(cwd, ".pi", "permissions.jsonc");
+
+	const global = readJsonFile(globalPath) as PermissionsConfig | undefined;
+	const project = readJsonFile(projectPath) as PermissionsConfig | undefined;
+
+	return {
+		default: project?.default ?? global?.default,
+		agents: {
+			...(global?.agents ?? {}),
+			...(project?.agents ?? {}),
+		},
+		sandbox: {
+			...(global?.sandbox ?? {}),
+			...(project?.sandbox ?? {}),
+		},
+	};
+}
+
+// ─── Rule evaluation ──────────────────────────────────────────────────────────
+
+/** Returns the string to match patterns against for a given tool call. */
+function getMatchTarget(toolName: string, input: Record<string, unknown>): string | undefined {
+	switch (toolName) {
+		case "bash":
+			return input.command as string | undefined;
+		case "write":
+		case "edit":
+		case "read":
+		case "grep":
+		case "find":
+		case "ls":
+			return input.path as string | undefined;
+		default:
+			return undefined;
+	}
+}
+
+/** Returns the first rule that matches, or undefined if none match. */
+function matchRule(rules: Rule[], toolName: string, input: Record<string, unknown>): Rule | undefined {
+	const target = getMatchTarget(toolName, input);
+
+	for (const rule of rules) {
+		if (rule.tool !== "*" && rule.tool !== toolName) continue;
+
+		if (rule.match !== undefined) {
+			if (target === undefined) continue;
+			try {
+				if (!new RegExp(rule.match, "i").test(target)) continue;
+			} catch {
+				continue;
+			}
+		}
+
+		return rule;
+	}
+
+	return undefined;
+}
+
+function compileModeDefaults(mode: PermissionMode): { rules: Rule[]; externalPath: ExternalPathPolicy } {
+	switch (mode) {
+		case "plan":
+			return {
+				externalPath: "block",
+				rules: [
+					{ tool: "write", action: "block", reason: "Plan mode is read-only" },
+					{ tool: "edit", action: "block", reason: "Plan mode is read-only" },
+					{ tool: "bash", action: "ask", reason: "Plan mode requires confirmation for shell commands" },
+				],
+			};
+		case "full-access":
+			return {
+				externalPath: "allow",
+				rules: [],
+			};
+		case "workspace-write":
+		default:
+			return {
+				externalPath: "ask",
+				rules: [
+					{
+						tool: "bash",
+						action: "ask",
+						reason: "Workspace-write mode requires confirmation for shell commands unless explicitly allowed",
+					},
+				],
+			};
+	}
+}
+
+/** Returns the effective mode/rules/externalPath bundle for the given agent. */
+function activePolicy(config: PermissionsConfig, agentName: string): EffectivePolicy {
+	const defaultMode = config.default?.mode ?? "workspace-write";
+	const defaultCompiled = compileModeDefaults(defaultMode);
+	const defaultRules = [...(config.default?.rules ?? []), ...defaultCompiled.rules];
+	const defaultExternalPath = config.default?.externalPath ?? defaultCompiled.externalPath;
+
+	if (agentName === "default" || !config.agents?.[agentName]) {
+		return {
+			mode: defaultMode,
+			rules: defaultRules,
+			externalPath: defaultExternalPath,
+		};
+	}
+
+	const profile = config.agents[agentName];
+	const profileMode = profile.mode ?? defaultMode;
+	const profileCompiled = compileModeDefaults(profileMode);
+	const profileExternalPath = profile.externalPath ?? (profile.mode ? profileCompiled.externalPath : defaultExternalPath);
+	const profileRules = [...(profile.rules ?? [])];
+
+	if (profile.inherit === false) {
+		return {
+			mode: profileMode,
+			rules: [...profileRules, ...profileCompiled.rules],
+			externalPath: profileExternalPath,
+		};
+	}
+
+	return {
+		mode: profileMode,
+		rules: [...profileRules, ...(config.default?.rules ?? []), ...(profile.mode ? profileCompiled.rules : defaultCompiled.rules)],
+		externalPath: profileExternalPath,
+	};
+}
+
+function compileSandboxConfig(
+	policy: EffectivePolicy,
+	cwd: string,
+	overrides: SandboxSettings | undefined,
+): { enabled: boolean; config: SandboxRuntimeConfigLike; reason: string } {
+	const modeDefaults: Record<PermissionMode, { enabled: boolean; network: boolean; allowWrite: string[] }> = {
+		"plan": { enabled: true, network: false, allowWrite: [] },
+		"workspace-write": { enabled: true, network: true, allowWrite: [cwd, "/tmp"] },
+		"full-access": { enabled: false, network: true, allowWrite: [cwd, "/tmp"] },
+	};
+
+	const modeDefault = modeDefaults[policy.mode];
+	const enabled = overrides?.enabled ?? modeDefault.enabled;
+	const networkEnabled = overrides?.network ?? modeDefault.network;
+	const allowWrite = overrides?.allowWrite ?? modeDefault.allowWrite;
+	const denyRead = overrides?.denyRead ?? ["~/.ssh", "~/.aws", "~/.gnupg"];
+	const denyWrite = overrides?.denyWrite ?? [".env", ".env.*", "*.pem", "*.key"];
+	const socketSet = new Set<string>(overrides?.allowUnixSockets ?? []);
+	if (overrides?.allowSshAuthSock && process.env.SSH_AUTH_SOCK) socketSet.add(process.env.SSH_AUTH_SOCK);
+	const allowUnixSockets = [...socketSet];
+	const allowAllUnixSockets = overrides?.allowAllUnixSockets ?? false;
+
+	return {
+		enabled,
+		reason: enabled ? `mode=${policy.mode}` : `disabled by mode=${policy.mode}`,
+		config: {
+			network: networkEnabled
+				? {
+					allowedDomains: ["*"],
+					deniedDomains: [],
+					allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
+					allowAllUnixSockets: allowAllUnixSockets || undefined,
+				}
+				: {
+					allowedDomains: [],
+					deniedDomains: ["*"],
+					allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
+					allowAllUnixSockets: allowAllUnixSockets || undefined,
+				},
+			filesystem: {
+				denyRead,
+				allowWrite,
+				denyWrite,
+			},
+		},
+	};
+}
+
+function createSandboxedBashOps(SandboxManager: any): BashOperations {
+	return {
+		async exec(command, cwd, { onData, signal, timeout }) {
+			const wrappedCommand = await SandboxManager.wrapWithSandbox(command);
+
+			return new Promise((resolve, reject) => {
+				const child = spawn("bash", ["-c", wrappedCommand], {
+					cwd,
+					detached: true,
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+
+				let timedOut = false;
+				let timeoutHandle: NodeJS.Timeout | undefined;
+
+				if (timeout !== undefined && timeout > 0) {
+					timeoutHandle = setTimeout(() => {
+						timedOut = true;
+						if (child.pid) {
+							try {
+								process.kill(-child.pid, "SIGKILL");
+							} catch {
+								child.kill("SIGKILL");
+							}
+						}
+					}, timeout * 1000);
+				}
+
+				child.stdout?.on("data", onData);
+				child.stderr?.on("data", onData);
+
+				child.on("error", (err) => {
+					if (timeoutHandle) clearTimeout(timeoutHandle);
+					reject(err);
+				});
+
+				const onAbort = () => {
+					if (child.pid) {
+						try {
+							process.kill(-child.pid, "SIGKILL");
+						} catch {
+							child.kill("SIGKILL");
+						}
+					}
+				};
+
+				signal?.addEventListener("abort", onAbort, { once: true });
+
+				child.on("close", (code) => {
+					if (timeoutHandle) clearTimeout(timeoutHandle);
+					signal?.removeEventListener("abort", onAbort);
+
+					if (signal?.aborted) reject(new Error("aborted"));
+					else if (timedOut) reject(new Error(`timeout:${timeout}`));
+					else resolve({ exitCode: code });
+				});
+			});
+		},
+	};
+}
+
+// ─── Path helpers ─────────────────────────────────────────────────────────────
+
+/** Resolves a path token, expanding a leading ~ and stripping pi's leading @. */
+function resolveToken(token: string, cwd: string): string {
+	const clean = token.replace(/^@/, "");
+	if (clean.startsWith("~/") || clean === "~") {
+		return path.join(os.homedir(), clean.slice(1));
+	}
+	return path.resolve(cwd, clean);
+}
+
+/**
+ * Returns true if the given path token resolves outside cwd.
+ * Purely lexical — does not follow symlinks.
+ */
+function isPathOutsideCwd(rawPath: string, cwd: string): boolean {
+	const abs = resolveToken(rawPath, cwd);
+	const base = cwd.endsWith(path.sep) ? cwd : cwd + path.sep;
+	return abs !== cwd && !abs.startsWith(base);
+}
+
+/**
+ * Returns resolved absolute paths referenced by a structured filesystem tool
+ * that are outside cwd. Bash is intentionally excluded: shell parsing is too
+ * fragile for reliable security enforcement. Use a sandbox backend for bash.
+ */
+function getExternalPaths(toolName: string, input: Record<string, unknown>, cwd: string): string[] {
+	if (!FILESYSTEM_TOOLS.has(toolName)) return [];
+
+	const target = getMatchTarget(toolName, input);
+	if (!target || !isPathOutsideCwd(target, cwd)) return [];
+	return [resolveToken(target, cwd)];
+}
+
+function pathMatchesPrefix(target: string, prefix: string): boolean {
+	if (target === prefix) return true;
+	const normalizedPrefix = prefix.endsWith(path.sep) ? prefix : prefix + path.sep;
+	return target.startsWith(normalizedPrefix);
+}
+
+function approvalsCoverPaths(approvals: ApprovalRecord[], toolName: string, paths: string[]): boolean {
+	if (paths.length === 0) return true;
+	return paths.every((p) =>
+		approvals.some((a) => (a.tool === toolName || a.tool === "*") && pathMatchesPrefix(p, a.pathPrefix)),
+	);
+}
+
+function dedupeApprovals(approvals: ApprovalRecord[]): ApprovalRecord[] {
+	const seen = new Set<string>();
+	const result: ApprovalRecord[] = [];
+	for (const a of approvals) {
+		const key = `${a.tool}::${a.pathPrefix}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		result.push(a);
+	}
+	return result;
+}
+
+// ─── Agent name detection ─────────────────────────────────────────────────────
+
+function detectAgentName(pi: ExtensionAPI): string {
+	if (process.env.PI_AGENT_NAME) return process.env.PI_AGENT_NAME;
+	const flagValue = pi.getFlag("agent-name");
+	if (typeof flagValue === "string" && flagValue.length > 0) return flagValue;
+	return "default";
+}
+
+// ─── Extension ────────────────────────────────────────────────────────────────
+
+export default function (pi: ExtensionAPI) {
+	pi.registerFlag("agent-name", {
+		description: "Agent profile name to use for permissions (overrides PI_AGENT_NAME env var)",
+		type: "string",
+		default: "",
+	});
+	pi.registerFlag("no-sandbox", {
+		description: "Disable bash sandboxing even if the sandbox backend is installed",
+		type: "boolean",
+		default: false,
+	});
+
+	const localCwd = process.cwd();
+	const localBash = createBashTool(localCwd);
+	let sandboxManager: any;
+	let sandboxAvailable = false;
+	let sandboxEnabled = false;
+	let sandboxReason = "inactive";
+	let sandboxConfig: SandboxRuntimeConfigLike | undefined;
+
+	pi.registerTool({
+		...localBash,
+		label: "bash",
+		async execute(id, params, signal, onUpdate, ctx) {
+			if (!sandboxEnabled || !sandboxAvailable || !sandboxManager) {
+				return localBash.execute(id, params, signal, onUpdate, ctx);
+			}
+			const sandboxedBash = createBashTool(localCwd, {
+				operations: createSandboxedBashOps(sandboxManager),
+			});
+			return sandboxedBash.execute(id, params, signal, onUpdate, ctx);
+		},
+	});
+
+	let config: PermissionsConfig = {};
+	let agentName = "default";
+	let persistentApprovals: ApprovalRecord[] = [];
+
+	const sessionAllows = new Set<string>();
+	const sessionPathApprovals: ApprovalRecord[] = [];
+	const approvalsFile = path.join(getAgentDir(), "permissions-approvals.json");
+
+	const loadApprovals = () => {
+		const parsed = readJsonFile(approvalsFile) as ApprovalFile | undefined;
+		persistentApprovals = dedupeApprovals(parsed?.approvals ?? []);
+	};
+
+	const saveApprovals = () => {
+		const data: ApprovalFile = { approvals: dedupeApprovals(persistentApprovals) };
+		fs.writeFileSync(approvalsFile, JSON.stringify(data, null, 2) + "\n", "utf-8");
+	};
+
+	const reload = (cwd: string) => {
+		config = loadConfig(cwd);
+		agentName = detectAgentName(pi);
+		loadApprovals();
+	};
+
+	async function initializeSandbox(ctx: ExtensionContext) {
+		sandboxEnabled = false;
+		sandboxReason = "inactive";
+		sandboxConfig = undefined;
+
+		if ((pi.getFlag("no-sandbox") as boolean) === true) {
+			sandboxReason = "disabled by --no-sandbox";
+			return;
+		}
+
+		const policy = activePolicy(config, agentName);
+		const compiled = compileSandboxConfig(policy, ctx.cwd, config.sandbox);
+		sandboxConfig = compiled.config;
+		if (!compiled.enabled) {
+			sandboxReason = compiled.reason;
+			return;
+		}
+
+		if (process.platform !== "darwin" && process.platform !== "linux") {
+			sandboxReason = `unsupported platform: ${process.platform}`;
+			return;
+		}
+
+		try {
+			const mod = await import("@anthropic-ai/sandbox-runtime");
+			sandboxManager = mod.SandboxManager;
+			sandboxAvailable = true;
+		} catch {
+			sandboxAvailable = false;
+			sandboxReason = "backend not installed";
+			if (ctx.hasUI) {
+				ctx.ui.notify("Bash sandbox unavailable: install dependencies in ~/.pi/agent/extensions/permissions/", "warning");
+			}
+			return;
+		}
+
+		try {
+			await sandboxManager.initialize(compiled.config);
+			sandboxEnabled = true;
+			sandboxReason = compiled.reason;
+			if (ctx.hasUI) {
+				ctx.ui.notify(`Bash sandbox active (${compiled.reason})`, "info");
+			}
+		} catch (err) {
+			sandboxEnabled = false;
+			sandboxReason = `init failed: ${err instanceof Error ? err.message : String(err)}`;
+			if (ctx.hasUI) {
+				ctx.ui.notify(`Bash sandbox failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+			}
+		}
+	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		sessionAllows.clear();
+		sessionPathApprovals.length = 0;
+		reload(ctx.cwd);
+		await initializeSandbox(ctx);
+	});
+
+	pi.on("session_tree", async (_event, ctx) => {
+		reload(ctx.cwd);
+	});
+
+	pi.on("session_shutdown", async () => {
+		if (sandboxEnabled && sandboxAvailable && sandboxManager) {
+			try {
+				await sandboxManager.reset();
+			} catch {
+				// ignore cleanup errors
+			}
+		}
+		sandboxEnabled = false;
+		sandboxConfig = undefined;
+	});
+
+	// ── Ask helper ────────────────────────────────────────────────────────────
+
+	async function askPermission(
+		toolName: string,
+		input: Record<string, unknown>,
+		note: string | undefined,
+		ctx: ExtensionContext,
+	): Promise<{ block: boolean; reason: string } | undefined> {
+		if (!ctx.hasUI) {
+			return {
+				block: true,
+				reason: `Requires confirmation for ${toolName} but no UI is available (profile: ${agentName})`,
+			};
+		}
+
+		const target = getMatchTarget(toolName, input);
+		const preview = target ? (target.length > 100 ? `${target.slice(0, 100)}…` : target) : undefined;
+
+		const lines = [`Tool:    ${toolName}`];
+		if (preview) lines.push(`Details: ${preview}`);
+		if (note)    lines.push(`Note:    ${note}`);
+		lines.push(`Profile: ${agentName}`);
+
+		const choice = await ctx.ui.select(`⚠️  Permission required\n\n${lines.join("\n")}`, [
+			"Allow once",
+			"Allow tool for this session",
+			"Block",
+		]);
+
+		if (choice === "Block" || choice === undefined) {
+			return { block: true, reason: "Blocked by user" };
+		}
+
+		if (choice === "Allow tool for this session") {
+			sessionAllows.add(toolName);
+			ctx.ui.notify(`✓ ${toolName} allowed for the rest of this session`, "info");
+		}
+
+		return undefined;
+	}
+
+	// ── External path gate ────────────────────────────────────────────────────
+
+	async function applyExternalPathPolicy(
+		policy: "ask" | "block",
+		toolName: string,
+		input: Record<string, unknown>,
+		externalPaths: string[],
+		ctx: ExtensionContext,
+	): Promise<{ block: boolean; reason: string } | undefined> {
+		if (policy === "block") {
+			const preview = externalPaths[0] ?? getMatchTarget(toolName, input);
+			const reason = `Path is outside the current project${preview ? `: ${preview}` : ""}`;
+			if (ctx.hasUI) ctx.ui.notify(`🚫 ${reason}`, "warning");
+			return { block: true, reason };
+		}
+
+		if (!ctx.hasUI) {
+			return {
+				block: true,
+				reason: `Path is outside the current project and no UI is available (profile: ${agentName})`,
+			};
+		}
+
+		const shown = externalPaths.slice(0, 3);
+		const more = externalPaths.length > shown.length ? `\n  ... +${externalPaths.length - shown.length} more` : "";
+		const lines = [
+			`Tool:    ${toolName}`,
+			`Profile: ${agentName}`,
+			"Paths:",
+			...shown.map((p) => `  ${p}`),
+		];
+		if (more) lines.push(more.trimStart());
+
+		const choice = await ctx.ui.select(`⚠️  External path permission required\n\n${lines.join("\n")}`, [
+			"Allow once",
+			"Allow path for this session",
+			"Allow path permanently",
+			"Block",
+		]);
+
+		if (choice === "Block" || choice === undefined) {
+			return { block: true, reason: "Blocked by user" };
+		}
+
+		if (choice === "Allow path for this session") {
+			sessionPathApprovals.push(...externalPaths.map((p) => ({ tool: toolName, pathPrefix: p })));
+			ctx.ui.notify(`✓ Approved ${externalPaths.length} external path(s) for this session`, "info");
+		}
+
+		if (choice === "Allow path permanently") {
+			persistentApprovals = dedupeApprovals([
+				...persistentApprovals,
+				...externalPaths.map((p) => ({ tool: toolName, pathPrefix: p })),
+			]);
+			saveApprovals();
+			ctx.ui.notify(`✓ Saved ${externalPaths.length} external path approval(s)`, "info");
+		}
+
+		return undefined;
+	}
+
+	// ── Main gate ─────────────────────────────────────────────────────────────
+
+	pi.on("tool_call", async (event, ctx) => {
+		if (sessionAllows.has(event.toolName)) return undefined;
+
+		const input = event.input as Record<string, unknown>;
+		const policy = activePolicy(config, agentName);
+		const rule = policy.rules.length > 0 ? matchRule(policy.rules, event.toolName, input) : undefined;
+
+		if (rule) {
+			if (rule.action === "block") {
+				const reason = rule.reason ?? `Blocked by permissions policy (profile: ${agentName})`;
+				if (ctx.hasUI) ctx.ui.notify(`🚫 ${event.toolName}: ${reason}`, "warning");
+				return { block: true, reason };
+			}
+
+			if (rule.action === "ask") {
+				return askPermission(event.toolName, input, rule.reason, ctx);
+			}
+
+			// action === "allow" — still check external path unless opted out
+			if (rule.action === "allow") {
+				const epa = rule.externalPathAction ?? "inherit";
+				if (epa === "allow") return undefined; // explicit bypass
+
+				const externalPolicy = epa === "inherit" ? policy.externalPath : epa;
+				const externalPaths = externalPolicy === "allow" ? [] : getExternalPaths(event.toolName, input, ctx.cwd);
+				if (externalPolicy !== "allow" && externalPaths.length > 0) {
+					const effectiveApprovals = [...persistentApprovals, ...sessionPathApprovals];
+					if (!approvalsCoverPaths(effectiveApprovals, event.toolName, externalPaths)) {
+						return applyExternalPathPolicy(externalPolicy, event.toolName, input, externalPaths, ctx);
+					}
+				}
+				return undefined;
+			}
+		}
+
+		// No rule matched — check external path policy
+		if (policy.externalPath !== "allow") {
+			const externalPaths = getExternalPaths(event.toolName, input, ctx.cwd);
+			if (externalPaths.length > 0) {
+				const effectiveApprovals = [...persistentApprovals, ...sessionPathApprovals];
+				if (!approvalsCoverPaths(effectiveApprovals, event.toolName, externalPaths)) {
+					return applyExternalPathPolicy(policy.externalPath, event.toolName, input, externalPaths, ctx);
+				}
+			}
+		}
+
+		return undefined;
+	});
+
+	// ── /permissions command ──────────────────────────────────────────────────
+
+	pi.registerCommand("permissions", {
+		description: "Show active permission rules for the current agent profile",
+		handler: async (_args, ctx) => {
+			const policy = activePolicy(config, agentName);
+			const rules = policy.rules;
+			const externalPath = policy.externalPath;
+			const mode = policy.mode;
+			const profileLabel = agentName === "default" ? "default" : agentName;
+			const hasAgentOverride = agentName !== "default" && config.agents?.[agentName] !== undefined;
+			const isFullOverride = hasAgentOverride && config.agents![agentName].inherit === false;
+			const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
+
+			if (!ctx.hasUI) {
+				const summary = rules.map((r) => `[${r.action}] ${r.tool}${r.match ? ` /${r.match}/` : ""}`).join(", ");
+				ctx.ui.notify(
+					`Permissions (${profileLabel}): mode=${mode}, ${summary || "none"}, externalPath: ${externalPath}, sandbox: ${sandboxStatus}, approvals: ${sessionPathApprovals.length} session/${persistentApprovals.length} saved`,
+					"info",
+				);
+				return;
+			}
+
+			await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
+				const lines: string[] = [];
+				const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - s.length));
+
+				lines.push("");
+				lines.push(
+					`  ${theme.fg("accent", "Permissions")}  ${theme.fg("muted", "profile: ")}${theme.fg("toolTitle", profileLabel)}` +
+					(hasAgentOverride ? theme.fg("dim", isFullOverride ? " (override)" : " (+ defaults)") : ""),
+				);
+
+				if (sessionAllows.size > 0) {
+					lines.push("");
+					lines.push(`  ${theme.fg("warning", "Session tool allows:")} ${theme.fg("dim", [...sessionAllows].join(", "))}`);
+				}
+
+				if (sessionPathApprovals.length > 0 || persistentApprovals.length > 0) {
+					lines.push("");
+					lines.push(
+						`  ${theme.fg("muted", "Path approvals:   ")}` +
+						`${theme.fg("warning", `${sessionPathApprovals.length} session`)}` +
+						`${theme.fg("dim", ", ")}` +
+						`${theme.fg("accent", `${persistentApprovals.length} saved`)}`,
+					);
+					for (const approval of persistentApprovals.slice(0, 5)) {
+						lines.push(
+							`  ${theme.fg("dim", "  ↳ ")}${theme.fg("muted", approval.tool)} ${theme.fg("dim", approval.pathPrefix)}`,
+						);
+					}
+					if (persistentApprovals.length > 5) {
+						lines.push(`  ${theme.fg("dim", `  ... ${persistentApprovals.length - 5} more saved approvals`)}`);
+					}
+				}
+
+				// Mode + external path policy
+				lines.push("");
+				lines.push(`  ${theme.fg("muted", "Mode:           ")}${theme.fg("accent", mode)}`);
+				const epColor = externalPath === "block" ? "error" : externalPath === "ask" ? "warning" : "dim";
+				lines.push(`  ${theme.fg("muted", "External path:  ")}${theme.fg(epColor, externalPath)}${theme.fg("dim", " (structured tools)")}`);
+				lines.push(`  ${theme.fg("muted", "Bash sandbox:   ")}${theme.fg(sandboxEnabled ? "success" : "dim", sandboxStatus)}`);
+				if (sandboxConfig?.filesystem) {
+					const fsCfg = sandboxConfig.filesystem;
+					lines.push(`  ${theme.fg("muted", "  denyRead:     ")}${theme.fg("dim", (fsCfg.denyRead ?? []).join(", ") || "(none)")}`);
+					if ((fsCfg.allowRead ?? []).length > 0) {
+						lines.push(`  ${theme.fg("muted", "  allowRead:    ")}${theme.fg("dim", fsCfg.allowRead!.join(", "))}`);
+					}
+					lines.push(`  ${theme.fg("muted", "  allowWrite:   ")}${theme.fg("dim", (fsCfg.allowWrite ?? []).join(", ") || "(none)")}`);
+					lines.push(`  ${theme.fg("muted", "  denyWrite:    ")}${theme.fg("dim", (fsCfg.denyWrite ?? []).join(", ") || "(none)")}`);
+				}
+				if (sandboxConfig?.network) {
+					const netCfg = sandboxConfig.network;
+					lines.push(`  ${theme.fg("muted", "  network:      ")}${theme.fg("dim", `allow=${(netCfg.allowedDomains ?? []).join(", ") || "(none)"} deny=${(netCfg.deniedDomains ?? []).join(", ") || "(none)"}`)}`);
+					if ((netCfg.allowUnixSockets ?? []).length > 0 || netCfg.allowAllUnixSockets) {
+						lines.push(
+							`  ${theme.fg("muted", "  unix sockets: ")}${theme.fg("dim", netCfg.allowAllUnixSockets ? "all" : (netCfg.allowUnixSockets ?? []).join(", "))}`,
+						);
+					}
+				}
+
+				// Rules table
+				lines.push("");
+				if (rules.length === 0) {
+					lines.push(`  ${theme.fg("dim", "No rules configured.")}`);
+				} else {
+					const actionColor = (a: Rule["action"]) =>
+						a === "allow" ? "success" : a === "block" ? "error" : "warning";
+					const actionIcon  = (a: Rule["action"]) =>
+						a === "allow" ? "✓" : a === "block" ? "✗" : "?";
+
+					const toolW  = Math.max(4, ...rules.map((r) => r.tool.length));
+					const matchW = Math.max(5, ...rules.map((r) => (r.match ? r.match.length + 2 : 1)));
+
+					lines.push(
+						`  ${theme.fg("dim", pad("TOOL", toolW + 2))}` +
+						`${theme.fg("dim", pad("MATCH", matchW + 2))}` +
+						`${theme.fg("dim", pad("ACTION", 10))}` +
+						`${theme.fg("dim", "EXT PATH")}`,
+					);
+					lines.push(`  ${theme.fg("borderMuted", "─".repeat(toolW + matchW + 28))}`);
+
+					for (const rule of rules) {
+						const tool    = theme.fg("text",  pad(rule.tool, toolW + 2));
+						const matchStr = rule.match ? `/${rule.match}/` : "-";
+						const match   = theme.fg("muted", pad(matchStr, matchW + 2));
+						const action  = theme.fg(actionColor(rule.action), pad(`${actionIcon(rule.action)} ${rule.action}`, 10));
+						const epa     = rule.externalPathAction ?? "inherit";
+						const epaColor = epa === "allow" ? "success" : epa === "block" ? "error" : epa === "ask" ? "warning" : "dim";
+						const epaStr  = theme.fg(epaColor, epa);
+						const reason  = rule.reason ? theme.fg("dim", `  — ${rule.reason}`) : "";
+						lines.push(`  ${tool}${match}${action}${epaStr}${reason}`);
+					}
+				}
+
+				lines.push("");
+				lines.push(`  ${theme.fg("dim", "Press Escape to close")}`);
+				lines.push("");
+
+				const text = new Text(lines.join("\n"), 0, 0);
+				return {
+					render:      (w: number) => text.render(w),
+					invalidate:  () => text.invalidate(),
+					handleInput: (data: string) => { if (matchesKey(data, Key.escape)) done(); },
+				};
+			});
+		},
+	});
+
+	pi.registerCommand("permissions-reset", {
+		description: "Reset session and/or saved permission approvals",
+		handler: async (args, ctx) => {
+			const trimmed = (args || "").trim().toLowerCase();
+			const resetSession = trimmed === "" || trimmed === "session" || trimmed === "all";
+			const resetSaved = trimmed === "saved" || trimmed === "all";
+
+			if (!resetSession && !resetSaved) {
+				ctx.ui.notify("Usage: /permissions-reset [session|saved|all]", "warning");
+				return;
+			}
+
+			if (resetSession) {
+				sessionAllows.clear();
+				sessionPathApprovals.length = 0;
+			}
+
+			if (resetSaved) {
+				persistentApprovals = [];
+				saveApprovals();
+			}
+
+			const parts: string[] = [];
+			if (resetSession) parts.push("session approvals cleared");
+			if (resetSaved) parts.push("saved approvals cleared");
+			ctx.ui.notify(`Permissions reset: ${parts.join(", ")}`, "info");
+		},
+	});
+
+	pi.registerCommand("permissions-mode", {
+		description: "Show the active permission mode",
+		handler: async (_args, ctx) => {
+			const policy = activePolicy(config, agentName);
+			ctx.ui.notify(`Active permission mode: ${policy.mode}`, "info");
+		},
+	});
+}
