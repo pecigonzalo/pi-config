@@ -1,0 +1,6 @@
+{
+  "name": "task",
+  "pi": {
+    "extensions": ["./subagent.ts"]
+  }
+}
