@@ -10,7 +10,7 @@ import type { ExtensionAPI, ExtensionContext, Theme } from "@mariozechner/pi-cod
 import { matchesKey, Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
-type TodoStatus = "todo" | "in_progress" | "done";
+type TodoStatus = "todo" | "in-progress" | "done";
 type TodoPriority = "low" | "med" | "high";
 type TodoEffort = "S" | "M" | "L";
 
@@ -84,13 +84,13 @@ const TodoParams = Type.Object({
 	addBlockerIds: Type.Optional(Type.Array(Type.Number(), { description: "Blocking todo IDs to add" })),
 	removeBlockerIds: Type.Optional(Type.Array(Type.Number(), { description: "Blocking todo IDs to remove" })),
 	clearParent: Type.Optional(Type.Boolean({ description: "Clear parent relationship" })),
-	toStatus: Type.Optional(StringEnum(["todo", "in_progress", "done"] as const)),
+	toStatus: Type.Optional(StringEnum(["todo", "in-progress", "done"] as const, { description: "Target status for toggle action" })),
 	view: Type.Optional(StringEnum(["default", "tree", "ready"] as const)),
 	includeArchived: Type.Optional(Type.Boolean()),
-	status: Type.Optional(StringEnum(["todo", "in_progress", "done"] as const)),
+	status: Type.Optional(StringEnum(["todo", "in-progress", "done"] as const)),
 	tag: Type.Optional(Type.String()),
 	archived: Type.Optional(Type.Boolean({ description: "Archive (true) or unarchive (false)" })),
-	limit: Type.Optional(Type.Number({ description: "WIP limit for in_progress todos" })),
+	limit: Type.Optional(Type.Number({ description: "WIP limit for in-progress todos" })),
 	historyLimit: Type.Optional(Type.Number({ description: "Max history entries" })),
 });
 
@@ -169,11 +169,13 @@ export default function (pi: ExtensionAPI) {
 		const updated = typeof raw.updatedAt === "string" ? raw.updatedAt : created;
 		const title = typeof raw.title === "string" ? raw.title : typeof raw.text === "string" ? raw.text : `Todo #${raw.id}`;
 		const status: TodoStatus =
-			raw.status === "todo" || raw.status === "in_progress" || raw.status === "done"
+			raw.status === "todo" || raw.status === "in-progress" || raw.status === "done"
 				? raw.status
-				: raw.done === true
-					? "done"
-					: "todo";
+				: raw.status === "in_progress"
+					? "in-progress"
+					: raw.done === true
+						? "done"
+						: "todo";
 		return {
 			id: raw.id,
 			title,
@@ -221,7 +223,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
-	const inProgressCount = () => todos.filter((t) => !t.archived && t.status === "in_progress").length;
+	const inProgressCount = () => todos.filter((t) => !t.archived && t.status === "in-progress").length;
 
 	const unfinishedBlockers = (todo: TodoItem): number[] =>
 		todo.blockerIds.filter((id) => {
@@ -256,9 +258,9 @@ export default function (pi: ExtensionAPI) {
 
 	const isAllowedTransition = (from: TodoStatus, to: TodoStatus): boolean => {
 		if (from === to) return true;
-		if (from === "todo" && to === "in_progress") return true;
-		if (from === "in_progress" && to === "done") return true;
-		if (from === "in_progress" && to === "todo") return true;
+		if (from === "todo" && to === "in-progress") return true;
+		if (from === "in-progress" && to === "done") return true;
+		if (from === "in-progress" && to === "todo") return true;
 		if (from === "done" && to === "todo") return true;
 		return false;
 	};
@@ -266,42 +268,114 @@ export default function (pi: ExtensionAPI) {
 	const cycleStatus = (status: TodoStatus): TodoStatus => {
 		switch (status) {
 			case "todo":
-				return "in_progress";
-			case "in_progress":
+				return "in-progress";
+			case "in-progress":
 				return "done";
 			case "done":
 				return "todo";
 		}
 	};
 
-	const statusLabel = (s: TodoStatus) => (s === "in_progress" ? "in progress" : s);
+	const statusLabel = (s: TodoStatus) => (s === "in-progress" ? "in progress" : s);
 	const byId = (a: TodoItem, b: TodoItem) => a.id - b.id;
-
-	const summaryLine = (t: TodoItem): string => {
-		const statusIcon = t.status === "done" ? "✓" : t.status === "in_progress" ? "▶" : "○";
-		const tags = t.tags.length ? ` [${t.tags.join(",")}]` : "";
-		const archived = t.archived ? " (archived)" : "";
-		return `[${statusIcon}] #${t.id} ${t.title}${tags} (${t.priority}/${t.effort})${archived}`;
+	const priorityText = (priority: TodoPriority) => priority;
+	const effortText = (effort: TodoEffort) => effort;
+	const sep = (theme?: Theme) => (theme ? theme.fg("dim", " · ") : " · ");
+	const colorPriority = (priority: TodoPriority, theme?: Theme) => {
+		if (!theme) return priorityText(priority);
+		if (priority === "high") return theme.fg("error", priorityText(priority));
+		if (priority === "med") return theme.fg("warning", priorityText(priority));
+		return theme.fg("success", priorityText(priority));
+	};
+	const colorEffort = (effort: TodoEffort, theme?: Theme) => {
+		const text = effortText(effort);
+		if (!theme) return text;
+		if (effort === "L") return theme.fg("warning", text);
+		if (effort === "M") return theme.fg("accent", text);
+		return theme.fg("muted", text);
+	};
+	const colorStatusIcon = (status: TodoStatus, theme?: Theme) => {
+		const icon = status === "done" ? "✓" : status === "in-progress" ? "▶" : "○";
+		if (!theme) return icon;
+		if (status === "done") return theme.fg("success", icon);
+		if (status === "in-progress") return theme.fg("accent", icon);
+		return theme.fg("muted", icon);
+	};
+	const styleTitle = (todo: TodoItem, theme?: Theme) => {
+		if (!theme) return todo.title;
+		if (todo.status === "in-progress") return theme.fg("accent", theme.bold(todo.title));
+		if (todo.status === "done") return theme.fg("success", todo.title);
+		return todo.title;
 	};
 
-	const relationshipLines = (t: TodoItem, showParent = true): string[] => {
+	const summaryLine = (t: TodoItem, theme?: Theme): string => {
+		const parts = [
+			`[${colorStatusIcon(t.status, theme)}]`,
+			theme ? theme.fg("accent", `#${t.id}`) : `#${t.id}`,
+			styleTitle(t, theme),
+		];
+		const tags = t.tags.length ? (theme ? theme.fg("dim", `[${t.tags.join(",")}]`) : ` [${t.tags.join(",")}]`) : "";
+		const meta = [colorPriority(t.priority, theme), colorEffort(t.effort, theme)].join(sep(theme));
+		const archived = t.archived ? (theme ? theme.fg("dim", "archived") : "archived") : "";
+		const suffix = [tags, meta, archived].filter(Boolean).join(sep(theme));
+		return `${parts.join(" ")}${suffix ? ` ${suffix}` : ""}`;
+	};
+
+	const relationshipLines = (t: TodoItem, showParent = true, theme?: Theme): string[] => {
 		const lines: string[] = [];
-		if (showParent && t.parentId !== undefined) lines.push(`↳ parent: #${t.parentId}`);
+		const branch = theme ? theme.fg("dim", "↳") : "↳";
+		if (showParent && t.parentId !== undefined) {
+			const label = theme ? theme.fg("muted", "parent") : "parent";
+			const parentId = theme ? theme.fg("accent", `#${t.parentId}`) : `#${t.parentId}`;
+			lines.push(`${branch} ${label}: ${parentId}`);
+		}
 		const blockers = unfinishedBlockers(t);
-		if (blockers.length) lines.push(`↳ blocked by: ${blockers.map((id) => `#${id}`).join(", ")}`);
+		if (blockers.length) {
+			const label = theme ? theme.fg("warning", "blocked by") : "blocked by";
+			const refs = blockers.map((id) => (theme ? theme.fg("accent", `#${id}`) : `#${id}`)).join(", ");
+			lines.push(`${branch} ${label}: ${refs}`);
+		}
 		return lines;
 	};
 
-	const renderFlatTodo = (t: TodoItem, indent = "  ", showParent = true): string[] => [
-		`${indent}${summaryLine(t)}`,
-		...relationshipLines(t, showParent).map((line) => `${indent}  ${line}`),
+	const renderFlatTodo = (t: TodoItem, indent = "  ", showParent = true, theme?: Theme): string[] => [
+		`${indent}${summaryLine(t, theme)}`,
+		...relationshipLines(t, showParent, theme).map((line) => `${indent}  ${line}`),
 	];
+
+	const renderHierarchy = (pool: TodoItem[], theme?: Theme): string[] => {
+		const idSet = new Set(pool.map((t) => t.id));
+		const childMap = new Map<number, TodoItem[]>();
+		for (const item of pool) {
+			if (item.parentId !== undefined && idSet.has(item.parentId)) {
+				const arr = childMap.get(item.parentId) ?? [];
+				arr.push(item);
+				childMap.set(item.parentId, arr.sort(byId));
+			}
+		}
+		const roots = pool.filter((t) => t.parentId === undefined || !idSet.has(t.parentId)).sort(byId);
+		const lines: string[] = [];
+		const walk = (item: TodoItem, prefix: string, childPrefix: string, showParent: boolean) => {
+			lines.push(prefix + summaryLine(item, theme));
+			for (const line of relationshipLines(item, showParent, theme)) lines.push(childPrefix + line);
+			const children = childMap.get(item.id) ?? [];
+			children.forEach((child, index) => {
+				const last = index === children.length - 1;
+				const branch = theme ? theme.fg("dim", last ? "└─ " : "├─ ") : last ? "└─ " : "├─ ";
+				const trunk = theme ? theme.fg("dim", last ? "   " : "│  ") : last ? "   " : "│  ";
+				walk(child, `${childPrefix}${branch}`, `${childPrefix}${trunk}`, false);
+			});
+		};
+		for (const root of roots) walk(root, "", "  ", root.parentId !== undefined && !idSet.has(root.parentId));
+		return lines;
+	};
 
 	const listText = (
 		view: "default" | "tree" | "ready",
 		includeArchived: boolean,
 		status?: TodoStatus,
 		tag?: string,
+		theme?: Theme,
 	): string => {
 		let pool = todos.filter((t) => includeArchived || !t.archived);
 		if (status) pool = pool.filter((t) => t.status === status);
@@ -310,47 +384,56 @@ export default function (pi: ExtensionAPI) {
 
 		if (view === "ready") {
 			const ready = pool.filter((t) => t.status === "todo" && !hasUnfinishedBlockers(t));
-			return ready.length ? ready.flatMap((t) => renderFlatTodo(t)).join("\n") : "No ready todos";
+			return ready.length ? ready.flatMap((t) => renderFlatTodo(t, "  ", true, theme)).join("\n") : "No ready todos";
 		}
 
-		if (view === "tree") {
-			const idSet = new Set(pool.map((t) => t.id));
-			const childMap = new Map<number, TodoItem[]>();
-			for (const item of pool) {
-				if (item.parentId !== undefined && idSet.has(item.parentId)) {
-					const arr = childMap.get(item.parentId) ?? [];
-					arr.push(item);
-					childMap.set(item.parentId, arr.sort(byId));
-				}
-			}
-			const roots = pool.filter((t) => t.parentId === undefined || !idSet.has(t.parentId)).sort(byId);
-			const lines: string[] = [];
-			const walk = (item: TodoItem, prefix: string, childPrefix: string, showParent: boolean) => {
-				lines.push(prefix + summaryLine(item));
-				for (const line of relationshipLines(item, showParent)) lines.push(childPrefix + line);
-				const children = childMap.get(item.id) ?? [];
-				children.forEach((child, index) => {
-					const last = index === children.length - 1;
-					walk(child, `${childPrefix}${last ? "└─ " : "├─ "}`, `${childPrefix}${last ? "   " : "│  "}`, false);
-				});
-			};
-			for (const root of roots) walk(root, "", "  ", root.parentId !== undefined && !idSet.has(root.parentId));
-			return lines.length ? lines.join("\n") : "No todos";
-		}
-
-		const groups: Record<TodoStatus, TodoItem[]> = {
-			todo: pool.filter((t) => t.status === "todo"),
-			in_progress: pool.filter((t) => t.status === "in_progress"),
-			done: pool.filter((t) => t.status === "done"),
-		};
-		const lines: string[] = [];
-		for (const key of ["todo", "in_progress", "done"] as const) {
-			if (groups[key].length === 0) continue;
-			if (lines.length > 0) lines.push("");
-			lines.push(`${statusLabel(key).toUpperCase()} (${groups[key].length})`);
-			for (const t of groups[key]) lines.push(...renderFlatTodo(t));
-		}
+		const lines = renderHierarchy(pool, theme);
 		return lines.length ? lines.join("\n") : "No todos";
+	};
+
+	const handleTodosCommand = async (args: string, ctx: ExtensionContext) => {
+		if (!ctx.hasUI) {
+			ctx.ui.notify("/todos requires interactive mode", "error");
+			return;
+		}
+
+		const tokens = args
+			.trim()
+			.split(/\s+/)
+			.filter(Boolean)
+			.map((t) => t.toLowerCase());
+
+		let view: "default" | "tree" | "ready" = "default";
+		let includeArchived = false;
+		let status: TodoStatus | undefined;
+		let tag: string | undefined;
+		const invalidTokens: string[] = [];
+
+		for (const token of tokens) {
+			if (token === "default" || token === "tree") view = token;
+			else if (token === "ready") view = token;
+			else if (token === "all") includeArchived = true;
+			else if (token === "todo" || token === "done") status = token;
+			else if (token === "in-progress" || token === "in_progress") status = "in-progress";
+			else if (token.startsWith("tag:")) tag = token.slice(4);
+			else invalidTokens.push(token);
+		}
+
+		if (invalidTokens.length > 0) {
+			const label = invalidTokens.length === 1 ? "token" : "tokens";
+			ctx.ui.notify(
+				`Unsupported /todos ${label}: ${invalidTokens.join(", ")}. Usage: /todos [ready] [all] [todo|in-progress|done] [tag:<name>]`,
+				"error",
+			);
+			return;
+		}
+
+		const title = `Todos${includeArchived ? " • all" : ""}${status ? ` • ${statusLabel(status)}` : ""}${tag ? ` • tag:${tag}` : ""}${view === "ready" ? " • ready" : ""}`;
+		await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
+			const text = listText(view, includeArchived, status, tag, theme);
+			const lines = text === "No todos" || text === "No ready todos" ? [] : text.split("\n");
+			return new TodoListComponent(lines, title, theme, () => done());
+		});
 	};
 
 	const snapshot = (action: TodoAction, error?: string): TodoDetails => ({
@@ -370,6 +453,36 @@ export default function (pi: ExtensionAPI) {
 		content: [{ type: "text" as const, text }],
 		details: snapshot(action, error),
 	});
+
+	const allowedParams: Record<TodoAction, Set<string>> = {
+		list: new Set(["view", "includeArchived", "status", "tag"]),
+		add: new Set(["title", "description", "tags", "priority", "effort", "parentId", "blockerIds"]),
+		update: new Set(["id", "title", "description", "tags", "priority", "effort", "parentId", "blockerIds"]),
+		toggle: new Set(["id", "toStatus"]),
+		read: new Set(["id"]),
+		archive: new Set(["id", "archived"]),
+		link: new Set(["id", "parentId", "addBlockerIds"]),
+		unlink: new Set(["id", "clearParent", "removeBlockerIds"]),
+		history: new Set(["id", "historyLimit"]),
+		clear: new Set([]),
+		set_wip_limit: new Set(["limit"]),
+	};
+
+	const validateActionParams = (
+		action: TodoAction,
+		params: Record<string, unknown>,
+	): { ok: true } | { ok: false; result: ReturnType<typeof fail> } => {
+		const invalid = Object.keys(params)
+			.filter((key) => key !== "action" && !allowedParams[action].has(key))
+			.sort();
+		if (invalid.length === 0) return { ok: true };
+		const label = invalid.length === 1 ? "parameter" : "parameters";
+		const names = invalid.join(", ");
+		return {
+			ok: false,
+			result: fail(action, `Error: unsupported ${label} for ${action}: ${names}`, `unsupported ${label} for ${action}: ${names}`),
+		};
+	};
 
 	const validateParentAndBlockers = (
 		todoId: number,
@@ -417,6 +530,9 @@ export default function (pi: ExtensionAPI) {
 		parameters: TodoParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			const actionValidation = validateActionParams(params.action, params as Record<string, unknown>);
+			if (!actionValidation.ok) return actionValidation.result;
+
 			switch (params.action) {
 				case "list": {
 					const view = params.view ?? "default";
@@ -531,12 +647,12 @@ export default function (pi: ExtensionAPI) {
 					}
 					if (prev === nextStatus) return ok("toggle", `Todo #${todo.id} already ${statusLabel(nextStatus)}`);
 
-					if (nextStatus === "in_progress") {
+					if (nextStatus === "in-progress") {
 						const blockers = unfinishedBlockers(todo);
 						if (blockers.length) {
 							return fail("toggle", `Todo #${todo.id} is blocked by ${blockers.map((b) => `#${b}`).join(", ")}`, "unfinished blockers");
 						}
-						if (prev !== "in_progress" && inProgressCount() >= wipLimit) {
+						if (prev !== "in-progress" && inProgressCount() >= wipLimit) {
 							return fail("toggle", `WIP limit reached (${wipLimit}). Finish or pause another in-progress todo first.`, "wip limit reached");
 						}
 					}
@@ -642,7 +758,9 @@ export default function (pi: ExtensionAPI) {
 			let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", String(a.action ?? ""));
 			if (typeof a.id === "number") text += " " + theme.fg("accent", `#${a.id}`);
 			if (typeof a.title === "string") text += " " + theme.fg("dim", `"${a.title}"`);
-			if (typeof a.toStatus === "string") text += " " + theme.fg("muted", `→ ${String(a.toStatus)}`);
+			if (a.action === "toggle" && (a.toStatus === "todo" || a.toStatus === "in-progress" || a.toStatus === "done")) {
+				text += " " + theme.fg("muted", `→ ${statusLabel(a.toStatus)}`);
+			}
 			return new Text(text, 0, 0);
 		},
 
@@ -655,36 +773,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("todos", {
-		description: "Show todos. Usage: /todos [default|tree|ready] [all] [todo|in_progress|done] [tag:<name>]",
-		handler: async (args, ctx) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("/todos requires interactive mode", "error");
-				return;
-			}
-
-			const tokens = args
-				.trim()
-				.split(/\s+/)
-				.filter(Boolean)
-				.map((t) => t.toLowerCase());
-
-			let view: "default" | "tree" | "ready" = "default";
-			let includeArchived = false;
-			let status: TodoStatus | undefined;
-			let tag: string | undefined;
-
-			for (const token of tokens) {
-				if (token === "default" || token === "tree" || token === "ready") view = token;
-				else if (token === "all") includeArchived = true;
-				else if (token === "todo" || token === "in_progress" || token === "done") status = token;
-				else if (token.startsWith("tag:")) tag = token.slice(4);
-			}
-
-			const text = listText(view, includeArchived, status, tag);
-			const lines = text === "No todos" ? [] : text.split("\n");
-			const title = `Todos • ${view}${includeArchived ? " • all" : ""}${status ? ` • ${status}` : ""}${tag ? ` • tag:${tag}` : ""}`;
-
-			await ctx.ui.custom<void>((_tui, theme, _kb, done) => new TodoListComponent(lines, title, theme, () => done()));
-		},
+		description: "Show todos. Usage: /todos [ready] [all] [todo|in-progress|done] [tag:<name>]",
+		handler: handleTodosCommand,
 	});
 }
