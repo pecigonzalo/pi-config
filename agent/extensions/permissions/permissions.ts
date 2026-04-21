@@ -743,6 +743,12 @@ function pruneExpiredApprovals(
 	return approvals.filter((a) => now - a.createdAt <= maxAgeMs);
 }
 
+function sandboxFallbackModeForPolicy(mode: PermissionMode): "normal" | "ask-all-bash" | "block-all-bash" {
+	if (mode === "plan") return "block-all-bash";
+	if (mode === "workspace-write") return "ask-all-bash";
+	return "normal";
+}
+
 function isComplexBashCommand(command: string): boolean {
 	// Detect shell chaining, redirection, substitution, and control flow.
 	return /(^|[^\\])(?:&&|\|\||[;|<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/.test(command);
@@ -882,7 +888,7 @@ export default function (pi: ExtensionAPI) {
 
 		if ((pi.getFlag("no-sandbox") as boolean) === true) {
 			sandboxReason = "disabled by --no-sandbox";
-			sandboxMode = policy.mode === "plan" ? "block-all-bash" : policy.mode === "workspace-write" ? "ask-all-bash" : "normal";
+			sandboxMode = sandboxFallbackModeForPolicy(policy.mode);
 			return;
 		}
 
@@ -893,7 +899,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (process.platform !== "darwin" && process.platform !== "linux") {
 			sandboxReason = `unsupported platform: ${process.platform}`;
-			sandboxMode = policy.mode === "plan" ? "block-all-bash" : policy.mode === "workspace-write" ? "ask-all-bash" : "normal";
+			sandboxMode = sandboxFallbackModeForPolicy(policy.mode);
 			return;
 		}
 
@@ -904,7 +910,7 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			sandboxAvailable = false;
 			sandboxReason = "backend not installed";
-			sandboxMode = policy.mode === "plan" ? "block-all-bash" : policy.mode === "workspace-write" ? "ask-all-bash" : "normal";
+			sandboxMode = sandboxFallbackModeForPolicy(policy.mode);
 			if (ctx.hasUI) {
 				ctx.ui.notify("Bash sandbox unavailable: install dependencies in ~/.pi/agent/extensions/permissions/", "warning");
 			}
@@ -921,7 +927,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		} catch (err) {
 			sandboxEnabled = false;
-			sandboxMode = policy.mode === "plan" ? "block-all-bash" : policy.mode === "workspace-write" ? "ask-all-bash" : "normal";
+			sandboxMode = sandboxFallbackModeForPolicy(policy.mode);
 			sandboxReason = `init failed: ${err instanceof Error ? err.message : String(err)}`;
 			if (ctx.hasUI) {
 				ctx.ui.notify(`Bash sandbox failed: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -1457,3 +1463,16 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 }
+
+export const __test__ = {
+	mergeDefaultConfig,
+	getApprovalsSettings,
+	resolveProtectedResources,
+	isPathOutsideCwd,
+	canonicalizePathToken,
+	approvalsCoverPaths,
+	approvalsCoverBash,
+	isComplexBashCommand,
+	detectDangerousBashPattern,
+	sandboxFallbackModeForPolicy,
+};
