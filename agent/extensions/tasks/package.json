@@ -1,0 +1,6 @@
+{
+  "name": "tasks",
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
