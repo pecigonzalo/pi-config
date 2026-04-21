@@ -701,6 +701,21 @@ function approvalsCoverBash(
 	return approvals.some((a) => bashApprovalMatches(a, command, projectRoot, agentName, settings));
 }
 
+function detectDangerousBashPattern(command: string): string | undefined {
+	const checks: Array<{ re: RegExp; reason: string }> = [
+		{ re: /\brm\b/i, reason: "Deletes files" },
+		{ re: /\bmv\b/i, reason: "Moves or renames" },
+		{ re: /\bsudo\b/i, reason: "Elevated privileges" },
+		{ re: /\b(chmod|chown)\b/i, reason: "Changes permissions or ownership" },
+		{ re: /\bkill\b/i, reason: "Terminates processes" },
+		{ re: /\bcurl\b.+(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|PUT|DELETE|PATCH))/i, reason: "HTTP write operation" },
+	];
+	for (const check of checks) {
+		if (check.re.test(command)) return check.reason;
+	}
+	return undefined;
+}
+
 // ─── Agent name detection ─────────────────────────────────────────────────────
 
 function detectAgentName(pi: ExtensionAPI): string {
@@ -1034,6 +1049,10 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (sandboxMode === "ask-all-bash") {
 				return askPermission(event.toolName, input, "Sandbox unavailable: confirmation required for all bash commands", projectRoot, ctx);
+			}
+			const dangerousReason = detectDangerousBashPattern(command);
+			if (dangerousReason) {
+				return askPermission(event.toolName, input, dangerousReason, projectRoot, ctx);
 			}
 		} else if (sessionAllows.has(event.toolName)) {
 			return undefined;
