@@ -7,7 +7,7 @@
 
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@mariozechner/pi-coding-agent";
-import { matchesKey, Text, truncateToWidth } from "@mariozechner/pi-tui";
+import { matchesKey, Text, truncateToWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 type TodoStatus = "todo" | "in-progress" | "done";
@@ -68,6 +68,11 @@ interface TodoDetails {
 	wipLimit: number;
 	error?: string;
 }
+
+type TodoResult = {
+	content: [{ type: "text"; text: string }];
+	details: TodoDetails;
+};
 
 const TodoParams = Type.Object({
 	action: StringEnum(
@@ -138,6 +143,297 @@ class TodoListComponent {
 		this.cachedLines = out;
 		return out;
 	}
+
+	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+	}
+}
+
+interface TodoBrowserRow {
+	todo: TodoItem;
+	summary: string;
+	details: string[];
+	selectedLabel: string;
+}
+
+type TodoBrowserAction =
+	| { type: "close" }
+	| { type: "read"; id: number }
+	| { type: "toggle"; id: number }
+	| { type: "archive"; id: number };
+
+type TodoDetailField = "title" | "description" | "status" | "priority" | "effort" | "tags";
+
+type TodoDetailAction =
+	| { type: "back"; selectedField: TodoDetailField }
+	| { type: "edit"; id: number; field: TodoDetailField; selectedField: TodoDetailField }
+	| { type: "toggle"; id: number; selectedField: TodoDetailField }
+	| { type: "archive"; id: number; selectedField: TodoDetailField };
+
+class TodoBrowserComponent {
+	private rows: TodoBrowserRow[];
+	private title: string;
+	private theme: Theme;
+	private onAction: (action: TodoBrowserAction) => void;
+	private selectedIndex = 0;
+	private cachedWidth?: number;
+	private cachedLines?: string[];
+
+	constructor(rows: TodoBrowserRow[], title: string, theme: Theme, onAction: (action: TodoBrowserAction) => void) {
+		this.rows = rows;
+		this.title = title;
+		this.theme = theme;
+		this.onAction = onAction;
+	}
+
+	private getSelected(): TodoBrowserRow | undefined {
+		return this.rows[this.selectedIndex];
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+			this.onAction({ type: "close" });
+			return;
+		}
+
+		if (this.rows.length === 0) return;
+
+		if (matchesKey(data, "up") && this.selectedIndex > 0) {
+			this.selectedIndex--;
+			this.invalidate();
+			return;
+		}
+		if (matchesKey(data, "down") && this.selectedIndex < this.rows.length - 1) {
+			this.selectedIndex++;
+			this.invalidate();
+			return;
+		}
+
+		const selected = this.getSelected();
+		if (!selected) return;
+
+		if (matchesKey(data, "enter")) {
+			this.onAction({ type: "read", id: selected.todo.id });
+			return;
+		}
+		if (data === "t") {
+			this.onAction({ type: "toggle", id: selected.todo.id });
+			return;
+		}
+		if (data === "a") {
+			this.onAction({ type: "archive", id: selected.todo.id });
+		}
+	}
+
+	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+
+		const th = this.theme;
+		const out: string[] = [];
+		out.push("");
+		const title = th.fg("accent", ` ${this.title} `);
+		const header = th.fg("borderMuted", "─".repeat(3)) + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - this.title.length - 8)));
+		out.push(truncateToWidth(header, width));
+		out.push("");
+
+		if (this.rows.length === 0) {
+			out.push(truncateToWidth(`  ${th.fg("dim", "No todos")}`, width));
+		} else {
+			out.push(truncateToWidth(`  ${th.fg("dim", "↑↓ select · enter view · t status · a archive · esc close")}`, width));
+			out.push("");
+			this.rows.forEach((row, index) => {
+				const selected = index === this.selectedIndex;
+				const prefix = selected ? th.fg("accent", "› ") : "  ";
+				const summary = truncateToWidth(`${prefix}${row.summary}`, width);
+				out.push(selected ? th.bg("selectedBg", summary) : summary);
+
+				for (const line of row.details) {
+					out.push(truncateToWidth(`    ${line}`, width));
+				}
+			});
+		}
+
+		out.push("");
+		const selected = this.getSelected();
+		if (selected) {
+			out.push(truncateToWidth(`  ${selected.selectedLabel}`, width));
+		}
+		out.push("");
+
+		this.cachedWidth = width;
+		this.cachedLines = out;
+		return out;
+	}
+
+	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+	}
+}
+
+class TodoDetailComponent {
+	private static readonly fields: TodoDetailField[] = ["title", "description", "status", "priority", "effort", "tags"];
+
+	private todo: TodoItem;
+	private theme: Theme;
+	private onAction: (action: TodoDetailAction) => void;
+	private selectedIndex: number;
+	private cachedWidth?: number;
+	private cachedLines?: string[];
+
+	constructor(todo: TodoItem, theme: Theme, selectedField: TodoDetailField, onAction: (action: TodoDetailAction) => void) {
+		this.todo = todo;
+		this.theme = theme;
+		this.onAction = onAction;
+		const index = TodoDetailComponent.fields.indexOf(selectedField);
+		this.selectedIndex = index >= 0 ? index : 0;
+	}
+
+	private get selectedField(): TodoDetailField {
+		return TodoDetailComponent.fields[this.selectedIndex] ?? "title";
+	}
+
+	private statusLabel(status: TodoStatus): string {
+		return status === "in-progress" ? "in progress" : status;
+	}
+
+	private colorStatusIcon(status: TodoStatus): string {
+		const icon = status === "done" ? "✓" : status === "in-progress" ? "▶" : "○";
+		if (status === "done") return this.theme.fg("success", icon);
+		if (status === "in-progress") return this.theme.fg("accent", icon);
+		return this.theme.fg("muted", icon);
+	}
+
+	private colorPriority(priority: TodoPriority): string {
+		if (priority === "high") return this.theme.fg("error", priority);
+		if (priority === "med") return this.theme.fg("warning", priority);
+		return this.theme.fg("success", priority);
+	}
+
+	private colorEffort(effort: TodoEffort): string {
+		if (effort === "L") return this.theme.fg("warning", effort);
+		if (effort === "M") return this.theme.fg("accent", effort);
+		return this.theme.fg("muted", effort);
+	}
+
+	private styleTitle(title: string, status: TodoStatus): string {
+		if (status === "in-progress") return this.theme.fg("accent", this.theme.bold(title));
+		if (status === "done") return this.theme.fg("success", title);
+		return title;
+	}
+
+	private selectPrev(): void {
+		if (this.selectedIndex > 0) {
+			this.selectedIndex--;
+			this.invalidate();
+		}
+	}
+
+	private selectNext(): void {
+		if (this.selectedIndex < TodoDetailComponent.fields.length - 1) {
+			this.selectedIndex++;
+			this.invalidate();
+		}
+	}
+
+	private renderField(width: number, label: string, value: string, selected: boolean): string[] {
+		const th = this.theme;
+		const prefix = selected ? th.fg("accent", "› ") : "  ";
+		const header = truncateToWidth(`${prefix}${th.fg("muted", `${label}`)} ${th.fg("dim", "[editable]")}`, width);
+		const valueIndent = "    ";
+		const wrappedValue = wrapTextWithAnsi(value, Math.max(10, width - valueIndent.length));
+		const valueLines = wrappedValue.length > 0 ? wrappedValue : [th.fg("dim", "(empty)")];
+		return [
+			selected ? th.bg("selectedBg", header) : header,
+			...valueLines.map((line) => {
+				const rendered = truncateToWidth(`${valueIndent}${line}`, width);
+				return selected ? th.bg("selectedBg", rendered) : rendered;
+			}),
+		];
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+			this.onAction({ type: "back", selectedField: this.selectedField });
+			return;
+		}
+		if (matchesKey(data, "up")) {
+			this.selectPrev();
+			return;
+		}
+		if (matchesKey(data, "down")) {
+			this.selectNext();
+			return;
+		}
+		if (matchesKey(data, "enter") || data === "e") {
+			this.onAction({ type: "edit", id: this.todo.id, field: this.selectedField, selectedField: this.selectedField });
+			return;
+		}
+		if (data === "t") {
+			this.onAction({ type: "toggle", id: this.todo.id, selectedField: this.selectedField });
+			return;
+		}
+		if (data === "a") {
+			this.onAction({ type: "archive", id: this.todo.id, selectedField: this.selectedField });
+		}
+	}
+
+	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+
+		const th = this.theme;
+		const out: string[] = [];
+		out.push("");
+		const title = th.fg("accent", ` Todo #${this.todo.id} `);
+		const header = th.fg("borderMuted", "─".repeat(3)) + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 17)));
+		out.push(truncateToWidth(header, width));
+		out.push("");
+		out.push(truncateToWidth(`  ${th.fg("dim", "↑↓ select field · enter/e edit field · t cycle status · a archive · esc back")}`, width));
+		out.push("");
+
+		const rows: Array<{ field: TodoDetailField; label: string; value: string }> = [
+			{ field: "title", label: "Title", value: this.styleTitle(this.todo.title, this.todo.status) },
+			{
+				field: "description",
+				label: "Description",
+				value: this.todo.description?.trim() ? this.todo.description : th.fg("dim", "(empty)"),
+			},
+			{ field: "status", label: "Status", value: this.colorStatusIcon(this.todo.status) + ` ${this.statusLabel(this.todo.status)}` },
+			{ field: "priority", label: "Priority", value: this.colorPriority(this.todo.priority) },
+			{ field: "effort", label: "Effort", value: this.colorEffort(this.todo.effort) },
+			{
+				field: "tags",
+				label: "Tags",
+				value: this.todo.tags.length ? th.fg("dim", `[${this.todo.tags.join(", ")}]`) : th.fg("dim", "(none)"),
+			},
+		];
+
+		rows.forEach((row, index) => {
+			out.push(...this.renderField(width, row.label, row.value, index === this.selectedIndex));
+			out.push("");
+		});
+
+		out.push(truncateToWidth(`  ${th.fg("dim", "Readonly")}`, width));
+		out.push(truncateToWidth(`  ${th.fg("muted", "Parent:")} ${this.todo.parentId !== undefined ? th.fg("accent", `#${this.todo.parentId}`) : th.fg("dim", "(none)")}`, width));
+		out.push(
+			truncateToWidth(
+				`  ${th.fg("muted", "Blockers:")} ${this.todo.blockerIds.length ? this.todo.blockerIds.map((id) => th.fg("accent", `#${id}`)).join(", ") : th.fg("dim", "(none)")}`,
+				width,
+			),
+		);
+		out.push(truncateToWidth(`  ${th.fg("muted", "Archived:")} ${this.todo.archived ? th.fg("dim", "yes") : "no"}`, width));
+		out.push("");
+
+		this.cachedWidth = width;
+		this.cachedLines = out;
+		return out;
+	}
+
+	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+	}
 }
 
 export default function (pi: ExtensionAPI) {
@@ -186,7 +482,7 @@ export default function (pi: ExtensionAPI) {
 			effort: raw.effort === "S" || raw.effort === "M" || raw.effort === "L" ? raw.effort : "M",
 			parentId: typeof raw.parentId === "number" ? raw.parentId : undefined,
 			blockerIds: Array.isArray(raw.blockerIds)
-				? [...new Set(raw.blockerIds.filter((x: unknown) => typeof x === "number"))]
+				? ([...new Set(raw.blockerIds.filter((x: unknown): x is number => typeof x === "number"))] as number[])
 				: [],
 			archived: Boolean(raw.archived),
 			history: Array.isArray(raw.history)
@@ -204,22 +500,29 @@ export default function (pi: ExtensionAPI) {
 		};
 	};
 
+	const applyPersistedDetails = (details: Partial<TodoDetails> | undefined) => {
+		if (!details || !Array.isArray(details.todos)) return;
+		todos = details.todos.map((t) => normalizeTodo(t)).filter((t): t is TodoItem => t !== null);
+		nextId = typeof details.nextId === "number" ? details.nextId : Math.max(0, ...todos.map((t) => t.id)) + 1;
+		wipLimit = typeof details.wipLimit === "number" && details.wipLimit > 0 ? Math.floor(details.wipLimit) : 2;
+	};
+
 	const reconstructState = (ctx: ExtensionContext) => {
 		todos = [];
 		nextId = 1;
 		wipLimit = 2;
 
 		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.type !== "message") continue;
-			const msg = entry.message;
-			if (msg.role !== "toolResult" || msg.toolName !== "todo") continue;
+			if (entry.type === "message") {
+				const msg = entry.message;
+				if (msg.role !== "toolResult" || msg.toolName !== "todo") continue;
+				applyPersistedDetails(msg.details as Partial<TodoDetails> | undefined);
+				continue;
+			}
 
-			const details = msg.details as Partial<TodoDetails> | undefined;
-			if (!details || !Array.isArray(details.todos)) continue;
-
-			todos = details.todos.map((t) => normalizeTodo(t)).filter((t): t is TodoItem => t !== null);
-			nextId = typeof details.nextId === "number" ? details.nextId : Math.max(0, ...todos.map((t) => t.id)) + 1;
-			wipLimit = typeof details.wipLimit === "number" && details.wipLimit > 0 ? Math.floor(details.wipLimit) : 2;
+			if (entry.type === "custom" && entry.customType === "todo-state") {
+				applyPersistedDetails(entry.data as Partial<TodoDetails> | undefined);
+			}
 		}
 	};
 
@@ -391,6 +694,161 @@ export default function (pi: ExtensionAPI) {
 		return lines.length ? lines.join("\n") : "No todos";
 	};
 
+	const buildCommandTitle = (
+		view: "default" | "tree" | "ready",
+		includeArchived: boolean,
+		status?: TodoStatus,
+		tag?: string,
+	) => `Todos${includeArchived ? " • all" : ""}${status ? ` • ${statusLabel(status)}` : ""}${tag ? ` • tag:${tag}` : ""}${view === "ready" ? " • ready" : ""}`;
+
+	const filteredTodoPool = (
+		view: "default" | "tree" | "ready",
+		includeArchived: boolean,
+		status?: TodoStatus,
+		tag?: string,
+	): TodoItem[] => {
+		let pool = todos.filter((t) => includeArchived || !t.archived);
+		if (status) pool = pool.filter((t) => t.status === status);
+		if (tag) pool = pool.filter((t) => t.tags.includes(tag));
+		pool = [...pool].sort(byId);
+		if (view === "ready") return pool.filter((t) => t.status === "todo" && !hasUnfinishedBlockers(t));
+		return pool;
+	};
+
+	const buildTodoBrowserRows = (
+		view: "default" | "tree" | "ready",
+		includeArchived: boolean,
+		status?: TodoStatus,
+		tag?: string,
+		theme?: Theme,
+	): TodoBrowserRow[] => {
+		const pool = filteredTodoPool(view, includeArchived, status, tag);
+		if (view === "ready") {
+			return pool.map((todo) => ({
+				todo,
+				summary: summaryLine(todo, theme),
+				details: relationshipLines(todo, true, theme).map((line) => `  ${line}`),
+				selectedLabel: `${theme ? theme.fg("muted", `#${todo.id}`) : `#${todo.id}`} ${styleTitle(todo, theme)} ${theme ? theme.fg("dim", `(${statusLabel(todo.status)})`) : `(${statusLabel(todo.status)})`}`,
+			}));
+		}
+
+		const idSet = new Set(pool.map((t) => t.id));
+		const childMap = new Map<number, TodoItem[]>();
+		for (const item of pool) {
+			if (item.parentId !== undefined && idSet.has(item.parentId)) {
+				const arr = childMap.get(item.parentId) ?? [];
+				arr.push(item);
+				childMap.set(item.parentId, arr.sort(byId));
+			}
+		}
+		const roots = pool.filter((t) => t.parentId === undefined || !idSet.has(t.parentId)).sort(byId);
+		const rows: TodoBrowserRow[] = [];
+		const walk = (item: TodoItem, prefix: string, childPrefix: string, showParent: boolean) => {
+			rows.push({
+				todo: item,
+				summary: `${prefix}${summaryLine(item, theme)}`,
+				details: relationshipLines(item, showParent, theme).map((line) => `${childPrefix}${line}`),
+				selectedLabel: `${theme ? theme.fg("muted", `#${item.id}`) : `#${item.id}`} ${styleTitle(item, theme)} ${theme ? theme.fg("dim", `(${statusLabel(item.status)})`) : `(${statusLabel(item.status)})`}`,
+			});
+			const children = childMap.get(item.id) ?? [];
+			children.forEach((child, index) => {
+				const last = index === children.length - 1;
+				const branch = last ? "└─ " : "├─ ";
+				const trunk = last ? "   " : "│  ";
+				walk(child, `${childPrefix}${branch}`, `${childPrefix}${trunk}`, false);
+			});
+		};
+		for (const root of roots) walk(root, "", "  ", root.parentId !== undefined && !idSet.has(root.parentId));
+		return rows;
+	};
+
+	const editTodoFieldFromCommand = async (todo: TodoItem, field: TodoDetailField, ctx: ExtensionContext) => {
+		let result: TodoResult | undefined;
+		switch (field) {
+			case "title": {
+				const nextTitle = await ctx.ui.editor(`Title for #${todo.id}`, todo.title);
+				if (nextTitle === undefined) return;
+				const normalizedTitle = nextTitle
+					.split("\n")
+					.map((line) => line.trim())
+					.filter(Boolean)
+					.join(" ");
+				if (normalizedTitle === todo.title) return;
+				if (!normalizedTitle) {
+					ctx.ui.notify("Title cannot be empty", "error");
+					return;
+				}
+				result = updateTodoAction({ id: todo.id, title: normalizedTitle });
+				break;
+			}
+			case "description": {
+				const nextDescription = await ctx.ui.editor(`Description for #${todo.id}`, todo.description ?? "");
+				if (nextDescription === undefined || nextDescription === (todo.description ?? "")) return;
+				result = updateTodoAction({ id: todo.id, description: nextDescription });
+				break;
+			}
+			case "tags": {
+				const nextTags = await ctx.ui.editor(`Tags for #${todo.id} (comma separated)`, todo.tags.join(", "));
+				if (nextTags === undefined) return;
+				const parsed = nextTags
+					.replace(/\n/g, ",")
+					.split(",")
+					.map((tag) => tag.trim())
+					.filter(Boolean);
+				if (parsed.join(",") === todo.tags.join(",")) return;
+				result = updateTodoAction({ id: todo.id, tags: parsed });
+				break;
+			}
+			case "priority": {
+				const nextPriority = await ctx.ui.select(`Priority for #${todo.id}`, ["low", "med", "high"]);
+				if (!nextPriority || nextPriority === todo.priority) return;
+				result = updateTodoAction({ id: todo.id, priority: nextPriority as TodoPriority });
+				break;
+			}
+			case "effort": {
+				const nextEffort = await ctx.ui.select(`Effort for #${todo.id}`, ["S", "M", "L"]);
+				if (!nextEffort || nextEffort === todo.effort) return;
+				result = updateTodoAction({ id: todo.id, effort: nextEffort as TodoEffort });
+				break;
+			}
+			case "status": {
+				const nextStatus = await ctx.ui.select(`Status for #${todo.id}`, ["todo", "in-progress", "done"]);
+				if (!nextStatus || nextStatus === todo.status) return;
+				result = toggleTodoAction(todo.id, nextStatus as TodoStatus);
+				break;
+			}
+		}
+
+		if (result) applyInteractiveResult(result, ctx);
+	};
+
+	const showTodoDetails = async (id: number, ctx: ExtensionContext) => {
+		let selectedField: TodoDetailField = "title";
+		while (true) {
+			const todo = findTodo(id);
+			if (!todo) {
+				ctx.ui.notify(`Todo #${id} not found`, "error");
+				return;
+			}
+
+			const action = await ctx.ui.custom<TodoDetailAction>((_tui, theme, _kb, done) => {
+				return new TodoDetailComponent(todo, theme, selectedField, done);
+			});
+			selectedField = action.selectedField;
+
+			if (action.type === "back") return;
+			if (action.type === "edit") {
+				await editTodoFieldFromCommand(todo, action.field, ctx);
+				continue;
+			}
+			if (action.type === "toggle") {
+				applyInteractiveResult(toggleTodoAction(id), ctx);
+				continue;
+			}
+			applyInteractiveResult(archiveTodoAction(id, !todo.archived), ctx);
+		}
+	};
+
 	const handleTodosCommand = async (args: string, ctx: ExtensionContext) => {
 		if (!ctx.hasUI) {
 			ctx.ui.notify("/todos requires interactive mode", "error");
@@ -428,12 +886,33 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const title = `Todos${includeArchived ? " • all" : ""}${status ? ` • ${statusLabel(status)}` : ""}${tag ? ` • tag:${tag}` : ""}${view === "ready" ? " • ready" : ""}`;
-		await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
-			const text = listText(view, includeArchived, status, tag, theme);
-			const lines = text === "No todos" || text === "No ready todos" ? [] : text.split("\n");
-			return new TodoListComponent(lines, title, theme, () => done());
-		});
+		while (true) {
+			const title = buildCommandTitle(view, includeArchived, status, tag);
+			const action = await ctx.ui.custom<TodoBrowserAction>((_tui, theme, _kb, done) => {
+				return new TodoBrowserComponent(buildTodoBrowserRows(view, includeArchived, status, tag, theme), title, theme, done);
+			});
+
+			if (action.type === "close") return;
+
+			const todo = findTodo(action.id);
+			if (!todo) {
+				ctx.ui.notify(`Todo #${action.id} not found`, "error");
+				continue;
+			}
+
+			if (action.type === "read") {
+				await showTodoDetails(todo.id, ctx);
+				continue;
+			}
+
+			if (action.type === "toggle") {
+				applyInteractiveResult(toggleTodoAction(todo.id), ctx);
+				continue;
+			}
+
+			const nextArchived = !todo.archived;
+			applyInteractiveResult(archiveTodoAction(todo.id, nextArchived), ctx);
+		}
 	};
 
 	const snapshot = (action: TodoAction, error?: string): TodoDetails => ({
@@ -444,13 +923,13 @@ export default function (pi: ExtensionAPI) {
 		error,
 	});
 
-	const ok = (action: TodoAction, text: string) => ({
-		content: [{ type: "text" as const, text }],
+	const ok = (action: TodoAction, text: string): TodoResult => ({
+		content: [{ type: "text", text }],
 		details: snapshot(action),
 	});
 
-	const fail = (action: TodoAction, text: string, error: string) => ({
-		content: [{ type: "text" as const, text }],
+	const fail = (action: TodoAction, text: string, error: string): TodoResult => ({
+		content: [{ type: "text", text }],
 		details: snapshot(action, error),
 	});
 
@@ -511,6 +990,137 @@ export default function (pi: ExtensionAPI) {
 		return { ok: true };
 	};
 
+	const resultText = (result: TodoResult) => {
+		const text = result.content[0];
+		return text?.type === "text" ? text.text : "";
+	};
+
+	const applyInteractiveResult = (result: TodoResult, ctx: ExtensionContext) => {
+		if (result.details.error) {
+			ctx.ui.notify(resultText(result), "error");
+			return;
+		}
+		pi.appendEntry("todo-state", result.details);
+		ctx.ui.notify(resultText(result), "info");
+	};
+
+	const readTodoText = (todo: TodoItem): string =>
+		[
+			`#${todo.id} ${todo.title}`,
+			`Status: ${statusLabel(todo.status)}`,
+			`Priority/Effort: ${todo.priority}/${todo.effort}`,
+			`Tags: ${todo.tags.length ? todo.tags.join(", ") : "(none)"}`,
+			`Parent: ${todo.parentId !== undefined ? `#${todo.parentId}` : "(none)"}`,
+			`Blockers: ${todo.blockerIds.length ? todo.blockerIds.map((id) => `#${id}`).join(", ") : "(none)"}`,
+			`Archived: ${todo.archived ? "yes" : "no"}`,
+			"",
+			"Description:",
+			todo.description?.trim() ? todo.description : "(empty)",
+		].join("\n");
+
+	const updateTodoAction = (params: {
+		id: number;
+		title?: string;
+		description?: string;
+		tags?: string[];
+		priority?: TodoPriority;
+		effort?: TodoEffort;
+		parentId?: number;
+		blockerIds?: number[];
+	}) => {
+		const todo = findTodo(params.id);
+		if (!todo) return fail("update", `Todo #${params.id} not found`, `#${params.id} not found`);
+
+		const nextParentId = params.parentId !== undefined ? params.parentId : todo.parentId;
+		const nextBlockers = params.blockerIds !== undefined ? [...new Set(params.blockerIds)] : [...todo.blockerIds];
+		const validation = validateParentAndBlockers(todo.id, nextParentId, nextBlockers, "update");
+		if (validation.ok === false) return validation.result;
+
+		if (params.title !== undefined) todo.title = params.title;
+		if (params.description !== undefined) todo.description = params.description;
+		if (params.tags !== undefined) todo.tags = params.tags;
+		if (params.priority !== undefined) todo.priority = params.priority;
+		if (params.effort !== undefined) todo.effort = params.effort;
+		if (params.parentId !== undefined) todo.parentId = params.parentId;
+		if (params.blockerIds !== undefined) todo.blockerIds = nextBlockers;
+
+		addHistory(todo, "updated", {
+			title: params.title,
+			description: params.description,
+			tags: params.tags,
+			priority: params.priority,
+			effort: params.effort,
+			parentId: params.parentId,
+			blockerIds: params.blockerIds,
+		});
+		return ok("update", `Updated todo #${todo.id}`);
+	};
+
+	const toggleTodoAction = (id: number, toStatus?: TodoStatus) => {
+		const todo = findTodo(id);
+		if (!todo) return fail("toggle", `Todo #${id} not found`, `#${id} not found`);
+		if (todo.archived) return fail("toggle", `Todo #${todo.id} is archived`, "cannot toggle archived todo");
+
+		const prev = todo.status;
+		const nextStatus = toStatus ?? cycleStatus(prev);
+
+		if (!isAllowedTransition(prev, nextStatus)) {
+			return fail("toggle", `Invalid transition: ${statusLabel(prev)} → ${statusLabel(nextStatus)}`, "invalid transition");
+		}
+		if (prev === nextStatus) return ok("toggle", `Todo #${todo.id} already ${statusLabel(nextStatus)}`);
+
+		if (nextStatus === "in-progress") {
+			const blockers = unfinishedBlockers(todo);
+			if (blockers.length) {
+				return fail("toggle", `Todo #${todo.id} is blocked by ${blockers.map((b) => `#${b}`).join(", ")}`, "unfinished blockers");
+			}
+			if (prev !== "in-progress" && inProgressCount() >= wipLimit) {
+				return fail("toggle", `WIP limit reached (${wipLimit}). Finish or pause another in-progress todo first.`, "wip limit reached");
+			}
+		}
+
+		if (nextStatus === "done") {
+			const blockers = unfinishedBlockers(todo);
+			if (blockers.length) {
+				return fail(
+					"toggle",
+					`Todo #${todo.id} cannot be done while blocked by ${blockers.map((b) => `#${b}`).join(", ")}`,
+					"unfinished blockers",
+				);
+			}
+			if (hasOpenChildren(todo.id)) {
+				return fail("toggle", `Todo #${todo.id} has unfinished children`, "unfinished children");
+			}
+		}
+
+		if (prev === "done" && nextStatus !== "done") {
+			const activeDependents = dependentsOf(todo.id).filter((d) => d.status !== "todo");
+			if (activeDependents.length) {
+				return fail(
+					"toggle",
+					`Cannot reopen #${todo.id}; active dependents: ${activeDependents.map((d) => `#${d.id}`).join(", ")}`,
+					"active dependents",
+				);
+			}
+		}
+
+		todo.status = nextStatus;
+		addHistory(todo, "status_changed", { from: prev, to: nextStatus });
+		return ok("toggle", `Todo #${todo.id} moved ${statusLabel(prev)} → ${statusLabel(nextStatus)}`);
+	};
+
+	const archiveTodoAction = (id: number, archived?: boolean) => {
+		const todo = findTodo(id);
+		if (!todo) return fail("archive", `Todo #${id} not found`, `#${id} not found`);
+		const nextArchived = archived ?? true;
+		if (nextArchived && todo.status !== "done") {
+			return fail("archive", "Only done todos can be archived", "archive requires done status");
+		}
+		todo.archived = nextArchived;
+		addHistory(todo, nextArchived ? "archived" : "unarchived");
+		return ok("archive", `${nextArchived ? "Archived" : "Unarchived"} todo #${todo.id}`);
+	};
+
 	pi.on("session_start", async (_event, ctx) => reconstructState(ctx));
 	pi.on("session_tree", async (_event, ctx) => reconstructState(ctx));
 
@@ -531,7 +1141,7 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			const actionValidation = validateActionParams(params.action, params as Record<string, unknown>);
-			if (!actionValidation.ok) return actionValidation.result;
+			if (actionValidation.ok === false) return actionValidation.result;
 
 			switch (params.action) {
 				case "list": {
@@ -544,9 +1154,9 @@ export default function (pi: ExtensionAPI) {
 					if (!params.title?.trim()) return fail("add", "Error: title required for add", "title required");
 					const id = nextId++;
 					const parentId = params.parentId;
-					const blockerIds = [...new Set(params.blockerIds ?? [])];
+					const blockerIds: number[] = [...new Set((params.blockerIds ?? []) as number[])];
 					const validation = validateParentAndBlockers(id, parentId, blockerIds, "add");
-					if (!validation.ok) return validation.result;
+					if (validation.ok === false) return validation.result;
 
 					const createdAt = now();
 					const todo: TodoItem = {
@@ -571,31 +1181,16 @@ export default function (pi: ExtensionAPI) {
 
 				case "update": {
 					if (params.id === undefined) return fail("update", "Error: id required", "id required");
-					const todo = findTodo(params.id);
-					if (!todo) return fail("update", `Todo #${params.id} not found`, `#${params.id} not found`);
-
-					const nextParentId = params.parentId !== undefined ? params.parentId : todo.parentId;
-					const nextBlockers = params.blockerIds !== undefined ? [...new Set(params.blockerIds)] : [...todo.blockerIds];
-					const validation = validateParentAndBlockers(todo.id, nextParentId, nextBlockers, "update");
-					if (!validation.ok) return validation.result;
-
-					if (params.title !== undefined) todo.title = params.title;
-					if (params.description !== undefined) todo.description = params.description;
-					if (params.tags !== undefined) todo.tags = params.tags;
-					if (params.priority !== undefined) todo.priority = params.priority;
-					if (params.effort !== undefined) todo.effort = params.effort;
-					if (params.parentId !== undefined) todo.parentId = params.parentId;
-					if (params.blockerIds !== undefined) todo.blockerIds = nextBlockers;
-
-					addHistory(todo, "updated", {
+					return updateTodoAction({
+						id: params.id,
 						title: params.title,
+						description: params.description,
 						tags: params.tags,
 						priority: params.priority,
 						effort: params.effort,
 						parentId: params.parentId,
 						blockerIds: params.blockerIds,
 					});
-					return ok("update", `Updated todo #${todo.id}`);
 				}
 
 				case "link": {
@@ -606,7 +1201,7 @@ export default function (pi: ExtensionAPI) {
 					const nextParentId = params.parentId !== undefined ? params.parentId : todo.parentId;
 					const nextBlockers = [...new Set([...(todo.blockerIds ?? []), ...(params.addBlockerIds ?? [])])];
 					const validation = validateParentAndBlockers(todo.id, nextParentId, nextBlockers, "link");
-					if (!validation.ok) return validation.result;
+					if (validation.ok === false) return validation.result;
 
 					todo.parentId = nextParentId;
 					todo.blockerIds = nextBlockers;
@@ -635,52 +1230,7 @@ export default function (pi: ExtensionAPI) {
 
 				case "toggle": {
 					if (params.id === undefined) return fail("toggle", "Error: id required", "id required");
-					const todo = findTodo(params.id);
-					if (!todo) return fail("toggle", `Todo #${params.id} not found`, `#${params.id} not found`);
-					if (todo.archived) return fail("toggle", `Todo #${todo.id} is archived`, "cannot toggle archived todo");
-
-					const prev = todo.status;
-					const nextStatus = params.toStatus ?? cycleStatus(prev);
-
-					if (!isAllowedTransition(prev, nextStatus)) {
-						return fail("toggle", `Invalid transition: ${statusLabel(prev)} → ${statusLabel(nextStatus)}`, "invalid transition");
-					}
-					if (prev === nextStatus) return ok("toggle", `Todo #${todo.id} already ${statusLabel(nextStatus)}`);
-
-					if (nextStatus === "in-progress") {
-						const blockers = unfinishedBlockers(todo);
-						if (blockers.length) {
-							return fail("toggle", `Todo #${todo.id} is blocked by ${blockers.map((b) => `#${b}`).join(", ")}`, "unfinished blockers");
-						}
-						if (prev !== "in-progress" && inProgressCount() >= wipLimit) {
-							return fail("toggle", `WIP limit reached (${wipLimit}). Finish or pause another in-progress todo first.`, "wip limit reached");
-						}
-					}
-
-					if (nextStatus === "done") {
-						const blockers = unfinishedBlockers(todo);
-						if (blockers.length) {
-							return fail("toggle", `Todo #${todo.id} cannot be done while blocked by ${blockers.map((b) => `#${b}`).join(", ")}`, "unfinished blockers");
-						}
-						if (hasOpenChildren(todo.id)) {
-							return fail("toggle", `Todo #${todo.id} has unfinished children`, "unfinished children");
-						}
-					}
-
-					if (prev === "done" && nextStatus !== "done") {
-						const activeDependents = dependentsOf(todo.id).filter((d) => d.status !== "todo");
-						if (activeDependents.length) {
-							return fail(
-								"toggle",
-								`Cannot reopen #${todo.id}; active dependents: ${activeDependents.map((d) => `#${d.id}`).join(", ")}`,
-								"active dependents",
-							);
-						}
-					}
-
-					todo.status = nextStatus;
-					addHistory(todo, "status_changed", { from: prev, to: nextStatus });
-					return ok("toggle", `Todo #${todo.id} moved ${statusLabel(prev)} → ${statusLabel(nextStatus)}`);
+					return toggleTodoAction(params.id, params.toStatus);
 				}
 
 				case "read": {
@@ -689,19 +1239,7 @@ export default function (pi: ExtensionAPI) {
 					if (!todo) return fail("read", `Todo #${params.id} not found`, `#${params.id} not found`);
 
 					addHistory(todo, "read");
-					const text = [
-						`#${todo.id} ${todo.title}`,
-						`Status: ${statusLabel(todo.status)}`,
-						`Priority/Effort: ${todo.priority}/${todo.effort}`,
-						`Tags: ${todo.tags.length ? todo.tags.join(", ") : "(none)"}`,
-						`Parent: ${todo.parentId !== undefined ? `#${todo.parentId}` : "(none)"}`,
-						`Blockers: ${todo.blockerIds.length ? todo.blockerIds.map((id) => `#${id}`).join(", ") : "(none)"}`,
-						`Archived: ${todo.archived ? "yes" : "no"}`,
-						"",
-						"Description:",
-						todo.description?.trim() ? todo.description : "(empty)",
-					].join("\n");
-					return ok("read", text);
+					return ok("read", readTodoText(todo));
 				}
 
 				case "history": {
@@ -725,15 +1263,7 @@ export default function (pi: ExtensionAPI) {
 
 				case "archive": {
 					if (params.id === undefined) return fail("archive", "Error: id required", "id required");
-					const todo = findTodo(params.id);
-					if (!todo) return fail("archive", `Todo #${params.id} not found`, `#${params.id} not found`);
-					const nextArchived = params.archived ?? true;
-					if (nextArchived && todo.status !== "done") {
-						return fail("archive", "Only done todos can be archived", "archive requires done status");
-					}
-					todo.archived = nextArchived;
-					addHistory(todo, nextArchived ? "archived" : "unarchived");
-					return ok("archive", `${nextArchived ? "Archived" : "Unarchived"} todo #${todo.id}`);
+					return archiveTodoAction(params.id, params.archived);
 				}
 
 				case "set_wip_limit": {
