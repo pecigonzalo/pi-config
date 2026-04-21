@@ -135,12 +135,28 @@ export interface PermissionsConfig {
 	agents?: Record<string, AgentProfile>;
 	sandbox?: SandboxSettings;
 	approvals?: ApprovalsSettings;
+	protectedResources?: ProtectedResourcesSettings;
 }
 
 interface EffectivePolicy {
 	mode: PermissionMode;
 	rules: Rule[];
 	externalPath: ExternalPathPolicy;
+	protectedResources: ResolvedProtectedResources;
+}
+
+interface ProtectedResourcesSettings {
+	enabled?: boolean;
+	defaults?: boolean;
+	addDenyRead?: string[];
+	addDenyWrite?: string[];
+	unprotectRead?: string[];
+	unprotectWrite?: string[];
+}
+
+interface ResolvedProtectedResources {
+	denyRead: string[];
+	denyWrite: string[];
 }
 
 interface ApprovalsSettings {
@@ -325,6 +341,10 @@ function loadConfig(cwd: string): PermissionsConfig {
 			...(global?.approvals ?? {}),
 			...(project?.approvals ?? {}),
 		},
+		protectedResources: {
+			...(global?.protectedResources ?? {}),
+			...(project?.protectedResources ?? {}),
+		},
 	};
 }
 
@@ -369,6 +389,61 @@ function matchRule(rules: Rule[], toolName: string, input: Record<string, unknow
 	return undefined;
 }
 
+const BUILTIN_PROTECTED_DENY_READ = [
+	"\\.env(\\..+)?$",
+	"\\.(pem|key|p12|pfx|crt|ca-bundle)$",
+	"(^|[/])(\\.aws[/]|\\.ssh[/]|\\.gnupg[/])",
+];
+
+const BUILTIN_PROTECTED_DENY_WRITE = [
+	"\\.env(\\..+)?$",
+	"\\.(pem|key|p12|pfx|crt|ca-bundle)$",
+	"(^|[/])\\.git/(hooks/|config$)",
+	"(^|[/])(\\.bashrc|\\.bash_profile|\\.zshrc|\\.zprofile|\\.profile)$",
+	"(^|[/])\\.(gitconfig|gitmodules|ripgreprc|mcp\\.json)$",
+	"(^|[/])(\\.vscode/|\\.idea/)",
+	"(^|[/])\\.claude/(commands/|agents/)",
+];
+
+function dedupeStrings(items: string[]): string[] {
+	return [...new Set(items)];
+}
+
+function resolveProtectedResources(config: PermissionsConfig): ResolvedProtectedResources {
+	const settings = config.protectedResources ?? {};
+	const enabled = settings.enabled ?? true;
+	if (!enabled) return { denyRead: [], denyWrite: [] };
+
+	const useDefaults = settings.defaults ?? true;
+	const denyReadSource = [
+		...(useDefaults ? BUILTIN_PROTECTED_DENY_READ : []),
+		...(settings.addDenyRead ?? []),
+	];
+	const denyWriteSource = [
+		...(useDefaults ? BUILTIN_PROTECTED_DENY_WRITE : []),
+		...(settings.addDenyWrite ?? []),
+	];
+	const unprotectRead = new Set(settings.unprotectRead ?? []);
+	const unprotectWrite = new Set(settings.unprotectWrite ?? []);
+
+	return {
+		denyRead: dedupeStrings(denyReadSource.filter((r) => !unprotectRead.has(r))),
+		denyWrite: dedupeStrings(denyWriteSource.filter((r) => !unprotectWrite.has(r))),
+	};
+}
+
+function compileProtectedRules(protectedResources: ResolvedProtectedResources): Rule[] {
+	const rules: Rule[] = [];
+	for (const match of protectedResources.denyRead) {
+		rules.push({ tool: "read", match, action: "block", reason: "Blocked by protected resource policy" });
+	}
+	for (const match of protectedResources.denyWrite) {
+		rules.push({ tool: "write", match, action: "block", reason: "Blocked by protected resource policy" });
+		rules.push({ tool: "edit", match, action: "block", reason: "Blocked by protected resource policy" });
+	}
+	return rules;
+}
+
 function compileModeDefaults(mode: PermissionMode): { rules: Rule[]; externalPath: ExternalPathPolicy } {
 	switch (mode) {
 		case "plan":
@@ -402,9 +477,11 @@ function compileModeDefaults(mode: PermissionMode): { rules: Rule[]; externalPat
 
 /** Returns the effective mode/rules/externalPath bundle for the given agent. */
 function activePolicy(config: PermissionsConfig, agentName: string): EffectivePolicy {
+	const protectedResources = resolveProtectedResources(config);
+	const protectedRules = compileProtectedRules(protectedResources);
 	const defaultMode = config.default?.mode ?? "workspace-write";
 	const defaultCompiled = compileModeDefaults(defaultMode);
-	const defaultRules = [...(config.default?.rules ?? []), ...defaultCompiled.rules];
+	const defaultRules = [...protectedRules, ...(config.default?.rules ?? []), ...defaultCompiled.rules];
 	const defaultExternalPath = config.default?.externalPath ?? defaultCompiled.externalPath;
 
 	if (agentName === "default" || !config.agents?.[agentName]) {
@@ -412,6 +489,7 @@ function activePolicy(config: PermissionsConfig, agentName: string): EffectivePo
 			mode: defaultMode,
 			rules: defaultRules,
 			externalPath: defaultExternalPath,
+			protectedResources,
 		};
 	}
 
@@ -424,15 +502,17 @@ function activePolicy(config: PermissionsConfig, agentName: string): EffectivePo
 	if (profile.inherit === false) {
 		return {
 			mode: profileMode,
-			rules: [...profileRules, ...profileCompiled.rules],
+			rules: [...protectedRules, ...profileRules, ...profileCompiled.rules],
 			externalPath: profileExternalPath,
+			protectedResources,
 		};
 	}
 
 	return {
 		mode: profileMode,
-		rules: [...profileRules, ...(config.default?.rules ?? []), ...(profile.mode ? profileCompiled.rules : defaultCompiled.rules)],
+		rules: [...protectedRules, ...profileRules, ...(config.default?.rules ?? []), ...(profile.mode ? profileCompiled.rules : defaultCompiled.rules)],
 		externalPath: profileExternalPath,
+		protectedResources,
 	};
 }
 
@@ -451,8 +531,8 @@ function compileSandboxConfig(
 	const enabled = overrides?.enabled ?? modeDefault.enabled;
 	const networkEnabled = overrides?.network ?? modeDefault.network;
 	const allowWrite = overrides?.allowWrite ?? modeDefault.allowWrite;
-	const denyRead = overrides?.denyRead ?? ["~/.ssh", "~/.aws", "~/.gnupg"];
-	const denyWrite = overrides?.denyWrite ?? [".env", ".env.*", "*.pem", "*.key"];
+	const denyRead = dedupeStrings([...(policy.protectedResources.denyRead ?? []), ...(overrides?.denyRead ?? [])]);
+	const denyWrite = dedupeStrings([...(policy.protectedResources.denyWrite ?? []), ...(overrides?.denyWrite ?? [])]);
 	const socketSet = new Set<string>(overrides?.allowUnixSockets ?? []);
 	if (overrides?.allowSshAuthSock && process.env.SSH_AUTH_SOCK) socketSet.add(process.env.SSH_AUTH_SOCK);
 	const allowUnixSockets = [...socketSet];
@@ -1118,6 +1198,7 @@ export default function (pi: ExtensionAPI) {
 			const rules = policy.rules;
 			const externalPath = policy.externalPath;
 			const mode = policy.mode;
+			const protectedResources = policy.protectedResources;
 			const profileLabel = agentName === "default" ? "default" : agentName;
 			const hasAgentOverride = agentName !== "default" && config.agents?.[agentName] !== undefined;
 			const isFullOverride = hasAgentOverride && config.agents![agentName].inherit === false;
@@ -1127,7 +1208,7 @@ export default function (pi: ExtensionAPI) {
 			if (!ctx.hasUI) {
 				const summary = rules.map((r) => `[${r.action}] ${r.tool}${r.match ? ` /${r.match}/` : ""}`).join(", ");
 				ctx.ui.notify(
-					`Permissions (${profileLabel}): mode=${mode}, ${summary || "none"}, externalPath: ${externalPath}, sandbox: ${sandboxStatus}, bashMode: ${bashExecutionMode}, approvals: ${sessionPathApprovals.length + sessionBashApprovals.length} session/${persistentApprovals.length} saved`,
+					`Permissions (${profileLabel}): mode=${mode}, ${summary || "none"}, externalPath: ${externalPath}, protected: read=${protectedResources.denyRead.length}/write=${protectedResources.denyWrite.length}, sandbox: ${sandboxStatus}, bashMode: ${bashExecutionMode}, approvals: ${sessionPathApprovals.length + sessionBashApprovals.length} session/${persistentApprovals.length} saved`,
 					"info",
 				);
 				return;
@@ -1182,6 +1263,24 @@ export default function (pi: ExtensionAPI) {
 				lines.push(`  ${theme.fg("muted", "External path:  ")}${theme.fg(epColor, externalPath)}${theme.fg("dim", " (structured tools)")}`);
 				lines.push(`  ${theme.fg("muted", "Bash sandbox:   ")}${theme.fg(sandboxEnabled ? "success" : "dim", sandboxStatus)}`);
 				lines.push(`  ${theme.fg("muted", "Bash exec mode: ")}${theme.fg(sandboxEnabled ? "success" : "warning", bashExecutionMode)}`);
+				lines.push(`  ${theme.fg("muted", "Protected read: ")}${theme.fg("warning", `${protectedResources.denyRead.length}`)}`);
+				for (const pattern of protectedResources.denyRead.slice(0, 4)) {
+					lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", pattern)}`);
+				}
+				if (protectedResources.denyRead.length > 4) {
+					lines.push(`  ${theme.fg("dim", `  ... ${protectedResources.denyRead.length - 4} more`)}`);
+				}
+				lines.push(`  ${theme.fg("muted", "Protected write:")}${theme.fg("warning", ` ${protectedResources.denyWrite.length}`)}`);
+				for (const pattern of protectedResources.denyWrite.slice(0, 4)) {
+					lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", pattern)}`);
+				}
+				if (protectedResources.denyWrite.length > 4) {
+					lines.push(`  ${theme.fg("dim", `  ... ${protectedResources.denyWrite.length - 4} more`)}`);
+				}
+				const pr = config.protectedResources ?? {};
+				const builtinsState = (pr.enabled ?? true) ? ((pr.defaults ?? true) ? "on" : "off") : "disabled";
+				lines.push(`  ${theme.fg("muted", "Protected built-ins:")}${theme.fg("accent", ` ${builtinsState}`)}`);
+				lines.push(`  ${theme.fg("muted", "Overrides:      ")}${theme.fg("dim", `+read=${(pr.addDenyRead ?? []).length} +write=${(pr.addDenyWrite ?? []).length} -read=${(pr.unprotectRead ?? []).length} -write=${(pr.unprotectWrite ?? []).length}`)}`);
 				if (sandboxConfig?.filesystem) {
 					const fsCfg = sandboxConfig.filesystem;
 					lines.push(`  ${theme.fg("muted", "  denyRead:     ")}${theme.fg("dim", (fsCfg.denyRead ?? []).join(", ") || "(none)")}`);
@@ -1249,15 +1348,70 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("permissions-approvals", {
+		description: "Show scoped session/saved permission approvals",
+		handler: async (_args, ctx) => {
+			const projectRoot = canonicalizePath(ctx.cwd);
+			const scopedSaved = persistentApprovals.filter((a) => {
+				if (approvalsSettings.scopeByProject && a.projectRoot !== projectRoot) return false;
+				if (approvalsSettings.scopeByAgent && a.agentName !== agentName) return false;
+				return true;
+			});
+			const scopedSession = [...sessionPathApprovals, ...sessionBashApprovals].filter((a) => {
+				if (approvalsSettings.scopeByProject && a.projectRoot !== projectRoot) return false;
+				if (approvalsSettings.scopeByAgent && a.agentName !== agentName) return false;
+				return true;
+			});
+			const format = (a: ApprovalRecord) => `${a.tool}:${a.scopeType}:${a.scopeValue}`;
+
+			if (!ctx.hasUI) {
+				ctx.ui.notify(
+					`Approvals (project=${projectRoot}, agent=${agentName}): session=${scopedSession.length}, saved=${scopedSaved.length}`,
+					"info",
+				);
+				return;
+			}
+
+			await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
+				const lines: string[] = [];
+				lines.push("");
+				lines.push(`  ${theme.fg("accent", "Permission Approvals")}`);
+				lines.push(`  ${theme.fg("muted", "Project:")} ${theme.fg("dim", projectRoot)}`);
+				lines.push(`  ${theme.fg("muted", "Agent:  ")} ${theme.fg("dim", agentName)}`);
+				lines.push("");
+				lines.push(`  ${theme.fg("warning", `Session approvals (${scopedSession.length})`)}`);
+				for (const approval of scopedSession.slice(0, 10)) lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", format(approval))}`);
+				if (scopedSession.length > 10) lines.push(`  ${theme.fg("dim", `  ... ${scopedSession.length - 10} more`)}`);
+				lines.push("");
+				lines.push(`  ${theme.fg("accent", `Saved approvals (${scopedSaved.length})`)}`);
+				for (const approval of scopedSaved.slice(0, 10)) lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", format(approval))}`);
+				if (scopedSaved.length > 10) lines.push(`  ${theme.fg("dim", `  ... ${scopedSaved.length - 10} more`)}`);
+				lines.push("");
+				lines.push(`  ${theme.fg("dim", "Press Escape to close")}`);
+				lines.push("");
+
+				const text = new Text(lines.join("\n"), 0, 0);
+				return {
+					render: (w: number) => text.render(w),
+					invalidate: () => text.invalidate(),
+					handleInput: (data: string) => { if (matchesKey(data, Key.escape)) done(); },
+				};
+			});
+		},
+	});
+
 	pi.registerCommand("permissions-reset", {
-		description: "Reset session and/or saved permission approvals",
+		description: "Reset permission approvals (session|saved|project|agent|all)",
 		handler: async (args, ctx) => {
 			const trimmed = (args || "").trim().toLowerCase();
+			const projectRoot = canonicalizePath(ctx.cwd);
 			const resetSession = trimmed === "" || trimmed === "session" || trimmed === "all";
 			const resetSaved = trimmed === "saved" || trimmed === "all";
+			const resetProject = trimmed === "project";
+			const resetAgent = trimmed === "agent";
 
-			if (!resetSession && !resetSaved) {
-				ctx.ui.notify("Usage: /permissions-reset [session|saved|all]", "warning");
+			if (!resetSession && !resetSaved && !resetProject && !resetAgent) {
+				ctx.ui.notify("Usage: /permissions-reset [session|saved|project|agent|all]", "warning");
 				return;
 			}
 
@@ -1272,9 +1426,25 @@ export default function (pi: ExtensionAPI) {
 				saveApprovals();
 			}
 
+			if (resetProject) {
+				sessionPathApprovals.splice(0, sessionPathApprovals.length, ...sessionPathApprovals.filter((a) => a.projectRoot !== projectRoot));
+				sessionBashApprovals.splice(0, sessionBashApprovals.length, ...sessionBashApprovals.filter((a) => a.projectRoot !== projectRoot));
+				persistentApprovals = persistentApprovals.filter((a) => a.projectRoot !== projectRoot);
+				saveApprovals();
+			}
+
+			if (resetAgent) {
+				sessionPathApprovals.splice(0, sessionPathApprovals.length, ...sessionPathApprovals.filter((a) => a.agentName !== agentName));
+				sessionBashApprovals.splice(0, sessionBashApprovals.length, ...sessionBashApprovals.filter((a) => a.agentName !== agentName));
+				persistentApprovals = persistentApprovals.filter((a) => a.agentName !== agentName);
+				saveApprovals();
+			}
+
 			const parts: string[] = [];
 			if (resetSession) parts.push("session approvals cleared");
 			if (resetSaved) parts.push("saved approvals cleared");
+			if (resetProject) parts.push(`project approvals cleared (${projectRoot})`);
+			if (resetAgent) parts.push(`agent approvals cleared (${agentName})`);
 			ctx.ui.notify(`Permissions reset: ${parts.join(", ")}`, "info");
 		},
 	});
