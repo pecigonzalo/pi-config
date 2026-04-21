@@ -987,8 +987,13 @@ export default function (pi: ExtensionAPI) {
 		if (toolName === "bash") {
 			const command = typeof input.command === "string" ? input.command : "";
 			const prefix = getBashCommandPrefix(command);
+			const exactRulePreview = `bash:bash-exact:${command}`;
+			const prefixRulePreview = prefix ? `bash:bash-prefix:${prefix}` : undefined;
+			const bashLines = [...lines, `Rule (exact): ${exactRulePreview}`];
+			if (prefixRulePreview) bashLines.push(`Rule (prefix): ${prefixRulePreview}`);
+
 			const options = ["Allow once", "Allow exact command for this session", ...(prefix ? ["Allow command prefix for this session"] : []), "Block"];
-			const choice = await ctx.ui.select(`⚠️  Permission required\n\n${lines.join("\n")}`, options);
+			const choice = await ctx.ui.select(`⚠️  Permission required\n\n${bashLines.join("\n")}`, options);
 
 			if (choice === "Block" || choice === undefined) {
 				return { block: true, reason: "Blocked by user" };
@@ -1003,7 +1008,7 @@ export default function (pi: ExtensionAPI) {
 					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
 					createdAt: Date.now(),
 				});
-				ctx.ui.notify("✓ Bash exact command allowed for this session", "info");
+				ctx.ui.notify(`✓ Bash session rule added: ${exactRulePreview}`, "info");
 			}
 
 			if (choice === "Allow command prefix for this session" && prefix) {
@@ -1015,7 +1020,7 @@ export default function (pi: ExtensionAPI) {
 					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
 					createdAt: Date.now(),
 				});
-				ctx.ui.notify(`✓ Bash prefix allowed for this session: ${prefix}`, "info");
+				ctx.ui.notify(`✓ Bash session rule added: ${prefixRulePreview}`, "info");
 			}
 
 			return undefined;
