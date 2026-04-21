@@ -1365,26 +1365,38 @@ export default function (pi: ExtensionAPI) {
 					const actionIcon  = (a: Rule["action"]) =>
 						a === "allow" ? "✓" : a === "block" ? "✗" : "?";
 
-					const toolW  = Math.max(4, ...rules.map((r) => r.tool.length));
-					const matchW = Math.max(5, ...rules.map((r) => (r.match ? r.match.length + 2 : 1)));
+					const truncate = (s: string, max: number) => {
+						if (max <= 1) return s.slice(0, Math.max(0, max));
+						return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+					};
+					const toolW  = Math.min(18, Math.max(4, ...rules.map((r) => r.tool.length)));
+					const matchW = Math.min(48, Math.max(5, ...rules.map((r) => (r.match ? r.match.length + 2 : 1))));
+					const actionW = 10;
+					const extW = 10;
+					const reasonW = 40;
 
 					lines.push(
 						`  ${theme.fg("dim", pad("TOOL", toolW + 2))}` +
 						`${theme.fg("dim", pad("MATCH", matchW + 2))}` +
-						`${theme.fg("dim", pad("ACTION", 10))}` +
-						`${theme.fg("dim", "EXT PATH")}`,
+						`${theme.fg("dim", pad("ACTION", actionW))}` +
+						`${theme.fg("dim", pad("EXT PATH", extW + 2))}` +
+						`${theme.fg("dim", "REASON")}`,
 					);
-					lines.push(`  ${theme.fg("borderMuted", "─".repeat(toolW + matchW + 28))}`);
+					lines.push(`  ${theme.fg("borderMuted", "─".repeat(toolW + matchW + actionW + extW + reasonW + 10))}`);
 
 					for (const rule of rules) {
-						const tool    = theme.fg("text",  pad(rule.tool, toolW + 2));
-						const matchStr = rule.match ? `/${rule.match}/` : "-";
-						const match   = theme.fg("muted", pad(matchStr, matchW + 2));
-						const action  = theme.fg(actionColor(rule.action), pad(`${actionIcon(rule.action)} ${rule.action}`, 10));
-						const epa     = rule.externalPathAction ?? "inherit";
+						const toolRaw = truncate(rule.tool, toolW);
+						const matchRaw = truncate(rule.match ? `/${rule.match}/` : "-", matchW);
+						const actionRaw = truncate(`${actionIcon(rule.action)} ${rule.action}`, actionW - 1);
+						const epa = rule.externalPathAction ?? "inherit";
+						const reasonRaw = truncate(rule.reason ?? "-", reasonW);
+
+						const tool = theme.fg("text", pad(toolRaw, toolW + 2));
+						const match = theme.fg("muted", pad(matchRaw, matchW + 2));
+						const action = theme.fg(actionColor(rule.action), pad(actionRaw, actionW));
 						const epaColor = epa === "allow" ? "success" : epa === "block" ? "error" : epa === "ask" ? "warning" : "dim";
-						const epaStr  = theme.fg(epaColor, epa);
-						const reason  = rule.reason ? theme.fg("dim", `  — ${rule.reason}`) : "";
+						const epaStr = theme.fg(epaColor, pad(truncate(epa, extW), extW + 2));
+						const reason = theme.fg("dim", reasonRaw);
 						lines.push(`  ${tool}${match}${action}${epaStr}${reason}`);
 					}
 				}
