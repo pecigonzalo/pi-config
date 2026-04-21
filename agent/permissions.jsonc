@@ -203,6 +203,24 @@
       "dirtyRepo": "warn",
     },
   },
+  // Scoped approval settings.
+  // "approvals": {
+  //   "scopeByProject": true,
+  //   "scopeByAgent": true,
+  //   "maxAgeDays": 30
+  // },
+
+  // Built-in protected resources are defaults and are always overridable here.
+  // Effective sets are computed as: (built-ins + addDeny*) - unprotect*
+  // "protectedResources": {
+  //   "enabled": true,
+  //   "defaults": true,
+  //   "addDenyRead": ["(^|[/])secrets/"],
+  //   "addDenyWrite": ["(^|[/])infra/prod/"],
+  //   "unprotectRead": ["\\.env(\\..+)?$"],
+  //   "unprotectWrite": ["(^|[/])\\.git/(hooks/|config$)"]
+  // },
+
   // Optional bash sandbox backend. If the sandbox runtime is installed,
   // workspace-write and plan modes enable it automatically unless disabled.
   //
