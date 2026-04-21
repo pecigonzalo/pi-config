@@ -5,6 +5,8 @@ import * as path from "node:path";
 let __test__: Awaited<ReturnType<typeof import("./permissions")>>["__test"];
 
 beforeAll(async () => {
+	const td = process.env.TMPDIR || os.tmpdir();
+	await fs.mkdir(td, { recursive: true });
 	mock.module("@mariozechner/pi-coding-agent", () => ({
 		createBashTool: () => ({ execute: async () => ({ content: [{ type: "text", text: "" }] }) }),
 		getAgentDir: () => "/tmp",
@@ -164,5 +166,42 @@ describe("simple matcher shorthand", () => {
 		const rule = { tool: "bash", match: "^git\\b", action: "allow" as const };
 		expect(__test__.ruleMatch(rule, "bash", "git status")).toBe(true);
 		expect(__test__.ruleMatch(rule, "bash", "xgit status")).toBe(false);
+	});
+});
+
+describe("sandbox network config", () => {
+	const policy = {
+		mode: "workspace-write" as const,
+		rules: [],
+		externalPath: "ask" as const,
+		protectedResources: { denyRead: [], denyWrite: [] },
+	};
+
+	it("uses unrestricted network shape by default when enabled", () => {
+		const compiled = __test__.compileSandboxConfig(policy, "/repo", { enabled: true, network: true });
+		expect(compiled.config.network?.allowedDomains).toBeUndefined();
+		expect(compiled.config.network?.deniedDomains).toBeUndefined();
+	});
+
+	it("applies explicit allow/deny domain lists when provided", () => {
+		const compiled = __test__.compileSandboxConfig(policy, "/repo", {
+			enabled: true,
+			network: true,
+			allowedDomains: ["api.github.com", "*.npmjs.org", "api.github.com"],
+			deniedDomains: ["malicious.example.com", "malicious.example.com"],
+		});
+		expect(compiled.config.network?.allowedDomains).toEqual(["api.github.com", "*.npmjs.org"]);
+		expect(compiled.config.network?.deniedDomains).toEqual(["malicious.example.com"]);
+	});
+
+	it("blocks all network when disabled", () => {
+		const compiled = __test__.compileSandboxConfig(policy, "/repo", { enabled: true, network: false });
+		expect(compiled.config.network?.allowedDomains).toEqual([]);
+		expect(compiled.config.network?.deniedDomains).toEqual([]);
+	});
+
+	it("includes configured tmpDir in allowWrite", () => {
+		const compiled = __test__.compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
+		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/custom-pi");
 	});
 });

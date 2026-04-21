@@ -230,6 +230,19 @@
   // "sandbox": {
   //   "enabled": true,
   //   "network": true,
+  //   // Optional sandbox temp dir base (exported as CLAUDE_TMPDIR/TMPDIR)
+  //   // Defaults to os.tmpdir()/pi
+  //   // "tmpDir": "/tmp/pi",
+  //   // Temp dir strategy:
+  //   // - "session" (default): creates mkdtemp() session-* dirs under tmpDir
+  //   // - "shared": uses tmpDir directly
+  //   // "tmpDirMode": "session",
+  //   // Include compatibility write paths (/tmp, /private/tmp, os.tmpdir())
+  //   // "compatWritePaths": true,
+  //   // Optional domain filters (allow-only model).
+  //   // If omitted and network=true, network is unrestricted.
+  //   // "allowedDomains": ["api.github.com", "*.npmjs.org"],
+  //   // "deniedDomains": ["malicious.example.com"],
   //   "allowSshAuthSock": true,
   //   "allowUnixSockets": ["/path/to/ssh-agent.sock"],
   //   "allowAllUnixSockets": false,

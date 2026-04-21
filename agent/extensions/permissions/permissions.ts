@@ -182,7 +182,18 @@ interface ApprovalFile {
 
 interface SandboxSettings {
 	enabled?: boolean;
+	/** Enable network egress. If false, blocks all network. */
 	network?: boolean;
+	/** Optional explicit domain allowlist for sandbox proxy filtering. */
+	allowedDomains?: string[];
+	/** Optional explicit domain denylist (takes precedence over allowlist). */
+	deniedDomains?: string[];
+	/** Base temp directory for sandboxed commands (exported as CLAUDE_TMPDIR/TMPDIR). */
+	tmpDir?: string;
+	/** Temp directory strategy. "session" creates mkdtemp() children under tmpDir/base. */
+	tmpDirMode?: "shared" | "session";
+	/** Include compatibility write paths (/tmp, /private/tmp, os.tmpdir()). */
+	compatWritePaths?: boolean;
 	allowSshAuthSock?: boolean;
 	allowUnixSockets?: string[];
 	allowAllUnixSockets?: boolean;
@@ -560,45 +571,77 @@ function activePolicy(config: PermissionsConfig, agentName: string): EffectivePo
 	};
 }
 
+function getEffectiveSandboxTmpDir(cwd: string, overrides: SandboxSettings | undefined): string {
+	const configured = overrides?.tmpDir ?? process.env.PI_SANDBOX_TMPDIR ?? process.env.CLAUDE_TMPDIR;
+	if (configured && configured.trim().length > 0) return resolveToken(configured, cwd);
+	return path.join(os.tmpdir(), "pi");
+}
+
+function getSandboxTmpDirMode(overrides: SandboxSettings | undefined): "shared" | "session" {
+	return overrides?.tmpDirMode ?? "session";
+}
+
+function getCompatWritePaths(): string[] {
+	return dedupeStrings([os.tmpdir(), "/tmp", "/private/tmp"]);
+}
+
 function compileSandboxConfig(
 	policy: EffectivePolicy,
 	cwd: string,
 	overrides: SandboxSettings | undefined,
+	runtimeTmpDir?: string,
 ): { enabled: boolean; config: SandboxRuntimeConfigLike; reason: string } {
 	const modeDefaults: Record<PermissionMode, { enabled: boolean; network: boolean; allowWrite: string[] }> = {
+		// Plan mode is workspace read-only, but sandboxed commands may still need tmp writes.
 		"plan": { enabled: true, network: false, allowWrite: [] },
-		"workspace-write": { enabled: true, network: true, allowWrite: [cwd, "/tmp"] },
-		"full-access": { enabled: false, network: true, allowWrite: [cwd, "/tmp"] },
+		"workspace-write": { enabled: true, network: true, allowWrite: [cwd] },
+		"full-access": { enabled: false, network: true, allowWrite: [cwd] },
 	};
 
 	const modeDefault = modeDefaults[policy.mode];
 	const enabled = overrides?.enabled ?? modeDefault.enabled;
 	const networkEnabled = overrides?.network ?? modeDefault.network;
-	const allowWrite = overrides?.allowWrite ?? modeDefault.allowWrite;
+	const effectiveTmpDir = runtimeTmpDir ?? getEffectiveSandboxTmpDir(cwd, overrides);
+	const compatWritePaths = (overrides?.compatWritePaths ?? true) ? getCompatWritePaths() : [];
+	const defaultAllowWrite = dedupeStrings([...modeDefault.allowWrite, ...compatWritePaths, effectiveTmpDir]);
+	const allowWrite = dedupeStrings([...(overrides?.allowWrite ?? defaultAllowWrite), ...compatWritePaths, effectiveTmpDir]);
 	const denyRead = dedupeStrings([...(policy.protectedResources.denyRead ?? []), ...(overrides?.denyRead ?? [])]);
 	const denyWrite = dedupeStrings([...(policy.protectedResources.denyWrite ?? []), ...(overrides?.denyWrite ?? [])]);
 	const socketSet = new Set<string>(overrides?.allowUnixSockets ?? []);
 	if (overrides?.allowSshAuthSock && process.env.SSH_AUTH_SOCK) socketSet.add(process.env.SSH_AUTH_SOCK);
 	const allowUnixSockets = [...socketSet];
 	const allowAllUnixSockets = overrides?.allowAllUnixSockets ?? false;
+	const explicitAllowedDomains = overrides?.allowedDomains;
+	const explicitDeniedDomains = overrides?.deniedDomains;
+	const hasExplicitDomainPolicy = explicitAllowedDomains !== undefined || explicitDeniedDomains !== undefined;
+
+	const networkConfig = !networkEnabled
+		? {
+			allowedDomains: [],
+			deniedDomains: [],
+			allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
+			allowAllUnixSockets: allowAllUnixSockets || undefined,
+		}
+		: hasExplicitDomainPolicy
+			? {
+				allowedDomains: dedupeStrings(explicitAllowedDomains ?? []),
+				deniedDomains: dedupeStrings(explicitDeniedDomains ?? []),
+				allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
+				allowAllUnixSockets: allowAllUnixSockets || undefined,
+			}
+			: {
+				// sandbox-runtime uses an allow-only domain model and does NOT support "*"
+				// as a universal wildcard. To allow unrestricted network, omit
+				// allowedDomains/deniedDomains entirely.
+				allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
+				allowAllUnixSockets: allowAllUnixSockets || undefined,
+			};
 
 	return {
 		enabled,
-		reason: enabled ? `mode=${policy.mode}` : `disabled by mode=${policy.mode}`,
+		reason: enabled ? `mode=${policy.mode}, tmpDir=${effectiveTmpDir}` : `disabled by mode=${policy.mode}`,
 		config: {
-			network: networkEnabled
-				? {
-					allowedDomains: ["*"],
-					deniedDomains: [],
-					allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
-					allowAllUnixSockets: allowAllUnixSockets || undefined,
-				}
-				: {
-					allowedDomains: [],
-					deniedDomains: ["*"],
-					allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
-					allowAllUnixSockets: allowAllUnixSockets || undefined,
-				},
+			network: networkConfig,
 			filesystem: {
 				denyRead,
 				allowWrite,
@@ -876,6 +919,8 @@ export default function (pi: ExtensionAPI) {
 	let sandboxReason = "inactive";
 	let sandboxMode: "normal" | "ask-all-bash" | "block-all-bash" = "normal";
 	let sandboxConfig: SandboxRuntimeConfigLike | undefined;
+	let sandboxTmpDir: string | undefined;
+	let sandboxTmpDirEphemeral = false;
 
 	pi.registerTool({
 		...bashToolTemplate,
@@ -927,7 +972,32 @@ export default function (pi: ExtensionAPI) {
 		sandboxConfig = undefined;
 
 		const policy = activePolicy(config, agentName);
-		const compiled = compileSandboxConfig(policy, ctx.cwd, config.sandbox);
+		const tmpDirBase = getEffectiveSandboxTmpDir(ctx.cwd, config.sandbox);
+		const tmpDirMode = getSandboxTmpDirMode(config.sandbox);
+		let effectiveTmpDir = tmpDirBase;
+		try {
+			fs.mkdirSync(tmpDirBase, { recursive: true });
+			if (tmpDirMode === "session") {
+				if (!sandboxTmpDir || !sandboxTmpDirEphemeral) {
+					sandboxTmpDir = fs.mkdtempSync(path.join(tmpDirBase, "session-"));
+					sandboxTmpDirEphemeral = true;
+				}
+				effectiveTmpDir = sandboxTmpDir;
+			} else {
+				sandboxTmpDir = tmpDirBase;
+				sandboxTmpDirEphemeral = false;
+				effectiveTmpDir = tmpDirBase;
+			}
+		} catch {
+			// best-effort; sandbox init will fail later if unusable
+			effectiveTmpDir = tmpDirBase;
+			sandboxTmpDir = effectiveTmpDir;
+			sandboxTmpDirEphemeral = false;
+		}
+		// Override sandbox-runtime's /tmp/claude fallback with a pi-branded temp dir.
+		process.env.CLAUDE_TMPDIR = effectiveTmpDir;
+		process.env.TMPDIR = effectiveTmpDir;
+		const compiled = compileSandboxConfig(policy, ctx.cwd, config.sandbox, effectiveTmpDir);
 		sandboxConfig = compiled.config;
 
 		if ((pi.getFlag("no-sandbox") as boolean) === true) {
@@ -983,6 +1053,8 @@ export default function (pi: ExtensionAPI) {
 		sessionAllows.clear();
 		sessionPathApprovals.length = 0;
 		sessionBashApprovals.length = 0;
+		sandboxTmpDir = undefined;
+		sandboxTmpDirEphemeral = false;
 		reload(ctx.cwd);
 		await initializeSandbox(ctx);
 	});
@@ -1000,6 +1072,15 @@ export default function (pi: ExtensionAPI) {
 				// ignore cleanup errors
 			}
 		}
+		if (sandboxTmpDirEphemeral && sandboxTmpDir) {
+			try {
+				fs.rmSync(sandboxTmpDir, { recursive: true, force: true });
+			} catch {
+				// ignore cleanup errors
+			}
+		}
+		sandboxTmpDir = undefined;
+		sandboxTmpDirEphemeral = false;
 		sandboxEnabled = false;
 		sandboxConfig = undefined;
 	});
@@ -1318,6 +1399,7 @@ export default function (pi: ExtensionAPI) {
 				lines.push(`  ${theme.fg("muted", "External path:  ")}${theme.fg(epColor, externalPath)}${theme.fg("dim", " (structured tools)")}`);
 				lines.push(`  ${theme.fg("muted", "Bash sandbox:   ")}${theme.fg(sandboxEnabled ? "success" : "dim", sandboxStatus)}`);
 				lines.push(`  ${theme.fg("muted", "Bash exec mode: ")}${theme.fg(sandboxEnabled ? "success" : "warning", bashExecutionMode)}`);
+				lines.push(`  ${theme.fg("muted", "Sandbox TMPDIR: ")}${theme.fg("dim", sandboxTmpDir ?? getEffectiveSandboxTmpDir(ctx.cwd, config.sandbox))}${theme.fg("dim", sandboxTmpDirEphemeral ? " (session)" : " (shared)")}`);
 				lines.push(`  ${theme.fg("muted", "Protected read: ")}${theme.fg("warning", `${protectedResources.denyRead.length}`)}`);
 				for (const pattern of protectedResources.denyRead.slice(0, 4)) {
 					lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", pattern)}`);
@@ -1347,7 +1429,10 @@ export default function (pi: ExtensionAPI) {
 				}
 				if (sandboxConfig?.network) {
 					const netCfg = sandboxConfig.network;
-					lines.push(`  ${theme.fg("muted", "  network:      ")}${theme.fg("dim", `allow=${(netCfg.allowedDomains ?? []).join(", ") || "(none)"} deny=${(netCfg.deniedDomains ?? []).join(", ") || "(none)"}`)}`);
+					const unrestricted = netCfg.allowedDomains === undefined && netCfg.deniedDomains === undefined;
+					const allowLabel = unrestricted ? "* (unrestricted)" : (netCfg.allowedDomains ?? []).join(", ") || "(none)";
+					const denyLabel = unrestricted ? "(none)" : (netCfg.deniedDomains ?? []).join(", ") || "(none)";
+					lines.push(`  ${theme.fg("muted", "  network:      ")}${theme.fg("dim", `allow=${allowLabel} deny=${denyLabel}`)}`);
 					if ((netCfg.allowUnixSockets ?? []).length > 0 || netCfg.allowAllUnixSockets) {
 						lines.push(
 							`  ${theme.fg("muted", "  unix sockets: ")}${theme.fg("dim", netCfg.allowAllUnixSockets ? "all" : (netCfg.allowUnixSockets ?? []).join(", "))}`,
@@ -1552,6 +1637,7 @@ export const __test__ = {
 	isComplexBashCommand,
 	detectDangerousBashPattern,
 	sandboxFallbackModeForPolicy,
+	compileSandboxConfig,
 	hasRegexMeta,
 	matchSimpleBashPattern,
 	ruleMatch,
