@@ -19,7 +19,7 @@
  *                          default: false
  *   confirmSwitchSession — prompt before /resume when there are unsaved messages
  *                          default: false
- *   confirmFork          — prompt before /fork creates a branch
+ *   confirmFork          — prompt before /fork or /clone creates a branch
  *                          default: false
  *   dirtyRepo            — what to do when uncommitted git changes exist
  *                          "off"   — no check (default)
@@ -260,21 +260,23 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	});
 
-	// ── /fork ─────────────────────────────────────────────────────────────────
+	// ── /fork and /clone ─────────────────────────────────────────────────────
 
-	pi.on("session_before_fork", async (_event, ctx) => {
-		const dirty = await checkDirtyRepo(pi, ctx, settings, "fork");
+	pi.on("session_before_fork", async (event, ctx) => {
+		const isClone = event.position === "at";
+		const action = isClone ? "clone" : "fork";
+		const dirty = await checkDirtyRepo(pi, ctx, settings, action);
 		if (dirty?.cancel) return { cancel: true };
 
 		if (!ctx.hasUI || !settings.confirmFork) return undefined;
 
-		const choice = await ctx.ui.select("Fork session?", [
-			"Yes, create fork",
-			"No, stay in current session",
-		]);
+		const confirmLabel = isClone ? "Yes, create clone" : "Yes, create fork";
+		const cancelLabel = isClone ? "Clone cancelled" : "Fork cancelled";
+		const promptTitle = isClone ? "Clone session?" : "Fork session?";
+		const choice = await ctx.ui.select(promptTitle, [confirmLabel, "No, stay in current session"]);
 
-		if (choice !== "Yes, create fork") {
-			ctx.ui.notify("Fork cancelled", "info");
+		if (choice !== confirmLabel) {
+			ctx.ui.notify(cancelLabel, "info");
 			return { cancel: true };
 		}
 
