@@ -83,6 +83,9 @@
         "reason": "Git internals",
       },
       // ── Bash: safe read-only and informational commands → allow ─────────────
+      // Match supports readable shorthand for bash:
+      // - "rg"   => word-boundary match (like /\brg\b/i)
+      // - "rg *" => command-prefix match ("rg" or "rg ...")
       {
         "tool": "bash",
         "match": "^(cat|rg|find|wc|grep|head|uniq|ls|sort|tail|tee|echo|pwd|which|file|diff|stat|du|df|date|uname|env|printenv|type|true|false)\\b",
@@ -90,7 +93,7 @@
       },
       {
         "tool": "bash",
-        "match": "^cp\\b",
+        "match": "cp *",
         "action": "allow",
       },
       // ── Bash: git — ask before history-rewriting or remote-pushing ops ──────
@@ -108,7 +111,7 @@
       },
       {
         "tool": "bash",
-        "match": "^git\\b",
+        "match": "git *",
         "action": "allow",
       },
       // ── Bash: common build / test / package-manager commands → allow ─────────
@@ -151,19 +154,19 @@
       // ── Bash: ask before destructive or privileged operations ───────────────
       {
         "tool": "bash",
-        "match": "\\brm\\b",
+        "match": "rm",
         "action": "ask",
         "reason": "Deletes files",
       },
       {
         "tool": "bash",
-        "match": "\\bmv\\b",
+        "match": "mv",
         "action": "ask",
         "reason": "Moves or renames",
       },
       {
         "tool": "bash",
-        "match": "\\bsudo\\b",
+        "match": "sudo",
         "action": "ask",
         "reason": "Elevated privileges",
       },
@@ -175,7 +178,7 @@
       },
       {
         "tool": "bash",
-        "match": "\\bkill\\b",
+        "match": "kill",
         "action": "ask",
         "reason": "Terminates processes",
       },
