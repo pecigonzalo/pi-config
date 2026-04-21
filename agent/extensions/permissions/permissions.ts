@@ -134,6 +134,7 @@ export interface PermissionsConfig {
 	};
 	agents?: Record<string, AgentProfile>;
 	sandbox?: SandboxSettings;
+	approvals?: ApprovalsSettings;
 }
 
 interface EffectivePolicy {
@@ -142,9 +143,19 @@ interface EffectivePolicy {
 	externalPath: ExternalPathPolicy;
 }
 
+interface ApprovalsSettings {
+	scopeByProject?: boolean;
+	scopeByAgent?: boolean;
+	maxAgeDays?: number;
+}
+
 interface ApprovalRecord {
 	tool: string;
-	pathPrefix: string;
+	scopeType: "path-prefix" | "tool";
+	scopeValue: string;
+	projectRoot?: string;
+	agentName?: string;
+	createdAt: number;
 }
 
 interface ApprovalFile {
@@ -281,6 +292,18 @@ function readJsonFile(filePath: string): unknown | undefined {
 	}
 }
 
+function mergeDefaultConfig(
+	globalDefault: PermissionsConfig["default"] | undefined,
+	projectDefault: PermissionsConfig["default"] | undefined,
+): PermissionsConfig["default"] | undefined {
+	if (!globalDefault && !projectDefault) return undefined;
+	return {
+		mode: projectDefault?.mode ?? globalDefault?.mode,
+		externalPath: projectDefault?.externalPath ?? globalDefault?.externalPath,
+		rules: [...(projectDefault?.rules ?? []), ...(globalDefault?.rules ?? [])],
+	};
+}
+
 function loadConfig(cwd: string): PermissionsConfig {
 	const globalPath = path.join(getAgentDir(), "permissions.jsonc");
 	const projectPath = path.join(cwd, ".pi", "permissions.jsonc");
@@ -289,7 +312,7 @@ function loadConfig(cwd: string): PermissionsConfig {
 	const project = readJsonFile(projectPath) as PermissionsConfig | undefined;
 
 	return {
-		default: project?.default ?? global?.default,
+		default: mergeDefaultConfig(global?.default, project?.default),
 		agents: {
 			...(global?.agents ?? {}),
 			...(project?.agents ?? {}),
@@ -297,6 +320,10 @@ function loadConfig(cwd: string): PermissionsConfig {
 		sandbox: {
 			...(global?.sandbox ?? {}),
 			...(project?.sandbox ?? {}),
+		},
+		approvals: {
+			...(global?.approvals ?? {}),
+			...(project?.approvals ?? {}),
 		},
 	};
 }
@@ -529,18 +556,39 @@ function resolveToken(token: string, cwd: string): string {
 	return path.resolve(cwd, clean);
 }
 
-/**
- * Returns true if the given path token resolves outside cwd.
- * Purely lexical — does not follow symlinks.
- */
+function canonicalizePath(inputPath: string): string {
+	try {
+		return fs.realpathSync.native(inputPath);
+	} catch {
+		return inputPath;
+	}
+}
+
+function canonicalizePathToken(token: string, cwd: string): string {
+	const abs = resolveToken(token, cwd);
+	try {
+		return fs.realpathSync.native(abs);
+	} catch {
+		const parent = path.dirname(abs);
+		const base = path.basename(abs);
+		try {
+			return path.join(fs.realpathSync.native(parent), base);
+		} catch {
+			return abs;
+		}
+	}
+}
+
+/** Returns true if the given path token resolves outside cwd (canonical, symlink-safe when possible). */
 function isPathOutsideCwd(rawPath: string, cwd: string): boolean {
-	const abs = resolveToken(rawPath, cwd);
-	const base = cwd.endsWith(path.sep) ? cwd : cwd + path.sep;
-	return abs !== cwd && !abs.startsWith(base);
+	const target = canonicalizePathToken(rawPath, cwd);
+	const root = canonicalizePath(cwd);
+	const normalizedRoot = root.endsWith(path.sep) ? root : root + path.sep;
+	return target !== root && !target.startsWith(normalizedRoot);
 }
 
 /**
- * Returns resolved absolute paths referenced by a structured filesystem tool
+ * Returns canonical absolute paths referenced by a structured filesystem tool
  * that are outside cwd. Bash is intentionally excluded: shell parsing is too
  * fragile for reliable security enforcement. Use a sandbox backend for bash.
  */
@@ -549,7 +597,7 @@ function getExternalPaths(toolName: string, input: Record<string, unknown>, cwd:
 
 	const target = getMatchTarget(toolName, input);
 	if (!target || !isPathOutsideCwd(target, cwd)) return [];
-	return [resolveToken(target, cwd)];
+	return [canonicalizePathToken(target, cwd)];
 }
 
 function pathMatchesPrefix(target: string, prefix: string): boolean {
@@ -558,23 +606,61 @@ function pathMatchesPrefix(target: string, prefix: string): boolean {
 	return target.startsWith(normalizedPrefix);
 }
 
-function approvalsCoverPaths(approvals: ApprovalRecord[], toolName: string, paths: string[]): boolean {
+function getApprovalsSettings(config: PermissionsConfig): Required<Pick<ApprovalsSettings, "scopeByProject" | "scopeByAgent">> & Pick<ApprovalsSettings, "maxAgeDays"> {
+	return {
+		scopeByProject: config.approvals?.scopeByProject ?? true,
+		scopeByAgent: config.approvals?.scopeByAgent ?? true,
+		maxAgeDays: config.approvals?.maxAgeDays,
+	};
+}
+
+function approvalScopeMatch(
+	approval: ApprovalRecord,
+	toolName: string,
+	targetPath: string,
+	projectRoot: string,
+	agentName: string,
+	settings: ReturnType<typeof getApprovalsSettings>,
+): boolean {
+	if (approval.tool !== toolName && approval.tool !== "*") return false;
+	if (settings.scopeByProject && approval.projectRoot !== projectRoot) return false;
+	if (settings.scopeByAgent && approval.agentName !== agentName) return false;
+	if (approval.scopeType !== "path-prefix") return false;
+	return pathMatchesPrefix(targetPath, approval.scopeValue);
+}
+
+function approvalsCoverPaths(
+	approvals: ApprovalRecord[],
+	toolName: string,
+	paths: string[],
+	projectRoot: string,
+	agentName: string,
+	settings: ReturnType<typeof getApprovalsSettings>,
+): boolean {
 	if (paths.length === 0) return true;
-	return paths.every((p) =>
-		approvals.some((a) => (a.tool === toolName || a.tool === "*") && pathMatchesPrefix(p, a.pathPrefix)),
-	);
+	return paths.every((p) => approvals.some((a) => approvalScopeMatch(a, toolName, p, projectRoot, agentName, settings)));
 }
 
 function dedupeApprovals(approvals: ApprovalRecord[]): ApprovalRecord[] {
 	const seen = new Set<string>();
 	const result: ApprovalRecord[] = [];
 	for (const a of approvals) {
-		const key = `${a.tool}::${a.pathPrefix}`;
+		const key = `${a.tool}::${a.scopeType}::${a.scopeValue}::${a.projectRoot ?? "*"}::${a.agentName ?? "*"}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
 		result.push(a);
 	}
 	return result;
+}
+
+function pruneExpiredApprovals(
+	approvals: ApprovalRecord[],
+	settings: ReturnType<typeof getApprovalsSettings>,
+	now = Date.now(),
+): ApprovalRecord[] {
+	if (!settings.maxAgeDays || settings.maxAgeDays <= 0) return approvals;
+	const maxAgeMs = settings.maxAgeDays * 24 * 60 * 60 * 1000;
+	return approvals.filter((a) => now - a.createdAt <= maxAgeMs);
 }
 
 // ─── Agent name detection ─────────────────────────────────────────────────────
@@ -624,6 +710,7 @@ export default function (pi: ExtensionAPI) {
 
 	let config: PermissionsConfig = {};
 	let agentName = "default";
+	let approvalsSettings = getApprovalsSettings(config);
 	let persistentApprovals: ApprovalRecord[] = [];
 
 	const sessionAllows = new Set<string>();
@@ -632,17 +719,19 @@ export default function (pi: ExtensionAPI) {
 
 	const loadApprovals = () => {
 		const parsed = readJsonFile(approvalsFile) as ApprovalFile | undefined;
-		persistentApprovals = dedupeApprovals(parsed?.approvals ?? []);
+		const loaded = parsed?.approvals ?? [];
+		persistentApprovals = dedupeApprovals(pruneExpiredApprovals(loaded, approvalsSettings));
 	};
 
 	const saveApprovals = () => {
-		const data: ApprovalFile = { approvals: dedupeApprovals(persistentApprovals) };
+		const data: ApprovalFile = { approvals: dedupeApprovals(pruneExpiredApprovals(persistentApprovals, approvalsSettings)) };
 		fs.writeFileSync(approvalsFile, JSON.stringify(data, null, 2) + "\n", "utf-8");
 	};
 
 	const reload = (cwd: string) => {
 		config = loadConfig(cwd);
 		agentName = detectAgentName(pi);
+		approvalsSettings = getApprovalsSettings(config);
 		loadApprovals();
 	};
 
@@ -769,6 +858,7 @@ export default function (pi: ExtensionAPI) {
 		toolName: string,
 		input: Record<string, unknown>,
 		externalPaths: string[],
+		projectRoot: string,
 		ctx: ExtensionContext,
 	): Promise<{ block: boolean; reason: string } | undefined> {
 		if (policy === "block") {
@@ -807,14 +897,30 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (choice === "Allow path for this session") {
-			sessionPathApprovals.push(...externalPaths.map((p) => ({ tool: toolName, pathPrefix: p })));
+			sessionPathApprovals.push(
+				...externalPaths.map((p) => ({
+					tool: toolName,
+					scopeType: "path-prefix" as const,
+					scopeValue: p,
+					projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
+					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
+					createdAt: Date.now(),
+				})),
+			);
 			ctx.ui.notify(`✓ Approved ${externalPaths.length} external path(s) for this session`, "info");
 		}
 
 		if (choice === "Allow path permanently") {
 			persistentApprovals = dedupeApprovals([
 				...persistentApprovals,
-				...externalPaths.map((p) => ({ tool: toolName, pathPrefix: p })),
+				...externalPaths.map((p) => ({
+					tool: toolName,
+					scopeType: "path-prefix" as const,
+					scopeValue: p,
+					projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
+					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
+					createdAt: Date.now(),
+				})),
 			]);
 			saveApprovals();
 			ctx.ui.notify(`✓ Saved ${externalPaths.length} external path approval(s)`, "info");
@@ -830,6 +936,7 @@ export default function (pi: ExtensionAPI) {
 
 		const input = event.input as Record<string, unknown>;
 		const policy = activePolicy(config, agentName);
+		const projectRoot = canonicalizePath(ctx.cwd);
 		const rule = policy.rules.length > 0 ? matchRule(policy.rules, event.toolName, input) : undefined;
 
 		if (rule) {
@@ -852,8 +959,8 @@ export default function (pi: ExtensionAPI) {
 				const externalPaths = externalPolicy === "allow" ? [] : getExternalPaths(event.toolName, input, ctx.cwd);
 				if (externalPolicy !== "allow" && externalPaths.length > 0) {
 					const effectiveApprovals = [...persistentApprovals, ...sessionPathApprovals];
-					if (!approvalsCoverPaths(effectiveApprovals, event.toolName, externalPaths)) {
-						return applyExternalPathPolicy(externalPolicy, event.toolName, input, externalPaths, ctx);
+					if (!approvalsCoverPaths(effectiveApprovals, event.toolName, externalPaths, projectRoot, agentName, approvalsSettings)) {
+						return applyExternalPathPolicy(externalPolicy, event.toolName, input, externalPaths, projectRoot, ctx);
 					}
 				}
 				return undefined;
@@ -865,8 +972,8 @@ export default function (pi: ExtensionAPI) {
 			const externalPaths = getExternalPaths(event.toolName, input, ctx.cwd);
 			if (externalPaths.length > 0) {
 				const effectiveApprovals = [...persistentApprovals, ...sessionPathApprovals];
-				if (!approvalsCoverPaths(effectiveApprovals, event.toolName, externalPaths)) {
-					return applyExternalPathPolicy(policy.externalPath, event.toolName, input, externalPaths, ctx);
+				if (!approvalsCoverPaths(effectiveApprovals, event.toolName, externalPaths, projectRoot, agentName, approvalsSettings)) {
+					return applyExternalPathPolicy(policy.externalPath, event.toolName, input, externalPaths, projectRoot, ctx);
 				}
 			}
 		}
@@ -921,8 +1028,13 @@ export default function (pi: ExtensionAPI) {
 						`${theme.fg("accent", `${persistentApprovals.length} saved`)}`,
 					);
 					for (const approval of persistentApprovals.slice(0, 5)) {
+						const scope = approval.scopeType === "path-prefix" ? approval.scopeValue : `${approval.scopeType}:${approval.scopeValue}`;
+						const scopeSuffix = [
+							approval.projectRoot ? `project=${approval.projectRoot}` : undefined,
+							approval.agentName ? `agent=${approval.agentName}` : undefined,
+						].filter(Boolean).join(" ");
 						lines.push(
-							`  ${theme.fg("dim", "  ↳ ")}${theme.fg("muted", approval.tool)} ${theme.fg("dim", approval.pathPrefix)}`,
+							`  ${theme.fg("dim", "  ↳ ")}${theme.fg("muted", approval.tool)} ${theme.fg("dim", scope)}${scopeSuffix ? " " + theme.fg("muted", `[${scopeSuffix}]`) : ""}`,
 						);
 					}
 					if (persistentApprovals.length > 5) {
