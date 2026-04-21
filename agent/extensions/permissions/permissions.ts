@@ -1369,6 +1369,12 @@ export default function (pi: ExtensionAPI) {
 						if (max <= 1) return s.slice(0, Math.max(0, max));
 						return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 					};
+					const wrap = (s: string, max: number) => {
+						if (max <= 1 || s.length <= max) return [s];
+						const parts: string[] = [];
+						for (let i = 0; i < s.length; i += max) parts.push(s.slice(i, i + max));
+						return parts;
+					};
 					const toolW  = Math.min(18, Math.max(4, ...rules.map((r) => r.tool.length)));
 					const matchW = Math.min(48, Math.max(5, ...rules.map((r) => (r.match ? r.match.length + 2 : 1))));
 					const actionW = 10;
@@ -1386,19 +1392,29 @@ export default function (pi: ExtensionAPI) {
 
 					for (const rule of rules) {
 						const toolRaw = truncate(rule.tool, toolW);
-						const matchRaw = truncate(rule.match ? `/${rule.match}/` : "-", matchW);
+						const matchSource = rule.match ? `/${rule.match}/` : "-";
+						const matchParts = wrap(matchSource, matchW);
 						const actionRaw = truncate(`${actionIcon(rule.action)} ${rule.action}`, actionW - 1);
 						const epa = rule.externalPathAction ?? "inherit";
 						const reasonRaw = truncate(rule.reason ?? "-", reasonW);
 
 						const tool = theme.fg("text", pad(toolRaw, toolW + 2));
-						const match = theme.fg("muted", pad(matchRaw, matchW + 2));
 						const action = theme.fg(actionColor(rule.action), pad(actionRaw, actionW));
 						const epaColor = epa === "allow" ? "success" : epa === "block" ? "error" : epa === "ask" ? "warning" : "dim";
 						const epaStr = theme.fg(epaColor, pad(truncate(epa, extW), extW + 2));
 						const reason = theme.fg("dim", reasonRaw);
-						lines.push(`  ${tool}${match}${action}${epaStr}${reason}`);
+						lines.push(`  ${tool}${theme.fg("muted", pad(matchParts[0], matchW + 2))}${action}${epaStr}${reason}`);
+
+						for (const continuation of matchParts.slice(1)) {
+							const emptyTool = pad("", toolW + 2);
+							const emptyAction = pad("", actionW);
+							const emptyExt = pad("", extW + 2);
+							lines.push(
+								`  ${theme.fg("dim", emptyTool)}${theme.fg("dim", pad(`↳ ${continuation}`, matchW + 2))}${theme.fg("dim", emptyAction)}${theme.fg("dim", emptyExt)}`,
+							);
+						}
 					}
+					lines.push(`  ${theme.fg("dim", "(Long MATCH values wrap to continuation lines)")}`);
 				}
 
 				lines.push("");
