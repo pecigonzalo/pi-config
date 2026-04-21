@@ -133,31 +133,41 @@ describe("bash complexity and fallback", () => {
 		expect(__test__.hasComplexBashSyntax("cat file.txt")).toBe(false);
 		expect(__test__.isComplexBashCommand("cat file.txt && rm -rf tmp")).toBe(true);
 		expect(__test__.isComplexBashCommand("echo hi | wc -l")).toBe(true);
+		expect(__test__.isComplexBashCommand("rg foo & head")).toBe(true);
 	});
 
-	it("recognizes shell syntax forbidden for simple pipelines", () => {
-		expect(__test__.hasForbiddenSimplePipelineSyntax("rg foo src | head -10")).toBe(false);
-		expect(__test__.hasForbiddenSimplePipelineSyntax("rg foo src && head -10")).toBe(true);
-		expect(__test__.hasForbiddenSimplePipelineSyntax("rg foo src > out.txt")).toBe(true);
+	it("recognizes shell syntax forbidden for simple compounds", () => {
+		expect(__test__.hasForbiddenSimpleBashCompoundSyntax("rg foo src | head -10")).toBe(false);
+		expect(__test__.hasForbiddenSimpleBashCompoundSyntax("rg foo src && head -10")).toBe(false);
+		expect(__test__.hasForbiddenSimpleBashCompoundSyntax("rg foo src || head -10")).toBe(false);
+		expect(__test__.hasForbiddenSimpleBashCompoundSyntax("rg foo src > out.txt")).toBe(true);
+		expect(__test__.hasForbiddenSimpleBashCompoundSyntax("rg foo src ; head -10")).toBe(true);
 	});
 
-	it("splits simple pipelines but rejects unsupported edge cases", () => {
-		expect(__test__.splitSimplePipeline("rg foo src | head -10")).toEqual(["rg foo src", "head -10"]);
-		expect(__test__.splitSimplePipeline("find . -type f | rg permissions | head")).toEqual([
+	it("splits simple bash compounds but rejects unsupported edge cases", () => {
+		expect(__test__.splitSimpleBashCompound("rg foo src | head -10")).toEqual(["rg foo src", "head -10"]);
+		expect(__test__.splitSimpleBashCompound("find . -type f | rg permissions | head")).toEqual([
 			"find . -type f",
 			"rg permissions",
 			"head",
 		]);
-		expect(__test__.splitSimplePipeline("rg 'foo|bar' src")).toEqual(["rg 'foo|bar' src"]);
-		expect(__test__.splitSimplePipeline('rg "foo|bar" src | head')).toEqual(['rg "foo|bar" src', "head"]);
-		expect(__test__.splitSimplePipeline(String.raw`rg foo \| head`)).toEqual([String.raw`rg foo \| head`]);
-		expect(__test__.splitSimplePipeline("| head -10")).toBeUndefined();
-		expect(__test__.splitSimplePipeline("rg foo src |")).toBeUndefined();
-		expect(__test__.splitSimplePipeline("rg 'foo src | head -10")).toBeUndefined();
-		expect(__test__.splitSimplePipeline("rg foo src && head -10")).toBeUndefined();
+		expect(__test__.splitSimpleBashCompound("rg foo src || head -10 && pwd")).toEqual([
+			"rg foo src",
+			"head -10",
+			"pwd",
+		]);
+		expect(__test__.splitSimpleBashCompound("rg 'foo|bar||baz&&qux' src")).toEqual(["rg 'foo|bar||baz&&qux' src"]);
+		expect(__test__.splitSimpleBashCompound('rg "foo|bar" src | head')).toEqual(['rg "foo|bar" src', "head"]);
+		expect(__test__.splitSimpleBashCompound(String.raw`rg foo \| head`)).toEqual([String.raw`rg foo \| head`]);
+		expect(__test__.splitSimpleBashCompound("| head -10")).toBeUndefined();
+		expect(__test__.splitSimpleBashCompound("rg foo src |")).toBeUndefined();
+		expect(__test__.splitSimpleBashCompound("rg foo src &&")).toBeUndefined();
+		expect(__test__.splitSimpleBashCompound("rg foo src & head -10")).toBeUndefined();
+		expect(__test__.splitSimpleBashCompound("rg 'foo src | head -10")).toBeUndefined();
+		expect(__test__.splitSimpleBashCompound("rg foo src ; head -10")).toBeUndefined();
 	});
 
-	it("allows pipelines only when every segment is individually allowed", () => {
+	it("allows compounds only when every segment is individually allowed", () => {
 		const rules = [
 			{ tool: "bash", match: "rg *", action: "allow" as const },
 			{ tool: "bash", match: "find *", action: "allow" as const },
@@ -168,11 +178,20 @@ describe("bash complexity and fallback", () => {
 
 		expect(__test__.isAllowedSimpleBashCommand("rg foo src", rules)).toBe(true);
 		expect(__test__.isAllowedSimpleBashCommand("sed -n 1,10p file", rules)).toBe(false);
-		expect(__test__.isAllowedBashPipeline("rg foo src | head -10", rules)).toBe(true);
-		expect(__test__.isAllowedBashPipeline("find . -type f | rg foo | sort", rules)).toBe(true);
-		expect(__test__.isAllowedBashPipeline("rg foo src | sed -n 1,10p", rules)).toBe(false);
-		expect(__test__.isAllowedBashPipeline("rg foo src | rm -rf tmp", rules)).toBe(false);
-		expect(__test__.isAllowedBashPipeline("rg foo src && head -10", rules)).toBe(false);
+		expect(__test__.isAllowedBashCompound("rg foo src | head -10", rules)).toBe(true);
+		expect(__test__.isAllowedBashCompound("find . -type f | rg foo | sort", rules)).toBe(true);
+		expect(__test__.isAllowedBashCompound("rg foo src || head -10 && pwd", [
+			{ tool: "bash", match: "rg *", action: "allow" as const },
+			{ tool: "bash", match: "find *", action: "allow" as const },
+			{ tool: "bash", match: "head *", action: "allow" as const },
+			{ tool: "bash", match: "sort *", action: "allow" as const },
+			{ tool: "bash", match: "pwd *", action: "allow" as const },
+			{ tool: "bash", action: "ask" as const },
+		])).toBe(true);
+		expect(__test__.isAllowedBashCompound("rg foo src | sed -n 1,10p", rules)).toBe(false);
+		expect(__test__.isAllowedBashCompound("rg foo src | rm -rf tmp", rules)).toBe(false);
+		expect(__test__.isAllowedBashCompound("rg foo src && head -10", rules)).toBe(true);
+		expect(__test__.isAllowedBashCompound("rg foo src && head -10 & pwd", rules)).toBe(false);
 	});
 
 	it("detects dangerous bash patterns", () => {

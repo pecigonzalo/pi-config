@@ -7,8 +7,8 @@ export function sandboxFallbackModeForPolicy(mode: PermissionMode): "normal" | "
 	return "normal";
 }
 
-const COMPLEX_BASH_SYNTAX_RE = /(^|[^\\])(?:&&|\|\||[;|<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/;
-const SIMPLE_PIPELINE_FORBIDDEN_SYNTAX_RE = /(^|[^\\])(?:&&|\|\||[;<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/;
+const COMPLEX_BASH_SYNTAX_RE = /(^|[^\\])(?:&&|\|\||[;&|<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/;
+const SIMPLE_COMPOUND_FORBIDDEN_SYNTAX_RE = /(^|[^\\])(?:[;<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/;
 const DANGEROUS_BASH_CHECKS = [
 	{ re: /\brm\b/i, reason: "Deletes files" },
 	{ re: /\bmv\b/i, reason: "Moves or renames" },
@@ -24,18 +24,18 @@ export function hasComplexBashSyntax(command: string): boolean {
 	return COMPLEX_BASH_SYNTAX_RE.test(command);
 }
 
-export function hasForbiddenSimplePipelineSyntax(command: string): boolean {
-	return SIMPLE_PIPELINE_FORBIDDEN_SYNTAX_RE.test(command);
+export function hasForbiddenSimpleBashCompoundSyntax(command: string): boolean {
+	return SIMPLE_COMPOUND_FORBIDDEN_SYNTAX_RE.test(command);
 }
 
 export function isComplexBashCommand(command: string): boolean {
 	return hasComplexBashSyntax(command);
 }
 
-export function splitSimplePipeline(command: string): string[] | undefined {
+export function splitSimpleBashCompound(command: string): string[] | undefined {
 	const trimmed = command.trim();
 	if (!trimmed) return undefined;
-	if (hasForbiddenSimplePipelineSyntax(command)) return undefined;
+	if (hasForbiddenSimpleBashCompoundSyntax(command)) return undefined;
 
 	const parts: string[] = [];
 	let current = "";
@@ -44,6 +44,7 @@ export function splitSimplePipeline(command: string): string[] | undefined {
 
 	for (let i = 0; i < command.length; i++) {
 		const ch = command[i];
+		const next = command[i + 1];
 
 		if (escaped) {
 			current += ch;
@@ -69,12 +70,25 @@ export function splitSimplePipeline(command: string): string[] | undefined {
 			continue;
 		}
 
-		if (ch === "|" && quoteState === "none") {
-			const segment = current.trim();
-			if (!segment) return undefined;
-			parts.push(segment);
-			current = "";
-			continue;
+		if (quoteState === "none") {
+			if (ch === "&") {
+				if (next !== "&") return undefined;
+				const segment = current.trim();
+				if (!segment) return undefined;
+				parts.push(segment);
+				current = "";
+				i++;
+				continue;
+			}
+
+			if (ch === "|") {
+				const segment = current.trim();
+				if (!segment) return undefined;
+				parts.push(segment);
+				current = "";
+				if (next === "|") i++;
+				continue;
+			}
 		}
 
 		current += ch;
@@ -102,8 +116,8 @@ export function isAllowedSimpleBashCommand(command: string, rules: Rule[]): bool
 	return rule?.action === "allow";
 }
 
-export function isAllowedBashPipeline(command: string, rules: Rule[]): boolean {
-	const parts = splitSimplePipeline(command);
+export function isAllowedBashCompound(command: string, rules: Rule[]): boolean {
+	const parts = splitSimpleBashCompound(command);
 	if (!parts || parts.length < 2) return false;
 	return parts.every((part) => isAllowedSimpleBashCommand(part, rules));
 }
