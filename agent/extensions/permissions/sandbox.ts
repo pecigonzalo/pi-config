@@ -88,62 +88,106 @@ export function compileSandboxConfig(
 	};
 }
 
+export interface SandboxedCommandOptions {
+	command: string;
+	cwd: string;
+	env?: NodeJS.ProcessEnv;
+	timeout?: number;
+	signal?: AbortSignal;
+	onData?: (chunk: Buffer) => void;
+	onStdoutData?: (chunk: Buffer) => void;
+	onStderrData?: (chunk: Buffer) => void;
+	stdinMode?: "ignore" | "pipe";
+	onSpawn?: (child: ReturnType<typeof spawn>) => void;
+}
+
+export interface SandboxedCommandResult {
+	exitCode: number | null;
+}
+
+function killSandboxedChild(child: ReturnType<typeof spawn>) {
+	if (!child.pid) return;
+	try {
+		process.kill(-child.pid, "SIGKILL");
+	} catch {
+		child.kill("SIGKILL");
+	}
+}
+
+export async function runSandboxedCommand(
+	sandboxManager: SandboxManagerLike,
+	{
+		command,
+		cwd,
+		env,
+		timeout,
+		signal,
+		onData,
+		onStdoutData,
+		onStderrData,
+		stdinMode,
+		onSpawn,
+	}: SandboxedCommandOptions,
+): Promise<SandboxedCommandResult> {
+	const wrappedCommand = await sandboxManager.wrapWithSandbox(command);
+
+	return new Promise((resolve, reject) => {
+		const child = spawn("bash", ["-c", wrappedCommand], {
+			cwd,
+			env,
+			detached: true,
+			stdio: [stdinMode ?? "ignore", "pipe", "pipe"],
+		});
+
+		onSpawn?.(child);
+
+		let timedOut = false;
+		let timeoutHandle: NodeJS.Timeout | undefined;
+
+		if (timeout !== undefined && timeout > 0) {
+			timeoutHandle = setTimeout(() => {
+				timedOut = true;
+				killSandboxedChild(child);
+			}, timeout * 1000);
+		}
+
+		child.stdout?.on("data", (chunk) => {
+			onStdoutData?.(chunk);
+			onData?.(chunk);
+		});
+		child.stderr?.on("data", (chunk) => {
+			onStderrData?.(chunk);
+			onData?.(chunk);
+		});
+
+		child.on("error", (err) => {
+			if (timeoutHandle) clearTimeout(timeoutHandle);
+			reject(err);
+		});
+
+		const onAbort = () => killSandboxedChild(child);
+		signal?.addEventListener("abort", onAbort, { once: true });
+
+		child.on("close", (code) => {
+			if (timeoutHandle) clearTimeout(timeoutHandle);
+			signal?.removeEventListener("abort", onAbort);
+
+			if (signal?.aborted) reject(new Error("aborted"));
+			else if (timedOut) reject(new Error(`timeout:${timeout}`));
+			else resolve({ exitCode: code });
+		});
+	});
+}
+
 export function createSandboxedBashOps(sandboxManager: SandboxManagerLike): BashOperations {
 	return {
 		async exec(command, cwd, { onData, signal, timeout }) {
-			const wrappedCommand = await sandboxManager.wrapWithSandbox(command);
-
-			return new Promise((resolve, reject) => {
-				const child = spawn("bash", ["-c", wrappedCommand], {
-					cwd,
-					detached: true,
-					stdio: ["ignore", "pipe", "pipe"],
-				});
-
-				let timedOut = false;
-				let timeoutHandle: NodeJS.Timeout | undefined;
-
-				if (timeout !== undefined && timeout > 0) {
-					timeoutHandle = setTimeout(() => {
-						timedOut = true;
-						if (child.pid) {
-							try {
-								process.kill(-child.pid, "SIGKILL");
-							} catch {
-								child.kill("SIGKILL");
-							}
-						}
-					}, timeout * 1000);
-				}
-
-				child.stdout?.on("data", onData);
-				child.stderr?.on("data", onData);
-
-				child.on("error", (err) => {
-					if (timeoutHandle) clearTimeout(timeoutHandle);
-					reject(err);
-				});
-
-				const onAbort = () => {
-					if (child.pid) {
-						try {
-							process.kill(-child.pid, "SIGKILL");
-						} catch {
-							child.kill("SIGKILL");
-						}
-					}
-				};
-
-				signal?.addEventListener("abort", onAbort, { once: true });
-
-				child.on("close", (code) => {
-					if (timeoutHandle) clearTimeout(timeoutHandle);
-					signal?.removeEventListener("abort", onAbort);
-
-					if (signal?.aborted) reject(new Error("aborted"));
-					else if (timedOut) reject(new Error(`timeout:${timeout}`));
-					else resolve({ exitCode: code });
-				});
+			return runSandboxedCommand(sandboxManager, {
+				command,
+				cwd,
+				timeout,
+				signal,
+				onData,
 			});
 		},
 	};

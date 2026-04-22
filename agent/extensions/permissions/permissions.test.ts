@@ -7,6 +7,7 @@ import { resolveCodemodePolicy } from "./codemode";
 import { isPathOutsideCwd, ruleMatch } from "./matching";
 import {
 	detectDangerousBashPattern,
+	getFirstUnapprovedBashSegment,
 	hasComplexBashSyntax,
 	hasForbiddenSimpleBashCompoundSyntax,
 	isAllowedBashCompound,
@@ -130,6 +131,23 @@ describe("scoped approvals", () => {
 		expect(approvalsCoverBash(approvals, "npm run test", "/repo-a", "default", settings)).toBe(true);
 		expect(approvalsCoverBash(approvals, "npm run test", "/repo-a", "reviewer", settings)).toBe(false);
 	});
+
+	it("lets approvals cover a compound segment when evaluated separately", () => {
+		const settings = getApprovalsSettings({ approvals: { scopeByProject: true, scopeByAgent: true } });
+		const approvals = [
+			{
+				tool: "bash",
+				scopeType: "bash-prefix" as const,
+				scopeValue: "sed -n",
+				projectRoot: "/repo-a",
+				agentName: "default",
+				createdAt: Date.now(),
+			},
+		];
+
+		expect(approvalsCoverBash(approvals, "sed -n '1,200p'", "/repo-a", "default", settings)).toBe(true);
+		expect(approvalsCoverBash(approvals, "rg foo | sed -n '1,200p'", "/repo-a", "default", settings)).toBe(false);
+	});
 });
 
 describe("bash complexity and fallback", () => {
@@ -177,10 +195,12 @@ describe("bash complexity and fallback", () => {
 
 	it("allows compounds only when every segment is individually allowed", () => {
 		const rules = [
+			{ tool: "bash", match: "cd *", action: "allow" as const },
 			{ tool: "bash", match: "rg *", action: "allow" as const },
 			{ tool: "bash", match: "find *", action: "allow" as const },
 			{ tool: "bash", match: "head *", action: "allow" as const },
 			{ tool: "bash", match: "sort *", action: "allow" as const },
+			{ tool: "bash", match: "bun *", action: "allow" as const },
 			{ tool: "bash", action: "ask" as const },
 		];
 
@@ -188,6 +208,8 @@ describe("bash complexity and fallback", () => {
 		expect(isAllowedSimpleBashCommand("sed -n 1,10p file", rules)).toBe(false);
 		expect(isAllowedBashCompound("rg foo src | head -10", rules)).toBe(true);
 		expect(isAllowedBashCompound("find . -type f | rg foo | sort", rules)).toBe(true);
+		expect(isAllowedBashCompound("cd /tmp && bun test", rules)).toBe(true);
+		expect(getFirstUnapprovedBashSegment("cd /tmp && bun test", rules)).toBeUndefined();
 		expect(isAllowedBashCompound("rg foo src || head -10 && pwd", [
 			{ tool: "bash", match: "rg *", action: "allow" as const },
 			{ tool: "bash", match: "find *", action: "allow" as const },
@@ -197,6 +219,9 @@ describe("bash complexity and fallback", () => {
 			{ tool: "bash", action: "ask" as const },
 		])).toBe(true);
 		expect(isAllowedBashCompound("rg foo src | sed -n 1,10p", rules)).toBe(false);
+		expect(getFirstUnapprovedBashSegment("rg foo src | sed -n 1,10p", rules)).toBe("sed -n 1,10p");
+		expect(isAllowedBashCompound("rg foo src | sed -n 1,10p", rules, (command) => command.startsWith("sed -n"))).toBe(true);
+		expect(getFirstUnapprovedBashSegment("rg foo src | sed -n 1,10p", rules, (command) => command.startsWith("sed -n"))).toBeUndefined();
 		expect(isAllowedBashCompound("rg foo src | rm -rf tmp", rules)).toBe(false);
 		expect(isAllowedBashCompound("rg foo src && head -10", rules)).toBe(true);
 		expect(isAllowedBashCompound("rg foo src && head -10 & pwd", rules)).toBe(false);

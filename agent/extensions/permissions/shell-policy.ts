@@ -201,8 +201,27 @@ export function isAllowedSimpleBashCommand(command: string, rules: Rule[]): bool
 	return rule?.action === "allow";
 }
 
-export function isAllowedBashCompound(command: string, rules: Rule[]): boolean {
+export function getFirstUnapprovedBashSegment(
+	command: string,
+	rules: Rule[],
+	isApproved?: (command: string) => boolean,
+): string | undefined {
+	const parts = splitSimpleBashCompound(command);
+	if (!parts || parts.length < 2) return undefined;
+	for (const part of parts) {
+		if (isAllowedSimpleBashCommand(part, rules)) continue;
+		if (isApproved?.(part) === true) continue;
+		return part;
+	}
+	return undefined;
+}
+
+export function isAllowedBashCompound(
+	command: string,
+	rules: Rule[],
+	isApproved?: (command: string) => boolean,
+): boolean {
 	const parts = splitSimpleBashCompound(command);
 	if (!parts || parts.length < 2) return false;
-	return parts.every((part) => isAllowedSimpleBashCommand(part, rules));
+	return getFirstUnapprovedBashSegment(command, rules, isApproved) === undefined;
 }

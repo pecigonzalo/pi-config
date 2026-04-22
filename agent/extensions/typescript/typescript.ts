@@ -1,0 +1,1025 @@
+import { spawn } from "node:child_process";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import type { Message } from "@mariozechner/pi-ai";
+import { StringEnum } from "@mariozechner/pi-ai";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
+import { Type } from "@sinclair/typebox";
+import { activePolicy, loadConfig } from "../permissions/config";
+import { resolveCodemodePolicy } from "../permissions/codemode";
+import { getEffectiveSandboxTmpDir, runSandboxedCommand } from "../permissions/sandbox";
+import type { CodemodeCapability, CodemodeProfileName, SandboxManagerLike } from "../permissions/shared";
+import { discoverAgents, type AgentScope } from "../tasks/agents";
+
+const LOG_PREFIX = "__PI_CODEMODE_LOG__";
+const RESULT_PREFIX = "__PI_CODEMODE_RESULT__";
+const BRIDGE_REQUEST_PREFIX = "__PI_CODEMODE_BRIDGE_REQUEST__";
+const BRIDGE_RESPONSE_PREFIX = "__PI_CODEMODE_BRIDGE_RESPONSE__";
+const MAX_LOG_LINES = 200;
+const MAX_RESULT_PREVIEW = 8_000;
+const SANDBOX_APPLY_ERROR = "sandbox_apply: Operation not permitted";
+
+type ProtocolLog = {
+	level?: string;
+	args?: unknown[];
+};
+
+type ProtocolResult =
+	| {
+			ok: true;
+			result: unknown;
+	  }
+	| {
+			ok: false;
+			error: {
+				phase: "compile" | "execute" | "bridge" | "timeout" | "protocol";
+				message: string;
+				stack?: string;
+			};
+	  };
+
+type BridgeRequest = {
+	id: number;
+	method: string;
+	args: unknown;
+};
+
+type BridgeResponse = {
+	id: number;
+	ok: boolean;
+	result?: unknown;
+	error?: {
+		message: string;
+	};
+};
+
+type CodemodeArtifact = {
+	name: string;
+	path: string;
+	size: number;
+};
+
+type CodemodeBridgeCall = {
+	name: string;
+	ok: boolean;
+	argsPreview: string;
+	startedAt: number;
+	endedAt: number;
+	error?: string;
+};
+
+type CodemodeDetails = {
+	profile: CodemodeProfileName;
+	cwd: string;
+	timeout: number;
+	code: string;
+	exitCode: number | null;
+	ok: boolean;
+	result?: unknown;
+	error?: ProtocolResult extends infer R ? R extends { ok: false; error: infer E } ? E : never : never;
+	logs: string[];
+	rawOutput: string;
+	artifacts: CodemodeArtifact[];
+	bridgeCalls: CodemodeBridgeCall[];
+	sandbox: {
+		enabled: boolean;
+		reason: string;
+		mode: "dedicated" | "inherited" | "none";
+	};
+};
+
+interface LocalCommandOptions {
+	command: string;
+	cwd: string;
+	env?: NodeJS.ProcessEnv;
+	timeout?: number;
+	signal?: AbortSignal;
+	onStdoutData?: (chunk: Buffer) => void;
+	onStderrData?: (chunk: Buffer) => void;
+	stdinMode?: "ignore" | "pipe";
+	onSpawn?: (child: ReturnType<typeof spawn>) => void;
+}
+
+interface BridgeRuntimeState {
+	capabilities: CodemodeCapability[];
+	artifactsDir: string;
+	artifacts: CodemodeArtifact[];
+	bridgeCalls: CodemodeBridgeCall[];
+	onUpdate?: Parameters<NonNullable<Parameters<ExtensionAPI["registerTool"]>[0]["execute"]>>[3];
+	signal?: AbortSignal;
+	cwd: string;
+	allowProjectAgents: boolean;
+}
+
+function getInheritedSandboxInfo(): { active: boolean; reason?: string; tmpDir?: string } {
+	return {
+		active: process.env.PI_SANDBOX_ACTIVE === "1",
+		reason: process.env.PI_SANDBOX_REASON,
+		tmpDir: process.env.PI_SANDBOX_TMPDIR,
+	};
+}
+
+function allowUnsandboxedFallback(): boolean {
+	const value = process.env.PI_CODEMODE_ALLOW_UNSANDBOXED;
+	if (!value) return false;
+	return /^(1|true|yes)$/i.test(value);
+}
+
+const CodemodeParams = Type.Object({
+	code: Type.String({ description: "TypeScript code to execute inside the CodeMode runtime" }),
+	profile: Type.Optional(
+		StringEnum(["analysis", "orchestrator"] as const, {
+			description: "Execution profile controlling sandboxing and future bridge capabilities",
+		}),
+	),
+	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (1..120, default 30)" })),
+	cwd: Type.Optional(Type.String({ description: "Optional working directory override, relative to current cwd unless absolute" })),
+});
+
+function detectAgentName(pi: ExtensionAPI): string {
+	if (process.env.PI_AGENT_NAME) return process.env.PI_AGENT_NAME;
+	const flagValue = pi.getFlag("agent-name");
+	if (typeof flagValue === "string" && flagValue.length > 0) return flagValue;
+	return "default";
+}
+
+function clampTimeout(value: number | undefined): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) return 30;
+	return Math.max(1, Math.min(120, value));
+}
+
+async function resolveExecutionCwd(baseCwd: string, requested: string | undefined): Promise<string> {
+	const raw = (requested ?? ".").replace(/^@/, "");
+	const resolved = path.resolve(baseCwd, raw);
+	const stat = await fs.stat(resolved).catch(() => undefined);
+	if (!stat) throw new Error(`CodeMode cwd does not exist: ${requested ?? baseCwd}`);
+	if (!stat.isDirectory()) throw new Error(`CodeMode cwd is not a directory: ${requested ?? baseCwd}`);
+	return resolved;
+}
+
+function runLocalCommand({
+	command,
+	cwd,
+	env,
+	timeout,
+	signal,
+	onStdoutData,
+	onStderrData,
+	stdinMode,
+	onSpawn,
+}: LocalCommandOptions): Promise<{ exitCode: number | null }> {
+	return new Promise((resolve, reject) => {
+		const child = spawn("bash", ["-lc", command], {
+			cwd,
+			env,
+			detached: true,
+			stdio: [stdinMode ?? "ignore", "pipe", "pipe"],
+		});
+		onSpawn?.(child);
+
+		let timedOut = false;
+		let timeoutHandle: NodeJS.Timeout | undefined;
+		if (timeout !== undefined && timeout > 0) {
+			timeoutHandle = setTimeout(() => {
+				timedOut = true;
+				if (child.pid) {
+					try {
+						process.kill(-child.pid, "SIGKILL");
+					} catch {
+						child.kill("SIGKILL");
+					}
+				}
+			}, timeout * 1000);
+		}
+
+		child.stdout?.on("data", (chunk) => onStdoutData?.(chunk));
+		child.stderr?.on("data", (chunk) => onStderrData?.(chunk));
+
+		child.on("error", (error) => {
+			if (timeoutHandle) clearTimeout(timeoutHandle);
+			reject(error);
+		});
+
+		const onAbort = () => {
+			if (child.pid) {
+				try {
+					process.kill(-child.pid, "SIGKILL");
+				} catch {
+					child.kill("SIGKILL");
+				}
+			}
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+
+		child.on("close", (code) => {
+			if (timeoutHandle) clearTimeout(timeoutHandle);
+			signal?.removeEventListener("abort", onAbort);
+			if (signal?.aborted) reject(new Error("aborted"));
+			else if (timedOut) reject(new Error(`timeout:${timeout}`));
+			else resolve({ exitCode: code });
+		});
+	});
+}
+
+function isSandboxLaunchFailure(rawOutput: string): boolean {
+	return rawOutput.includes(SANDBOX_APPLY_ERROR);
+}
+
+function serializeForDisplay(value: unknown): string {
+	if (typeof value === "string") return value;
+	try {
+		return JSON.stringify(value, null, 2);
+	} catch {
+		return String(value);
+	}
+}
+
+function truncate(text: string, maxChars: number): string {
+	if (text.length <= maxChars) return text;
+	return `${text.slice(0, maxChars)}\n\n[truncated ${text.length - maxChars} chars]`;
+}
+
+function formatLogLine(log: ProtocolLog): string {
+	const parts = (log.args ?? []).map((arg) => serializeForDisplay(arg));
+	const prefix = log.level ? `[${log.level}] ` : "";
+	return `${prefix}${parts.join(" ")}`.trim();
+}
+
+function parseProtocolOutput(rawOutput: string): { logs: string[]; result?: ProtocolResult } {
+	const logs: string[] = [];
+	let result: ProtocolResult | undefined;
+
+	for (const line of rawOutput.split(/\r?\n/)) {
+		if (line.startsWith(LOG_PREFIX)) {
+			try {
+				const payload = JSON.parse(line.slice(LOG_PREFIX.length)) as ProtocolLog;
+				logs.push(formatLogLine(payload));
+			} catch {
+				logs.push(`[protocol] could not parse log payload: ${line.slice(LOG_PREFIX.length)}`);
+			}
+			continue;
+		}
+		if (line.startsWith(RESULT_PREFIX)) {
+			try {
+				result = JSON.parse(line.slice(RESULT_PREFIX.length)) as ProtocolResult;
+			} catch (error) {
+				result = {
+					ok: false,
+					error: {
+						phase: "protocol",
+						message: `Failed to parse runtime result: ${error instanceof Error ? error.message : String(error)}`,
+					},
+				};
+			}
+		}
+	}
+
+	return { logs: logs.slice(-MAX_LOG_LINES), result };
+}
+
+function buildRunnerSource(userCode: string, capabilities: CodemodeCapability[]): string {
+	return `
+const LOG_PREFIX = ${JSON.stringify(LOG_PREFIX)};
+const RESULT_PREFIX = ${JSON.stringify(RESULT_PREFIX)};
+const BRIDGE_REQUEST_PREFIX = ${JSON.stringify(BRIDGE_REQUEST_PREFIX)};
+const BRIDGE_RESPONSE_PREFIX = ${JSON.stringify(BRIDGE_RESPONSE_PREFIX)};
+const CAPABILITIES = ${JSON.stringify(capabilities)};
+
+function serialize(value, seen = new WeakSet()) {
+  if (value === null || value === undefined) return value ?? null;
+  const type = typeof value;
+  if (type === "string" || type === "number" || type === "boolean") return value;
+  if (type === "bigint") return value.toString();
+  if (type === "function") return { __type: "function", name: value.name || "anonymous" };
+  if (value instanceof Error) {
+    return {
+      __type: "error",
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+    };
+  }
+  if (Array.isArray(value)) return value.map((item) => serialize(item, seen));
+  if (type === "object") {
+    if (seen.has(value)) return { __type: "circular" };
+    seen.add(value);
+    const out = {};
+    for (const [key, entry] of Object.entries(value)) out[key] = serialize(entry, seen);
+    seen.delete(value);
+    return out;
+  }
+  return String(value);
+}
+
+function emit(prefix, payload) {
+  process.stdout.write(prefix + JSON.stringify(payload) + "\\n");
+}
+
+function log(level, args) {
+  emit(LOG_PREFIX, { level, args: args.map((arg) => serialize(arg)) });
+}
+
+console.log = (...args) => log("log", args);
+console.info = (...args) => log("info", args);
+console.warn = (...args) => log("warn", args);
+console.error = (...args) => log("error", args);
+console.debug = (...args) => log("debug", args);
+
+let bridgeBuffer = "";
+const bridgePending = new Map();
+let bridgeNextId = 1;
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  bridgeBuffer += chunk;
+  const lines = bridgeBuffer.split(/\\r?\\n/);
+  bridgeBuffer = lines.pop() || "";
+  for (const line of lines) {
+    if (!line.startsWith(BRIDGE_RESPONSE_PREFIX)) continue;
+    try {
+      const payload = JSON.parse(line.slice(BRIDGE_RESPONSE_PREFIX.length));
+      const pending = bridgePending.get(payload.id);
+      if (!pending) continue;
+      bridgePending.delete(payload.id);
+      if (payload.ok) pending.resolve(payload.result);
+      else pending.reject(new Error(payload.error?.message || "Bridge call failed"));
+    } catch (error) {
+      console.error("Failed to parse bridge response", error);
+    }
+  }
+});
+
+async function callHost(method, args) {
+  const id = bridgeNextId++;
+  emit(BRIDGE_REQUEST_PREFIX, { id, method, args: serialize(args) });
+  return await new Promise((resolve, reject) => {
+    bridgePending.set(id, { resolve, reject });
+  });
+}
+
+const host = {
+  async capabilities() {
+    return [...CAPABILITIES];
+  },
+  async help() {
+    return {
+      message: "Pi CodeMode host bridge",
+      available: [...CAPABILITIES],
+    };
+  },
+  message: {
+    async info(text) {
+      return await callHost("message.info", { text });
+    },
+    async warn(text) {
+      return await callHost("message.warn", { text });
+    },
+  },
+  artifact: {
+    async write(name, content) {
+      return await callHost("artifact.write", { name, content });
+    },
+  },
+  task: {
+    async run(params) {
+      return await callHost("task.run", params);
+    },
+  },
+  todo: {
+    async list() {
+      return await callHost("todo.list", {});
+    },
+    async add(params) {
+      return await callHost("todo.add", params);
+    },
+    async update(params) {
+      return await callHost("todo.update", params);
+    },
+  },
+};
+
+const state = Object.create(null);
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+
+async function main() {
+  try {
+    const fn = new AsyncFunction("host", "state", ${JSON.stringify(userCode)});
+    const result = await fn(host, state);
+    emit(RESULT_PREFIX, { ok: true, result: serialize(result) });
+  } catch (error) {
+    emit(RESULT_PREFIX, {
+      ok: false,
+      error: {
+        phase: error instanceof SyntaxError ? "compile" : "execute",
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      },
+    });
+    process.exitCode = 1;
+  }
+}
+
+await main();
+process.stdin.pause();
+process.exit(process.exitCode ?? 0);
+`.trimStart();
+}
+
+async function createRuntimeFiles(runtimeDir: string, code: string, capabilities: CodemodeCapability[]): Promise<{ entryFile: string }> {
+	const entryFile = path.join(runtimeDir, "runner.ts");
+	await fs.writeFile(entryFile, buildRunnerSource(code, capabilities), "utf8");
+	return { entryFile };
+}
+
+async function initializeSandboxManager(config: unknown): Promise<SandboxManagerLike> {
+	const mod = await import("../permissions/node_modules/@anthropic-ai/sandbox-runtime/dist/index.js");
+	const sandboxManager = mod.SandboxManager as SandboxManagerLike;
+	await sandboxManager.initialize(config as Parameters<SandboxManagerLike["initialize"]>[0]);
+	return sandboxManager;
+}
+
+function sanitizeArtifactName(name: string): string {
+	const trimmed = name.trim().replace(/^@/, "");
+	const base = path.basename(trimmed || "artifact.txt");
+	return base.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 128) || "artifact.txt";
+}
+
+function getPiInvocation(args: string[]): { command: string; args: string[] } {
+	const currentScript = process.argv[1];
+	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
+	if (currentScript && !isBunVirtualScript) {
+		return { command: process.execPath, args: [currentScript, ...args] };
+	}
+	return { command: "pi", args };
+}
+
+function normalizeLegacyModelName(model: string | undefined): string | undefined {
+	if (!model || model.includes("/")) return model;
+	return model.replace(/(\d)-(\d)(?=(?:\D|$))/g, "$1.$2");
+}
+
+function getFinalAssistantText(messages: Message[]): string {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg.role !== "assistant") continue;
+		for (const part of msg.content) {
+			if (part.type === "text") return part.text;
+		}
+	}
+	return "";
+}
+
+async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
+	const tmpDir = await fs.mkdtemp(path.join(process.env.TMPDIR || "/tmp", "pi-codemode-task-"));
+	const safeName = agentName.replace(/[^\w.-]+/g, "_");
+	const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
+	await fs.writeFile(filePath, prompt, { encoding: "utf-8", mode: 0o600 });
+	return { dir: tmpDir, filePath };
+}
+
+async function runTaskBridge(state: BridgeRuntimeState, args: unknown): Promise<unknown> {
+	if (!state.capabilities.includes("task")) throw new Error("host.task.run is not available for this profile");
+	if (!args || typeof args !== "object") throw new Error("host.task.run expects an object argument");
+	const input = args as { agent?: unknown; task?: unknown; cwd?: unknown; agentScope?: unknown };
+	if (typeof input.agent !== "string" || input.agent.trim() === "") throw new Error("host.task.run requires string field 'agent'");
+	if (typeof input.task !== "string" || input.task.trim() === "") throw new Error("host.task.run requires string field 'task'");
+	const agentScope = (input.agentScope ?? "user") as AgentScope;
+	if (agentScope !== "user" && !state.allowProjectAgents) {
+		throw new Error("host.task.run only allows agentScope='user' in this MVP");
+	}
+	const taskCwd = typeof input.cwd === "string" ? path.resolve(state.cwd, input.cwd) : state.cwd;
+	const discovery = discoverAgents(taskCwd, agentScope);
+	const agent = discovery.agents.find((candidate) => candidate.name === input.agent);
+	if (!agent) throw new Error(`Unknown agent: ${input.agent}`);
+
+	const piArgs: string[] = ["--mode", "json", "-p", "--no-session"];
+	const model = normalizeLegacyModelName(agent.model);
+	if (model) piArgs.push("--model", model);
+	if (agent.tools && agent.tools.length > 0) piArgs.push("--tools", agent.tools.join(","));
+	if (!agent.inheritProjectContext) piArgs.push("--no-context-files");
+	if (!agent.inheritSkills) piArgs.push("--no-skills");
+
+	let tmpPromptDir: string | null = null;
+	let tmpPromptPath: string | null = null;
+	if (agent.systemPrompt.trim()) {
+		const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
+		tmpPromptDir = tmp.dir;
+		tmpPromptPath = tmp.filePath;
+		const promptFlag = agent.systemPromptMode === "append" ? "--append-system-prompt" : "--system-prompt";
+		piArgs.push(promptFlag, tmpPromptPath);
+	}
+	piArgs.push(`Task: ${input.task}`);
+
+	const invocation = getPiInvocation(piArgs);
+	const messages: Message[] = [];
+	let stderr = "";
+	let buffer = "";
+
+	try {
+		const exitCode = await new Promise<number>((resolve) => {
+			const proc = spawn(invocation.command, invocation.args, {
+				cwd: taskCwd,
+				shell: false,
+				stdio: ["ignore", "pipe", "pipe"],
+				env: process.env,
+			});
+
+			const processLine = (line: string) => {
+				if (!line.trim()) return;
+				try {
+					const event = JSON.parse(line) as { type?: string; message?: Message };
+					if ((event.type === "message_end" || event.type === "tool_result_end") && event.message) {
+						messages.push(event.message);
+					}
+				} catch {
+					// ignore non-json lines
+				}
+			};
+
+			proc.stdout.on("data", (chunk) => {
+				buffer += chunk.toString("utf8");
+				const lines = buffer.split(/\r?\n/);
+				buffer = lines.pop() || "";
+				for (const line of lines) processLine(line);
+			});
+			proc.stderr.on("data", (chunk) => {
+				stderr += chunk.toString("utf8");
+			});
+			proc.on("close", (code) => {
+				if (buffer.trim()) processLine(buffer);
+				resolve(code ?? 0);
+			});
+			proc.on("error", () => resolve(1));
+
+			if (state.signal) {
+				const onAbort = () => {
+					proc.kill("SIGTERM");
+					setTimeout(() => {
+						if (!proc.killed) proc.kill("SIGKILL");
+					}, 5000);
+				};
+				if (state.signal.aborted) onAbort();
+				else state.signal.addEventListener("abort", onAbort, { once: true });
+			}
+		});
+
+		return {
+			agent: agent.name,
+			agentSource: agent.source,
+			exitCode,
+			output: getFinalAssistantText(messages),
+			stderr,
+			messageCount: messages.length,
+			model,
+		};
+	} finally {
+		if (tmpPromptPath) await fs.rm(tmpPromptPath, { force: true }).catch(() => {});
+		if (tmpPromptDir) await fs.rm(tmpPromptDir, { recursive: true, force: true }).catch(() => {});
+	}
+}
+
+async function executeBridgeRequest(state: BridgeRuntimeState, request: BridgeRequest): Promise<unknown> {
+	switch (request.method) {
+		case "message.info": {
+			const text = typeof (request.args as { text?: unknown })?.text === "string" ? (request.args as { text: string }).text : "";
+			if (!state.capabilities.includes("message")) throw new Error("host.message.info is not available for this profile");
+			state.onUpdate?.({ content: [{ type: "text", text }] });
+			return { ok: true };
+		}
+		case "message.warn": {
+			const text = typeof (request.args as { text?: unknown })?.text === "string" ? (request.args as { text: string }).text : "";
+			if (!state.capabilities.includes("message")) throw new Error("host.message.warn is not available for this profile");
+			state.onUpdate?.({ content: [{ type: "text", text: `WARNING: ${text}` }] });
+			return { ok: true };
+		}
+		case "artifact.write": {
+			if (!state.capabilities.includes("artifact")) throw new Error("host.artifact.write is not available for this profile");
+			const input = request.args as { name?: unknown; content?: unknown };
+			if (typeof input?.name !== "string") throw new Error("host.artifact.write requires string field 'name'");
+			if (typeof input?.content !== "string") throw new Error("host.artifact.write requires string field 'content'");
+			await fs.mkdir(state.artifactsDir, { recursive: true });
+			const artifactName = sanitizeArtifactName(input.name);
+			const artifactPath = path.join(state.artifactsDir, artifactName);
+			await fs.writeFile(artifactPath, input.content, "utf8");
+			const stat = await fs.stat(artifactPath);
+			const artifact: CodemodeArtifact = {
+				name: artifactName,
+				path: artifactPath,
+				size: stat.size,
+			};
+			state.artifacts.push(artifact);
+			return artifact;
+		}
+		case "task.run":
+			return runTaskBridge(state, request.args);
+		case "todo.list":
+		case "todo.add":
+		case "todo.update":
+			throw new Error("host.todo bridge is not implemented yet");
+		default:
+			throw new Error(`Unknown bridge method: ${request.method}`);
+	}
+}
+
+function formatDurationMs(startedAt: number, endedAt: number): string {
+	return `${Math.max(0, endedAt - startedAt)}ms`;
+}
+
+function buildContent(details: CodemodeDetails): string {
+	if (details.ok) {
+		const resultText = truncate(serializeForDisplay(details.result), MAX_RESULT_PREVIEW);
+		const parts = ["CodeMode completed successfully.", "", "Result:", resultText];
+		if (details.logs.length > 0) parts.push("", "Logs:", details.logs.join("\n"));
+		if (details.artifacts.length > 0) {
+			parts.push("", "Artifacts:", ...details.artifacts.map((artifact) => `- ${artifact.name} (${artifact.size} bytes)`));
+		}
+		if (details.bridgeCalls.length > 0) {
+			parts.push("", "Bridge calls:", ...details.bridgeCalls.map((call) => `- ${call.name}: ${call.ok ? "ok" : `error (${call.error})`}`));
+		}
+		return parts.join("\n");
+	}
+
+	const errorText = details.error ? `${details.error.phase}: ${details.error.message}` : "unknown error";
+	const parts = ["CodeMode execution failed.", "", `Error: ${errorText}`];
+	if (details.logs.length > 0) parts.push("", "Logs:", details.logs.join("\n"));
+	if (details.bridgeCalls.length > 0) {
+		parts.push("", "Bridge calls:", ...details.bridgeCalls.map((call) => `- ${call.name}: ${call.ok ? "ok" : `error (${call.error})`}`));
+	}
+	return parts.join("\n");
+}
+
+export default function (pi: ExtensionAPI) {
+	pi.registerTool({
+		name: "typescript",
+		label: "TypeScript",
+		description:
+			"Execute one-shot TypeScript in a sandboxed Bun runtime. Best for batched analysis and local data processing. Includes an MVP host bridge for message, artifact, and task operations.",
+		promptSnippet:
+			"Execute one-shot TypeScript in a sandboxed runtime for batched analysis, local data processing, artifact generation, and limited host-orchestrated workflows.",
+		promptGuidelines: [
+			"Use this CodeMode-style tool when the task benefits from batching multiple local operations into one scripted execution instead of many step-by-step tool calls.",
+			"Prefer this tool for codebase analysis, structured extraction, summarization over many inputs, and artifact generation.",
+			"Do not use this tool for trivial single-step actions when direct tools are simpler.",
+			"Use profile \"analysis\" for read/analyze/report tasks and \"orchestrator\" only when host bridge operations like task delegation are needed.",
+			"When using this tool, return a compact result and use artifact writing for larger outputs.",
+		],
+		parameters: CodemodeParams,
+		renderCall(args, theme, _context) {
+			const profile = (args.profile ?? "analysis") as CodemodeProfileName;
+			const code = typeof args.code === "string" ? args.code.trim() : "";
+			const firstLine = code.split(/\r?\n/, 1)[0] ?? "";
+			const preview = firstLine.length > 90 ? `${firstLine.slice(0, 90)}...` : firstLine;
+			let text =
+				theme.fg("toolTitle", theme.bold("codemode ")) +
+				theme.fg("accent", profile) +
+				theme.fg("muted", ` timeout=${clampTimeout(args.timeout)}s`);
+			if (args.cwd) text += theme.fg("dim", ` cwd=${args.cwd}`);
+			if (preview) text += `\n  ${theme.fg("dim", preview)}`;
+			return new Text(text, 0, 0);
+		},
+		renderResult(result, { expanded }, theme, _context) {
+			const details = result.details as CodemodeDetails | undefined;
+			if (!details) {
+				const text = result.content[0];
+				return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+			}
+
+			const icon = details.ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
+			const sandboxLabel = `${details.sandbox.mode}${details.sandbox.enabled ? " sandbox" : " unsandboxed"}`;
+			let text = `${icon} ${theme.fg("toolTitle", theme.bold("CodeMode"))} ${theme.fg("muted", `[${details.profile}] [${sandboxLabel}]`)}`;
+			if (!details.ok && details.error) {
+				text += `\n${theme.fg("error", `${details.error.phase}: ${details.error.message}`)}`;
+			}
+
+			if (details.ok) {
+				const resultPreview = truncate(serializeForDisplay(details.result), expanded ? MAX_RESULT_PREVIEW : 300);
+				text += `\n${theme.fg("muted", "result:")} ${theme.fg("toolOutput", resultPreview)}`;
+			}
+
+			if (details.artifacts.length > 0) {
+				text += `\n${theme.fg("muted", `artifacts (${details.artifacts.length}):`)}`;
+				for (const artifact of (expanded ? details.artifacts : details.artifacts.slice(0, 3))) {
+					text += `\n  ${theme.fg("accent", artifact.name)}${theme.fg("dim", ` (${artifact.size} bytes)`)}`;
+				}
+				if (!expanded && details.artifacts.length > 3) {
+					text += `\n  ${theme.fg("dim", `... ${details.artifacts.length - 3} more`)}`;
+				}
+			}
+
+			if (details.bridgeCalls.length > 0) {
+				text += `\n${theme.fg("muted", `bridge calls (${details.bridgeCalls.length}):`)}`;
+				for (const call of (expanded ? details.bridgeCalls : details.bridgeCalls.slice(0, 4))) {
+					const callIcon = call.ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
+					text += `\n  ${callIcon} ${theme.fg("accent", call.name)} ${theme.fg("dim", formatDurationMs(call.startedAt, call.endedAt))}`;
+					if (expanded) {
+						text += `\n    ${theme.fg("dim", truncate(call.argsPreview, 180).replace(/\n/g, "\n    "))}`;
+						if (call.error) text += `\n    ${theme.fg("error", call.error)}`;
+					}
+				}
+				if (!expanded && details.bridgeCalls.length > 4) {
+					text += `\n  ${theme.fg("dim", `... ${details.bridgeCalls.length - 4} more`)}`;
+				}
+			}
+
+			if (details.logs.length > 0) {
+				const shownLogs = expanded ? details.logs : details.logs.slice(0, 3);
+				text += `\n${theme.fg("muted", `logs (${details.logs.length}):`)}`;
+				for (const line of shownLogs) {
+					text += `\n  ${theme.fg("toolOutput", line)}`;
+				}
+				if (!expanded && details.logs.length > 3) {
+					text += `\n  ${theme.fg("dim", `... ${details.logs.length - 3} more`)}`;
+				}
+			}
+
+			if (expanded) {
+				text += `\n${theme.fg("muted", `exit=${details.exitCode ?? "null"} timeout=${details.timeout}s cwd=${details.cwd}`)}`;
+				text += `\n${theme.fg("muted", `sandbox reason: ${details.sandbox.reason}`)}`;
+			}
+
+			return new Text(text, 0, 0);
+		},
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			const timeout = clampTimeout(params.timeout);
+			const profile = (params.profile ?? "analysis") as CodemodeProfileName;
+			const cwd = await resolveExecutionCwd(ctx.cwd, params.cwd);
+			const config = loadConfig(cwd);
+			const policy = activePolicy(config, detectAgentName(pi));
+			const tmpBase = getEffectiveSandboxTmpDir(cwd, config.sandbox);
+			await fs.mkdir(tmpBase, { recursive: true });
+			const runtimeDir = await fs.mkdtemp(path.join(tmpBase, "codemode-"));
+			const artifactsDir = path.join(runtimeDir, "artifacts");
+			const resolvedPolicy = resolveCodemodePolicy(policy, cwd, config.sandbox, profile, runtimeDir);
+
+			const inheritedSandbox = getInheritedSandboxInfo();
+			if (!resolvedPolicy.sandbox.enabled && !inheritedSandbox.active) {
+				throw new Error(`CodeMode requires sandboxing, but no dedicated or inherited sandbox is available: ${resolvedPolicy.sandbox.reason}`);
+			}
+
+			onUpdate?.({ content: [{ type: "text", text: `Starting CodeMode (${profile})...` }] });
+
+			let exitCode: number | null = null;
+			let rawOutput = "";
+			let sandboxMode: "dedicated" | "inherited" | "none" = "dedicated";
+			let protocolResult: ProtocolResult | undefined;
+			const logs: string[] = [];
+			const artifacts: CodemodeArtifact[] = [];
+			const bridgeCalls: CodemodeBridgeCall[] = [];
+			const runtimeEnv = {
+				...process.env,
+				TMPDIR: runtimeDir,
+				CLAUDE_TMPDIR: runtimeDir,
+				PI_CODEMODE_PROFILE: profile,
+				PI_CODEMODE_CWD: cwd,
+			};
+			const { entryFile } = await createRuntimeFiles(runtimeDir, params.code, resolvedPolicy.capabilities);
+			const command = `bun ${JSON.stringify(entryFile)}`;
+			let stdinWriter: NodeJS.WritableStream | undefined;
+			let stdoutBuffer = "";
+
+			const bridgeState: BridgeRuntimeState = {
+				capabilities: resolvedPolicy.capabilities,
+				artifactsDir,
+				artifacts,
+				bridgeCalls,
+				onUpdate,
+				signal,
+				cwd,
+				allowProjectAgents: resolvedPolicy.allowProjectAgents,
+			};
+
+			const handleProtocolLine = (line: string) => {
+				if (!line) return;
+				if (line.startsWith(LOG_PREFIX)) {
+					try {
+						const payload = JSON.parse(line.slice(LOG_PREFIX.length)) as ProtocolLog;
+						logs.push(formatLogLine(payload));
+						if (logs.length > MAX_LOG_LINES) logs.splice(0, logs.length - MAX_LOG_LINES);
+					} catch {
+						logs.push(`[protocol] could not parse log payload: ${line.slice(LOG_PREFIX.length)}`);
+					}
+					return;
+				}
+				if (line.startsWith(RESULT_PREFIX)) {
+					try {
+						protocolResult = JSON.parse(line.slice(RESULT_PREFIX.length)) as ProtocolResult;
+					} catch (error) {
+						protocolResult = {
+							ok: false,
+							error: {
+								phase: "protocol",
+								message: `Failed to parse runtime result: ${error instanceof Error ? error.message : String(error)}`,
+							},
+						};
+					}
+					return;
+				}
+				if (line.startsWith(BRIDGE_REQUEST_PREFIX)) {
+					void (async () => {
+						if (!stdinWriter) return;
+						let response: BridgeResponse;
+						let request: BridgeRequest | undefined;
+						try {
+							request = JSON.parse(line.slice(BRIDGE_REQUEST_PREFIX.length)) as BridgeRequest;
+							const startedAt = Date.now();
+							const call: CodemodeBridgeCall = {
+								name: request.method,
+								argsPreview: truncate(serializeForDisplay(request.args), 400),
+								ok: false,
+								startedAt,
+								endedAt: startedAt,
+							};
+							try {
+								const result = await executeBridgeRequest(bridgeState, request);
+								call.ok = true;
+								call.endedAt = Date.now();
+								bridgeCalls.push(call);
+								response = { id: request.id, ok: true, result };
+							} catch (error) {
+								call.ok = false;
+								call.endedAt = Date.now();
+								call.error = error instanceof Error ? error.message : String(error);
+								bridgeCalls.push(call);
+								response = {
+									id: request.id,
+									ok: false,
+									error: { message: error instanceof Error ? error.message : String(error) },
+								};
+							}
+						} catch (error) {
+							response = {
+								id: request?.id ?? -1,
+								ok: false,
+								error: { message: error instanceof Error ? error.message : String(error) },
+							};
+						}
+						stdinWriter.write(`${BRIDGE_RESPONSE_PREFIX}${JSON.stringify(response)}\n`);
+					})();
+					return;
+				}
+			};
+
+			const handleStdoutData = (chunk: Buffer) => {
+				const text = chunk.toString("utf8");
+				rawOutput += text;
+				stdoutBuffer += text;
+				const lines = stdoutBuffer.split(/\r?\n/);
+				stdoutBuffer = lines.pop() || "";
+				for (const line of lines) handleProtocolLine(line);
+			};
+			const handleStderrData = (chunk: Buffer) => {
+				rawOutput += chunk.toString("utf8");
+			};
+
+			try {
+				if (inheritedSandbox.active) {
+					sandboxMode = "inherited";
+					const result = await runLocalCommand({
+						command,
+						cwd,
+						timeout,
+						signal,
+						env: runtimeEnv,
+						stdinMode: "pipe",
+						onSpawn: (child) => {
+							stdinWriter = child.stdin ?? undefined;
+						},
+						onStdoutData: handleStdoutData,
+						onStderrData: handleStderrData,
+					});
+					exitCode = result.exitCode;
+				} else {
+					const sandboxManager = await initializeSandboxManager(resolvedPolicy.sandbox.config);
+					try {
+						const result = await runSandboxedCommand(sandboxManager, {
+							command,
+							cwd,
+							timeout,
+							signal,
+							env: runtimeEnv,
+							stdinMode: "pipe",
+							onSpawn: (child) => {
+								stdinWriter = child.stdin ?? undefined;
+							},
+							onStdoutData: handleStdoutData,
+							onStderrData: handleStderrData,
+						});
+						exitCode = result.exitCode;
+					} finally {
+						await sandboxManager.reset().catch(() => {});
+					}
+
+					if (isSandboxLaunchFailure(rawOutput)) {
+						if (!allowUnsandboxedFallback()) {
+							throw new Error(
+								`Dedicated CodeMode sandbox failed to apply. ${rawOutput.trim() || "No sandbox backend output."} ` +
+									"If Pi is already sandboxed, enable inherited sandbox mode by running CodeMode inside that session. " +
+									"Otherwise set PI_CODEMODE_ALLOW_UNSANDBOXED=1 to allow an explicit development-only fallback.",
+							);
+						}
+						sandboxMode = "none";
+						rawOutput = "";
+						stdoutBuffer = "";
+						stdinWriter = undefined;
+						protocolResult = undefined;
+						logs.length = 0;
+						bridgeCalls.length = 0;
+						artifacts.length = 0;
+						const fallbackResult = await runLocalCommand({
+							command,
+							cwd,
+							timeout,
+							signal,
+							env: runtimeEnv,
+							stdinMode: "pipe",
+							onSpawn: (child) => {
+								stdinWriter = child.stdin ?? undefined;
+							},
+							onStdoutData: handleStdoutData,
+							onStderrData: handleStderrData,
+						});
+						exitCode = fallbackResult.exitCode;
+					}
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const details: CodemodeDetails = {
+					profile,
+					cwd,
+					timeout,
+					code: params.code,
+					exitCode,
+					ok: false,
+					error: {
+						phase: message.startsWith("timeout:") ? "timeout" : "execute",
+						message,
+					},
+					logs,
+					rawOutput,
+					artifacts,
+					bridgeCalls,
+					sandbox: {
+						enabled: resolvedPolicy.sandbox.enabled || inheritedSandbox.active,
+						reason: inheritedSandbox.active
+							? inheritedSandbox.reason ?? "Inherited outer session sandbox"
+							: resolvedPolicy.sandbox.reason,
+						mode: sandboxMode,
+					},
+				};
+				return {
+					content: [{ type: "text", text: buildContent(details) }],
+					details,
+				};
+			} finally {
+				await fs.rm(runtimeDir, { recursive: true, force: true }).catch(() => {});
+			}
+
+			if (stdoutBuffer.trim()) handleProtocolLine(stdoutBuffer.trim());
+			const finalResult: ProtocolResult = protocolResult ?? {
+				ok: false,
+				error: {
+					phase: "protocol",
+					message: "Runtime did not emit a final result envelope",
+				},
+			};
+
+			const details: CodemodeDetails = {
+				profile,
+				cwd,
+				timeout,
+				code: params.code,
+				exitCode,
+				ok: finalResult.ok,
+				result: finalResult.ok ? finalResult.result : undefined,
+				error: finalResult.ok ? undefined : finalResult.error,
+				logs,
+				rawOutput,
+				artifacts,
+				bridgeCalls,
+				sandbox: {
+					enabled: resolvedPolicy.sandbox.enabled || inheritedSandbox.active,
+					reason: inheritedSandbox.active
+						? inheritedSandbox.reason ?? "Inherited outer session sandbox"
+						: resolvedPolicy.sandbox.reason,
+					mode: sandboxMode,
+				},
+			};
+
+			return {
+				content: [{ type: "text", text: buildContent(details) }],
+				details,
+			};
+		},
+	});
+}
+
+export const __test__ = {
+	parseProtocolOutput,
+	buildRunnerSource,
+	resolveExecutionCwd,
+	clampTimeout,
+	isSandboxLaunchFailure,
+	sanitizeArtifactName,
+	getInheritedSandboxInfo,
+	allowUnsandboxedFallback,
+};

@@ -104,6 +104,7 @@ import {
 } from "./matching";
 import {
 	detectDangerousBashPattern,
+	getFirstUnapprovedBashSegment,
 	hasComplexBashSyntax,
 	isAllowedBashCompound,
 	sandboxFallbackModeForPolicy,
@@ -159,6 +160,19 @@ export default function (pi: ExtensionAPI) {
 	let sandboxTmpDir: string | undefined;
 	let sandboxTmpDirEphemeral = false;
 
+	const clearSandboxEnv = () => {
+		delete process.env.PI_SANDBOX_ACTIVE;
+		delete process.env.PI_SANDBOX_REASON;
+		delete process.env.PI_SANDBOX_TMPDIR;
+	};
+
+	const setSandboxEnv = (reason: string, tmpDir: string | undefined) => {
+		process.env.PI_SANDBOX_ACTIVE = "1";
+		process.env.PI_SANDBOX_REASON = reason;
+		if (tmpDir) process.env.PI_SANDBOX_TMPDIR = tmpDir;
+		else delete process.env.PI_SANDBOX_TMPDIR;
+	};
+
 	pi.registerTool({
 		...bashToolTemplate,
 		label: "bash",
@@ -207,6 +221,7 @@ export default function (pi: ExtensionAPI) {
 		sandboxMode = "normal";
 		sandboxReason = "inactive";
 		sandboxConfig = undefined;
+		clearSandboxEnv();
 
 		const policy = activePolicy(config, agentName);
 		const tmpDirBase = getEffectiveSandboxTmpDir(ctx.cwd, config.sandbox);
@@ -273,6 +288,7 @@ export default function (pi: ExtensionAPI) {
 			sandboxEnabled = true;
 			sandboxMode = "normal";
 			sandboxReason = compiled.reason;
+			setSandboxEnv(compiled.reason, effectiveTmpDir);
 			if (ctx.hasUI) {
 				ctx.ui.notify(`Bash sandbox active (${compiled.reason})`, "info");
 			}
@@ -320,6 +336,7 @@ export default function (pi: ExtensionAPI) {
 		sandboxTmpDirEphemeral = false;
 		sandboxEnabled = false;
 		sandboxConfig = undefined;
+		clearSandboxEnv();
 	});
 
 	// ── Ask helper ────────────────────────────────────────────────────────────
@@ -330,6 +347,7 @@ export default function (pi: ExtensionAPI) {
 		note: string | undefined,
 		projectRoot: string,
 		ctx: ExtensionContext,
+		bashFocusCommand?: string,
 	): Promise<{ block: boolean; reason: string } | undefined> {
 		if (!ctx.hasUI) {
 			return {
@@ -348,7 +366,8 @@ export default function (pi: ExtensionAPI) {
 
 		if (toolName === "bash") {
 			const command = getCommandInput(input) ?? "";
-			const tokens = command.trim().split(/\s+/).filter(Boolean);
+			const approvalTarget = bashFocusCommand?.trim() ? bashFocusCommand.trim() : command;
+			const tokens = approvalTarget.trim().split(/\s+/).filter(Boolean);
 			const prefixCandidates: string[] = [];
 			if (tokens[0]) prefixCandidates.push(tokens[0]);
 			if (tokens[0] && tokens[1] && !tokens[1].startsWith("-")) prefixCandidates.push(`${tokens[0]} ${tokens[1]}`);
@@ -358,6 +377,9 @@ export default function (pi: ExtensionAPI) {
 				`Command: ${command.length > 120 ? `${command.slice(0, 120)}…` : command}`,
 				`Profile: ${agentName}`,
 			];
+			if (approvalTarget !== command) {
+				bashLines.push(`Relevant segment: ${approvalTarget.length > 120 ? `${approvalTarget.slice(0, 120)}…` : approvalTarget}`);
+			}
 			if (note) bashLines.push(`Note: ${note}`);
 			if (uniquePrefixCandidates.length > 0) {
 				bashLines.push(`Prefix options: ${uniquePrefixCandidates.map((p) => `${p} *`).join(" | ")}`);
@@ -367,7 +389,9 @@ export default function (pi: ExtensionAPI) {
 			for (const candidate of uniquePrefixCandidates) {
 				prefixOptionToValue.set(`Allow prefix for this session (${candidate} *)`, candidate);
 			}
-			const allowExactLabel = "Allow exact command for this session";
+			const allowExactLabel = approvalTarget === command
+				? "Allow exact command for this session"
+				: "Allow exact segment for this session";
 			const options = ["Allow once", allowExactLabel, ...prefixOptionToValue.keys(), "Block"];
 			const choice = await ctx.ui.select(`⚠️  Permission required\n\n${bashLines.join("\n")}`, options);
 
@@ -379,12 +403,12 @@ export default function (pi: ExtensionAPI) {
 				sessionBashApprovals.push({
 					tool: "bash",
 					scopeType: "bash-exact",
-					scopeValue: command,
+					scopeValue: approvalTarget,
 					projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
 					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
 					createdAt: Date.now(),
 				});
-				ctx.ui.notify(`✓ Bash session rule added: bash-exact:${command}`, "info");
+				ctx.ui.notify(`✓ Bash session rule added: bash-exact:${approvalTarget}`, "info");
 			}
 
 			const selectedPrefix = typeof choice === "string" ? prefixOptionToValue.get(choice) : undefined;
@@ -507,12 +531,17 @@ export default function (pi: ExtensionAPI) {
 		const policy = activePolicy(config, agentName);
 		const projectRoot = canonicalizePath(ctx.cwd);
 
+		let bashApprovals: ApprovalRecord[] = [];
+		let isApprovedBashSegment: ((candidate: string) => boolean) | undefined;
+
 		if (toolName === "bash") {
 			const command = getCommandInput(input) ?? "";
-			const effectiveApprovals = [...persistentApprovals, ...sessionBashApprovals];
-			if (approvalsCoverBash(effectiveApprovals, command, projectRoot, agentName, approvalsSettings)) {
+			bashApprovals = [...persistentApprovals, ...sessionBashApprovals];
+			if (approvalsCoverBash(bashApprovals, command, projectRoot, agentName, approvalsSettings)) {
 				return undefined;
 			}
+			isApprovedBashSegment = (candidate: string) =>
+				approvalsCoverBash(bashApprovals, candidate, projectRoot, agentName, approvalsSettings);
 			if (sandboxMode === "block-all-bash") {
 				return { block: true, reason: `Bash blocked: sandbox unavailable in ${policy.mode} mode` };
 			}
@@ -527,6 +556,12 @@ export default function (pi: ExtensionAPI) {
 			return undefined;
 		}
 
+		const getUnapprovedBashSegment = () => {
+			if (toolName !== "bash") return undefined;
+			const command = getCommandInput(input) ?? "";
+			return getFirstUnapprovedBashSegment(command, policy.rules, isApprovedBashSegment);
+		};
+
 		const rule = policy.rules.length > 0 ? matchRule(policy.rules, toolName, input) : undefined;
 
 		if (rule) {
@@ -537,6 +572,15 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (rule.action === "ask") {
+				if (toolName === "bash") {
+					const command = getCommandInput(input) ?? "";
+					if (isAllowedBashCompound(command, policy.rules, isApprovedBashSegment)) {
+						return undefined;
+					}
+					const unapprovedSegment = getUnapprovedBashSegment();
+					const note = rule.reason ?? (unapprovedSegment ? `Unapproved shell segment: ${unapprovedSegment}` : undefined);
+					return askPermission(toolName, input, note, projectRoot, ctx, unapprovedSegment);
+				}
 				return askPermission(toolName, input, rule.reason, projectRoot, ctx);
 			}
 
@@ -544,8 +588,12 @@ export default function (pi: ExtensionAPI) {
 			if (rule.action === "allow") {
 				if (toolName === "bash") {
 					const command = getCommandInput(input) ?? "";
-					if (!isAllowedBashCompound(command, policy.rules) && hasComplexBashSyntax(command)) {
-						return askPermission(toolName, input, "Complex shell command requires confirmation", projectRoot, ctx);
+					if (!isAllowedBashCompound(command, policy.rules, isApprovedBashSegment) && hasComplexBashSyntax(command)) {
+						const unapprovedSegment = getUnapprovedBashSegment();
+						const note = unapprovedSegment
+							? `Unapproved shell segment: ${unapprovedSegment}`
+							: "Complex shell command requires confirmation";
+						return askPermission(toolName, input, note, projectRoot, ctx, unapprovedSegment);
 					}
 				}
 

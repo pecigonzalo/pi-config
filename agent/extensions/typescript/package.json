@@ -1,0 +1,6 @@
+{
+  "name": "typescript",
+  "pi": {
+    "extensions": ["./typescript.ts"]
+  }
+}

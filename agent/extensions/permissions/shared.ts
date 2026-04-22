@@ -46,6 +46,21 @@ export interface EffectivePolicy {
 	protectedResources: ResolvedProtectedResources;
 }
 
+export type CodemodeProfileName = "analysis" | "orchestrator";
+export type CodemodeCapability = "message" | "artifact" | "task" | "todo";
+
+export interface CodemodeEffectivePolicy {
+	profile: CodemodeProfileName;
+	mode: PermissionMode;
+	capabilities: CodemodeCapability[];
+	allowProjectAgents: boolean;
+	sandbox: {
+		enabled: boolean;
+		config: SandboxRuntimeConfigLike;
+		reason: string;
+	};
+}
+
 export interface ProtectedResourcesSettings {
 	enabled?: boolean;
 	defaults?: boolean;
