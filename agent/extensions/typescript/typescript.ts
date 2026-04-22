@@ -625,10 +625,22 @@ function formatDurationMs(startedAt: number, endedAt: number): string {
 	return `${Math.max(0, endedAt - startedAt)}ms`;
 }
 
+function formatCodePreview(code: string, expanded: boolean): string {
+	const normalized = code.trim();
+	if (!normalized) return "";
+	const lines = normalized.split(/\r?\n/);
+	const shownLines = expanded ? lines : lines.slice(0, 3);
+	let preview = shownLines.join("\n");
+	if (!expanded && lines.length > shownLines.length) {
+		preview += `\n... ${lines.length - shownLines.length} more line(s)`;
+	}
+	return truncate(preview, expanded ? MAX_RESULT_PREVIEW : 400);
+}
+
 function buildContent(details: CodemodeDetails): string {
 	if (details.ok) {
 		const resultText = truncate(serializeForDisplay(details.result), MAX_RESULT_PREVIEW);
-		const parts = ["CodeMode completed successfully.", "", "Result:", resultText];
+		const parts = ["TypeScript completed successfully.", "", "Result:", resultText];
 		if (details.logs.length > 0) parts.push("", "Logs:", details.logs.join("\n"));
 		if (details.artifacts.length > 0) {
 			parts.push("", "Artifacts:", ...details.artifacts.map((artifact) => `- ${artifact.name} (${artifact.size} bytes)`));
@@ -640,7 +652,7 @@ function buildContent(details: CodemodeDetails): string {
 	}
 
 	const errorText = details.error ? `${details.error.phase}: ${details.error.message}` : "unknown error";
-	const parts = ["CodeMode execution failed.", "", `Error: ${errorText}`];
+	const parts = ["TypeScript execution failed.", "", `Error: ${errorText}`];
 	if (details.logs.length > 0) parts.push("", "Logs:", details.logs.join("\n"));
 	if (details.bridgeCalls.length > 0) {
 		parts.push("", "Bridge calls:", ...details.bridgeCalls.map((call) => `- ${call.name}: ${call.ok ? "ok" : `error (${call.error})`}`));
@@ -664,17 +676,19 @@ export default function (pi: ExtensionAPI) {
 			"When using this tool, return a compact result and use artifact writing for larger outputs.",
 		],
 		parameters: CodemodeParams,
-		renderCall(args, theme, _context) {
+		renderCall(args, theme, context) {
 			const profile = (args.profile ?? "analysis") as CodemodeProfileName;
-			const code = typeof args.code === "string" ? args.code.trim() : "";
-			const firstLine = code.split(/\r?\n/, 1)[0] ?? "";
-			const preview = firstLine.length > 90 ? `${firstLine.slice(0, 90)}...` : firstLine;
+			const code = typeof args.code === "string" ? args.code : "";
+			const preview = formatCodePreview(code, context.expanded);
 			let text =
-				theme.fg("toolTitle", theme.bold("codemode ")) +
+				theme.fg("toolTitle", theme.bold("typescript ")) +
 				theme.fg("accent", profile) +
 				theme.fg("muted", ` timeout=${clampTimeout(args.timeout)}s`);
 			if (args.cwd) text += theme.fg("dim", ` cwd=${args.cwd}`);
-			if (preview) text += `\n  ${theme.fg("dim", preview)}`;
+			if (preview) {
+				text += `\n${theme.fg("muted", "script:")}`;
+				text += `\n  ${theme.fg("dim", preview.replace(/\n/g, "\n  "))}`;
+			}
 			return new Text(text, 0, 0);
 		},
 		renderResult(result, { expanded }, theme, _context) {
@@ -686,7 +700,7 @@ export default function (pi: ExtensionAPI) {
 
 			const icon = details.ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
 			const sandboxLabel = `${details.sandbox.mode}${details.sandbox.enabled ? " sandbox" : " unsandboxed"}`;
-			let text = `${icon} ${theme.fg("toolTitle", theme.bold("CodeMode"))} ${theme.fg("muted", `[${details.profile}] [${sandboxLabel}]`)}`;
+			let text = `${icon} ${theme.fg("toolTitle", theme.bold("TypeScript"))} ${theme.fg("muted", `[${details.profile}] [${sandboxLabel}]`)}`;
 			if (!details.ok && details.error) {
 				text += `\n${theme.fg("error", `${details.error.phase}: ${details.error.message}`)}`;
 			}
@@ -732,6 +746,10 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
+			if (!expanded) {
+				text += `\n${theme.fg("dim", "expand to inspect script, bridge calls, logs, and sandbox details")}`;
+			}
+
 			if (expanded) {
 				text += `\n${theme.fg("muted", `exit=${details.exitCode ?? "null"} timeout=${details.timeout}s cwd=${details.cwd}`)}`;
 				text += `\n${theme.fg("muted", `sandbox reason: ${details.sandbox.reason}`)}`;
@@ -753,10 +771,10 @@ export default function (pi: ExtensionAPI) {
 
 			const inheritedSandbox = getInheritedSandboxInfo();
 			if (!resolvedPolicy.sandbox.enabled && !inheritedSandbox.active) {
-				throw new Error(`CodeMode requires sandboxing, but no dedicated or inherited sandbox is available: ${resolvedPolicy.sandbox.reason}`);
+				throw new Error(`TypeScript requires sandboxing, but no dedicated or inherited sandbox is available: ${resolvedPolicy.sandbox.reason}`);
 			}
 
-			onUpdate?.({ content: [{ type: "text", text: `Starting CodeMode (${profile})...` }] });
+			onUpdate?.({ content: [{ type: "text", text: `Starting TypeScript (${profile})...` }] });
 
 			let exitCode: number | null = null;
 			let rawOutput = "";
@@ -912,8 +930,8 @@ export default function (pi: ExtensionAPI) {
 					if (isSandboxLaunchFailure(rawOutput)) {
 						if (!allowUnsandboxedFallback()) {
 							throw new Error(
-								`Dedicated CodeMode sandbox failed to apply. ${rawOutput.trim() || "No sandbox backend output."} ` +
-									"If Pi is already sandboxed, enable inherited sandbox mode by running CodeMode inside that session. " +
+								`Dedicated TypeScript sandbox failed to apply. ${rawOutput.trim() || "No sandbox backend output."} ` +
+									"If Pi is already sandboxed, enable inherited sandbox mode by running TypeScript inside that session. " +
 									"Otherwise set PI_CODEMODE_ALLOW_UNSANDBOXED=1 to allow an explicit development-only fallback.",
 							);
 						}
