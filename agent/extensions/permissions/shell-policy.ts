@@ -19,6 +19,12 @@ const DANGEROUS_BASH_CHECKS = [
 
 type ShellQuoteState = "none" | "single" | "double";
 
+type ShellToken = {
+	text: string;
+	hadQuotes: boolean;
+	hadEscapes: boolean;
+};
+
 function scanShellSyntax(command: string): { hasComplex: boolean; hasForbiddenSimple: boolean } {
 	let hasComplex = CONTROL_FLOW_KEYWORD_RE.test(command);
 	let hasForbiddenSimple = hasComplex;
@@ -184,6 +190,104 @@ export function splitSimpleBashCompound(command: string): string[] | undefined {
 	if (!tail) return undefined;
 	parts.push(tail);
 	return parts;
+}
+
+function tokenizeShellWords(command: string): ShellToken[] | undefined {
+	const tokens: ShellToken[] = [];
+	let current = "";
+	let quoteState: ShellQuoteState = "none";
+	let escaped = false;
+	let tokenStarted = false;
+	let hadQuotes = false;
+	let hadEscapes = false;
+
+	const pushToken = () => {
+		if (!tokenStarted) return;
+		tokens.push({ text: current, hadQuotes, hadEscapes });
+		current = "";
+		tokenStarted = false;
+		hadQuotes = false;
+		hadEscapes = false;
+	};
+
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+
+		if (escaped) {
+			current += ch;
+			escaped = false;
+			tokenStarted = true;
+			hadEscapes = true;
+			continue;
+		}
+
+		if (quoteState === "none" && /\s/.test(ch)) {
+			pushToken();
+			continue;
+		}
+
+		tokenStarted = true;
+
+		if (ch === "\\" && quoteState !== "single") {
+			escaped = true;
+			hadEscapes = true;
+			continue;
+		}
+
+		if (quoteState === "single") {
+			if (ch === "'") {
+				quoteState = "none";
+				hadQuotes = true;
+				continue;
+			}
+			current += ch;
+			continue;
+		}
+
+		if (quoteState === "double") {
+			if (ch === '"') {
+				quoteState = "none";
+				hadQuotes = true;
+				continue;
+			}
+			current += ch;
+			continue;
+		}
+
+		if (ch === "'") {
+			quoteState = "single";
+			hadQuotes = true;
+			continue;
+		}
+		if (ch === '"') {
+			quoteState = "double";
+			hadQuotes = true;
+			continue;
+		}
+
+		current += ch;
+	}
+
+	if (escaped || quoteState !== "none") return undefined;
+	pushToken();
+	return tokens;
+}
+
+function isSafePrefixToken(token: ShellToken | undefined): boolean {
+	if (!token) return false;
+	if (!token.text || token.text.startsWith("-")) return false;
+	if (token.hadQuotes || token.hadEscapes) return false;
+	return /^[A-Za-z0-9_./:@%+=,-]+$/.test(token.text);
+}
+
+export function getBashPrefixCandidates(command: string): string[] {
+	const tokens = tokenizeShellWords(command.trim());
+	if (!tokens || tokens.length === 0) return [];
+	const candidates = [tokens[0].text].filter(Boolean);
+	if (isSafePrefixToken(tokens[1])) {
+		candidates.push(`${tokens[0].text} ${tokens[1].text}`);
+	}
+	return candidates;
 }
 
 export function detectDangerousBashPattern(command: string): string | undefined {

@@ -7,6 +7,7 @@ import { resolveCodemodePolicy } from "./codemode";
 import { isPathOutsideCwd, ruleMatch } from "./matching";
 import {
 	detectDangerousBashPattern,
+	getBashPrefixCandidates,
 	getFirstUnapprovedBashSegment,
 	hasComplexBashSyntax,
 	hasForbiddenSimpleBashCompoundSyntax,
@@ -191,6 +192,13 @@ describe("bash complexity and fallback", () => {
 		expect(splitSimpleBashCompound("rg foo src & head -10")).toBeUndefined();
 		expect(splitSimpleBashCompound("rg 'foo src | head -10")).toBeUndefined();
 		expect(splitSimpleBashCompound("rg foo src ; head -10")).toBeUndefined();
+	});
+
+	it("builds safe prefix candidates for bash approvals", () => {
+		expect(getBashPrefixCandidates("git status --short")).toEqual(["git", "git status"]);
+		expect(getBashPrefixCandidates("awk '{print $1}'")).toEqual(["awk"]);
+		expect(getBashPrefixCandidates("npm run test")).toEqual(["npm", "npm run"]);
+		expect(getBashPrefixCandidates(String.raw`rg foo\ bar`)).toEqual(["rg"]);
 	});
 
 	it("allows compounds only when every segment is individually allowed", () => {

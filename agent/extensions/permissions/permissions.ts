@@ -104,6 +104,7 @@ import {
 } from "./matching";
 import {
 	detectDangerousBashPattern,
+	getBashPrefixCandidates,
 	getFirstUnapprovedBashSegment,
 	hasComplexBashSyntax,
 	isAllowedBashCompound,
@@ -367,20 +368,16 @@ export default function (pi: ExtensionAPI) {
 		if (toolName === "bash") {
 			const command = getCommandInput(input) ?? "";
 			const approvalTarget = bashFocusCommand?.trim() ? bashFocusCommand.trim() : command;
-			const tokens = approvalTarget.trim().split(/\s+/).filter(Boolean);
-			const prefixCandidates: string[] = [];
-			if (tokens[0]) prefixCandidates.push(tokens[0]);
-			if (tokens[0] && tokens[1] && !tokens[1].startsWith("-")) prefixCandidates.push(`${tokens[0]} ${tokens[1]}`);
-			const uniquePrefixCandidates = dedupeStrings(prefixCandidates);
+			const uniquePrefixCandidates = dedupeStrings(getBashPrefixCandidates(approvalTarget));
+			const segmentNote = approvalTarget !== command ? `Unapproved shell segment: ${approvalTarget}` : undefined;
+			const displayNote = note && note !== segmentNote ? note : undefined;
 
-			const bashLines = [
-				`Command: ${command.length > 120 ? `${command.slice(0, 120)}…` : command}`,
-				`Profile: ${agentName}`,
-			];
+			const bashLines = [`Command: ${command.length > 120 ? `${command.slice(0, 120)}…` : command}`];
 			if (approvalTarget !== command) {
-				bashLines.push(`Relevant segment: ${approvalTarget.length > 120 ? `${approvalTarget.slice(0, 120)}…` : approvalTarget}`);
+				bashLines.push(`Needs approval: ${approvalTarget.length > 120 ? `${approvalTarget.slice(0, 120)}…` : approvalTarget}`);
 			}
-			if (note) bashLines.push(`Note: ${note}`);
+			if (displayNote) bashLines.push(`Note: ${displayNote}`);
+			bashLines.push(`Profile: ${agentName}`);
 			if (uniquePrefixCandidates.length > 0) {
 				bashLines.push(`Prefix options: ${uniquePrefixCandidates.map((p) => `${p} *`).join(" | ")}`);
 			}
@@ -390,8 +387,8 @@ export default function (pi: ExtensionAPI) {
 				prefixOptionToValue.set(`Allow prefix for this session (${candidate} *)`, candidate);
 			}
 			const allowExactLabel = approvalTarget === command
-				? "Allow exact command for this session"
-				: "Allow exact segment for this session";
+				? `Allow exact command for this session (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`
+				: `Allow exact segment for this session (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`;
 			const options = ["Allow once", allowExactLabel, ...prefixOptionToValue.keys(), "Block"];
 			const choice = await ctx.ui.select(`⚠️  Permission required\n\n${bashLines.join("\n")}`, options);
 
