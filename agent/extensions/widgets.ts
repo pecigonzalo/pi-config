@@ -1,21 +1,15 @@
 /**
- * Starship-inspired pi status bar
+ * Widget bar for pi
  *
- * Renders the status bar inside the editor's top border — just like
- * pi-powerline-footer and your shell prompt — not in the footer below.
- *
- *   [status line]
- *    ────────────────────────────
- *    ❯  your prompt here
- *    ────────────────────────────
+ * Renders a starship-inspired status bar as a widget above the editor.
  *
  * Segments: path · git · model · thinking · context · tokens · cost
  * Styled to match ~/.config/starship.toml aesthetics.
  * Inspired by https://www.npmjs.com/package/pi-powerline-footer
  *
  * Commands:
- *   /starship              – show current preset
- *   /starship <preset>     – switch preset (default / minimal / compact / full)
+ *   /widgets              – show current preset
+ *   /widgets <preset>     – switch preset (default / minimal / compact / full)
  *
  * Nerd Fonts auto-detected via TERM_PROGRAM / GHOSTTY_RESOURCES_DIR.
  * Override: POWERLINE_NERD_FONTS=1  (force on)  or  =0  (force off).
@@ -229,21 +223,19 @@ const PRESETS: Record<Preset, PresetDef> = {
 
 function buildStatusLine(
   ctx: ExtensionContext,
-  footerData: any,
   pi: ExtensionAPI,
   preset: Preset,
   sessionStart: number,
   width: number,
   requestRenderFn: (() => void) | undefined,
 ): string {
-  // ctx.ui.theme has the semantic .fg() method; the `theme` parameter in
-  // setEditorComponent is the pi-tui editor border theme and does NOT have .fg().
+  // ctx.ui.theme has the semantic .fg() method used across extension UI.
   const theme = ctx.ui.theme;
   const pd = PRESETS[preset];
 
   // Git – synchronous from cache; background refresh triggers a re-render
   const git    = gitGet(() => requestRenderFn?.());
-  const branch = footerData.getGitBranch?.() ?? git.branch;
+  const branch = git.branch;
 
   // Session usage stats
   let tokIn = 0, tokOut = 0, cost = 0;
@@ -358,7 +350,7 @@ function buildStatusLine(
 
 // ─── Extension ───────────────────────────────────────────────────────────────
 
-export default function (pi: ExtensionAPI) {
+export default function widgets(pi: ExtensionAPI) {
   let preset: Preset = "default";
   let requestRender: (() => void) | undefined;
   let sessionStart = Date.now();
@@ -367,6 +359,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_result", async event => {
     if (event.toolName === "write" || event.toolName === "edit") {
       gitInvalidate();
+      requestRender?.();
     }
     if (event.toolName === "bash") {
       const cmd = String((event as any).input?.command ?? "");
@@ -387,12 +380,7 @@ export default function (pi: ExtensionAPI) {
     installStatusBar(ctx);
   });
 
-  pi.registerCommand("starship", {
-    description: "Switch Starship status bar preset: default / minimal / compact / full",
-    getArgumentCompletions: () =>
-      (["default", "minimal", "compact", "full"] as Preset[])
-        .map(p => ({ value: p, label: p })),
-    handler: async (args, ctx) => {
+  const handlePresetCommand = async (args: string, ctx: ExtensionContext) => {
       const arg = (args ?? "").trim().toLowerCase() as Preset;
       if (!arg) {
         ctx.ui.notify(`Preset: ${preset}  (options: default · minimal · compact · full)`, "info");
@@ -404,92 +392,48 @@ export default function (pi: ExtensionAPI) {
       }
       preset = arg;
       installStatusBar(ctx);
-      ctx.ui.notify(`Starship → ${preset}`, "info");
-    },
+      requestRender?.();
+      ctx.ui.notify(`Widgets → ${preset}`, "info");
+    };
+
+  pi.registerCommand("widgets", {
+    description: "Switch widget-bar preset: default / minimal / compact / full",
+    getArgumentCompletions: () =>
+      (["default", "minimal", "compact", "full"] as Preset[])
+        .map(p => ({ value: p, label: p })),
+    handler: async (args, ctx) => handlePresetCommand(args, ctx),
   });
 
-  // ── Status bar injected into the editor border ────────────────────────────
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    requestRender = undefined;
+    ctx.ui.setWidget("starship", undefined);
+  });
+
+  // ── Status bar widget above the editor ────────────────────────────────────
 
   function installStatusBar(ctx: ExtensionContext) {
-    let footerDataRef: any = null;
+    ctx.ui.setWidget(
+      "starship",
+      (tui) => {
+        requestRender = () => tui.requestRender();
+        return {
+          render(width: number): string[] {
+            return [buildStatusLine(ctx, pi, preset, sessionStart, width, requestRender)];
+          },
+          invalidate() {},
+        };
+      },
+      { placement: "aboveEditor" },
+    );
 
-    // setFooter is used purely to get footerDataRef (git branch + onBranchChange).
-    // render() returns [] so nothing appears in the actual footer below the editor.
-    ctx.ui.setFooter((tui, _theme, footerData) => {
-      footerDataRef = footerData;
-      requestRender = () => tui.requestRender();
-
-      const unsub = footerData.onBranchChange(() => {
-        gitInvalidate();
-        tui.requestRender();
-      });
-
-      return {
-        dispose: unsub,
-        invalidate() {},
-        render(): string[] { return []; },
-      };
-    });
-
-    // Replace the editor with one that injects the status bar above its top border.
-    // This matches the pi-powerline-footer layout:
-    //
-    //   [status line]
-    //    ────────────────────────────
-    //    ❯  your prompt here
-    //    ────────────────────────────
-    //
     ctx.ui.setEditorComponent((tui, theme, keybindings) => {
       const editor = new CustomEditor(tui, theme, keybindings);
       const origRender = editor.render.bind(editor);
 
       editor.render = (width: number): string[] => {
-        // Fall back to default render if too narrow or footer not yet wired
-        if (width < 15 || !footerDataRef) return origRender(width);
-
-        // Build the status line (full width)
-        const statusLine = buildStatusLine(
-          ctx, footerDataRef, pi, preset, sessionStart, width, requestRender,
-        );
-
-        // Render the inner editor at width-3 to leave room for " ❯ " prompt prefix
-        const contentWidth = Math.max(1, width - 3);
-        const lines = origRender(contentWidth);
-        if (lines.length === 0) return lines;
-
-        // Locate the bottom border line (last line matching ─────)
-        let bottomIdx = lines.length - 1;
-        for (let i = lines.length - 1; i >= 1; i--) {
-          const plain = (lines[i] ?? "").replace(/\x1b\[[0-9;]*m/g, "");
-          if (/^[\s]*─{3,}/.test(plain)) { bottomIdx = i; break; }
-        }
-
-        // Prompt glyph matches your shell: ❯
-        const promptFg = `\x1b[38;2;200;200;200m❯\x1b[0m`;
-        const promptPfx = ` ${promptFg} `;
-        const contPfx   = "   ";
-
-        const out: string[] = [];
-
-        // 1. Status bar line
-        out.push(statusLine);
-
-        // 2. Editor content (skip original top/bottom border lines)
-        for (let i = 1; i < bottomIdx; i++) {
-          out.push((i === 1 ? promptPfx : contPfx) + (lines[i] ?? ""));
-        }
-
-        // Edge case: single-line editor (no content between borders)
-        if (bottomIdx <= 1) {
-          out.push(promptPfx + " ".repeat(contentWidth));
-        }
-
-        // 3. Lines after bottom border (footer placeholder rows, etc.)
-        for (let i = bottomIdx + 1; i < lines.length; i++) {
-          out.push(lines[i] ?? "");
-        }
-
-        return out;
+        const innerWidth = Math.max(1, width - 1);
+        return origRender(innerWidth).map((line) => ` ${line}`);
       };
 
       return editor;
