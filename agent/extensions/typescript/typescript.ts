@@ -278,7 +278,7 @@ function parseProtocolOutput(rawOutput: string): { logs: string[]; result?: Prot
 	return { logs: logs.slice(-MAX_LOG_LINES), result };
 }
 
-function buildRunnerSource(userCode: string, capabilities: CodemodeCapability[]): string {
+function buildRunnerSource(capabilities: CodemodeCapability[]): string {
 	return `
 const LOG_PREFIX = ${JSON.stringify(LOG_PREFIX)};
 const RESULT_PREFIX = ${JSON.stringify(RESULT_PREFIX)};
@@ -399,18 +399,32 @@ const host = {
 };
 
 const state = Object.create(null);
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 async function main() {
+  let mod;
   try {
-    const fn = new AsyncFunction("host", "state", ${JSON.stringify(userCode)});
-    const result = await fn(host, state);
+    mod = await import("./usercode.ts");
+  } catch (error) {
+    emit(RESULT_PREFIX, {
+      ok: false,
+      error: {
+        phase: "compile",
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      },
+    });
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    const result = await mod.default(host, state);
     emit(RESULT_PREFIX, { ok: true, result: serialize(result) });
   } catch (error) {
     emit(RESULT_PREFIX, {
       ok: false,
       error: {
-        phase: error instanceof SyntaxError ? "compile" : "execute",
+        phase: "execute",
         message: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
       },
@@ -425,9 +439,66 @@ process.exit(process.exitCode ?? 0);
 `.trimStart();
 }
 
+function splitImportsAndBody(code: string): { imports: string; body: string } {
+	const lines = code.split("\n");
+	let lastImportEndLine = -1;
+	let inMultiLineImport = false;
+
+	for (let i = 0; i < lines.length; i++) {
+		const trimmed = lines[i].trim();
+
+		if (inMultiLineImport) {
+			if (/}\s*from\s+['"]/.test(trimmed) || /from\s+['"].*['"]/.test(trimmed)) {
+				inMultiLineImport = false;
+				lastImportEndLine = i;
+			}
+			continue;
+		}
+
+		// Skip blank lines and single-line comments (keep scanning for more imports)
+		if (trimmed === "" || trimmed.startsWith("//")) continue;
+
+		// Match import statements
+		if (/^import\b/.test(trimmed)) {
+			if (trimmed.includes("{") && !trimmed.includes("}")) {
+				inMultiLineImport = true;
+			} else {
+				lastImportEndLine = i;
+			}
+			continue;
+		}
+
+		// First non-import, non-blank, non-comment line — stop
+		break;
+	}
+
+	if (lastImportEndLine === -1) {
+		return { imports: "", body: code };
+	}
+
+	return {
+		imports: lines.slice(0, lastImportEndLine + 1).join("\n"),
+		body: lines.slice(lastImportEndLine + 1).join("\n"),
+	};
+}
+
+function buildUserModule(code: string): string {
+	const { imports, body } = splitImportsAndBody(code);
+	const parts: string[] = [];
+	if (imports) parts.push(imports);
+	parts.push("export default async function(host: any, state: any) {");
+	parts.push(body);
+	parts.push("}");
+	return parts.join("\n");
+}
+
 async function createRuntimeFiles(runtimeDir: string, code: string, capabilities: CodemodeCapability[]): Promise<{ entryFile: string }> {
 	const entryFile = path.join(runtimeDir, "runner.ts");
-	await fs.writeFile(entryFile, buildRunnerSource(code, capabilities), "utf8");
+	const userFile = path.join(runtimeDir, "usercode.ts");
+	await Promise.all([
+		fs.writeFile(entryFile, buildRunnerSource(capabilities), "utf8"),
+		fs.writeFile(userFile, buildUserModule(code), "utf8"),
+	]);
 	return { entryFile };
 }
 
@@ -1034,6 +1105,8 @@ export default function (pi: ExtensionAPI) {
 export const __test__ = {
 	parseProtocolOutput,
 	buildRunnerSource,
+	splitImportsAndBody,
+	buildUserModule,
 	resolveExecutionCwd,
 	clampTimeout,
 	isSandboxLaunchFailure,

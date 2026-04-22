@@ -29,21 +29,28 @@ This is useful for tasks like:
 }
 ```
 
-The `code` value is a **function body**, not a full module.
+The `code` value is a **function body**, not a full module. It is transpiled with Bun's
+built-in TypeScript transpiler before execution, so:
 
-That means this works:
+- **TypeScript syntax works** — type annotations, generics, `as` casts, `satisfies`, etc.
+- **Static `import` declarations are rewritten** to `await import()` automatically, so both styles work:
 
 ```ts
+// static import style (rewritten automatically)
+import { readdir } from "node:fs/promises";
+const entries = await readdir(".");
+return entries;
+```
+
+```ts
+// dynamic import style (always worked)
 const { readdir } = await import("node:fs/promises");
 const entries = await readdir(".");
 return entries;
 ```
 
-But top-level module syntax like this does **not** work:
-
-```ts
-import { readdir } from "node:fs/promises";
-```
+Note: `export` statements are not meaningful since the code runs as a function body.
+Use `return` to surface a result.
 
 ## Profiles
 

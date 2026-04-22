@@ -48,11 +48,44 @@ describe("typescript tool helpers", () => {
 	});
 
 	it("runner source includes protocol prefixes", () => {
-		const source = __test__.buildRunnerSource("return 42;", ["message", "artifact"]);
+		const source = __test__.buildRunnerSource(["message", "artifact"]);
 		expect(source).toContain("__PI_CODEMODE_LOG__");
 		expect(source).toContain("__PI_CODEMODE_RESULT__");
 		expect(source).toContain("__PI_CODEMODE_BRIDGE_REQUEST__");
-		expect(source).toContain("return 42;");
+		expect(source).toContain('import("./usercode.ts")');
+	});
+
+	it("splits imports and body", () => {
+		const result = __test__.splitImportsAndBody(
+			'import { readFileSync } from "node:fs";\nimport { join } from "node:path";\n\nconst x = 1;\nreturn x;',
+		);
+		expect(result.imports).toContain('import { readFileSync }');
+		expect(result.imports).toContain('import { join }');
+		expect(result.body).toContain('const x = 1;');
+		expect(result.body).toContain('return x;');
+	});
+
+	it("splits code with no imports", () => {
+		const result = __test__.splitImportsAndBody('const x = 1;\nreturn x;');
+		expect(result.imports).toBe("");
+		expect(result.body).toBe('const x = 1;\nreturn x;');
+	});
+
+	it("handles multi-line imports", () => {
+		const code = 'import {\n  readFileSync,\n  writeFileSync,\n} from "node:fs";\n\nreturn 1;';
+		const result = __test__.splitImportsAndBody(code);
+		expect(result.imports).toContain('readFileSync');
+		expect(result.imports).toContain('writeFileSync');
+		expect(result.body).toContain('return 1;');
+	});
+
+	it("builds user module with imports at top level", () => {
+		const mod = __test__.buildUserModule(
+			'import { readFileSync } from "node:fs";\nconst x: string = "hello";\nreturn x;',
+		);
+		expect(mod).toMatch(/^import \{ readFileSync \}/);
+		expect(mod).toContain('export default async function(host: any, state: any) {');
+		expect(mod).toContain('return x;');
 	});
 
 	it("sanitizes artifact names", () => {
