@@ -96,25 +96,17 @@ import {
 	asPermissionToolInput,
 	asPermissionToolName,
 	canonicalizePath,
-	canonicalizePathToken,
 	getCommandInput,
 	getExternalPaths,
 	getMatchTarget,
-	hasRegexMeta,
 	matchRule,
-	matchSimpleBashPattern,
-	ruleMatch,
 	isPathOutsideCwd,
 } from "./matching";
 import {
 	detectDangerousBashPattern,
 	hasComplexBashSyntax,
-	hasForbiddenSimpleBashCompoundSyntax,
 	isAllowedBashCompound,
-	isAllowedSimpleBashCommand,
-	isComplexBashCommand,
 	sandboxFallbackModeForPolicy,
-	splitSimpleBashCompound,
 } from "./shell-policy";
 import {
 	compileSandboxConfig,
@@ -552,7 +544,7 @@ export default function (pi: ExtensionAPI) {
 			if (rule.action === "allow") {
 				if (toolName === "bash") {
 					const command = getCommandInput(input) ?? "";
-					if (!isAllowedBashCompound(command, policy.rules) && isComplexBashCommand(command)) {
+					if (!isAllowedBashCompound(command, policy.rules) && hasComplexBashSyntax(command)) {
 						return askPermission(toolName, input, "Complex shell command requires confirmation", projectRoot, ctx);
 					}
 				}
@@ -887,25 +879,3 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-export const __test__ = {
-	mergeDefaultConfig,
-	getApprovalsSettings,
-	resolveProtectedResources,
-	isPathOutsideCwd,
-	canonicalizePathToken,
-	approvalsCoverPaths,
-	approvalsCoverBash,
-	hasComplexBashSyntax,
-	hasForbiddenSimpleBashCompoundSyntax,
-	isComplexBashCommand,
-	splitSimpleBashCompound,
-	isAllowedSimpleBashCommand,
-	isAllowedBashCompound,
-	detectDangerousBashPattern,
-	sandboxFallbackModeForPolicy,
-	compileSandboxConfig,
-	hasRegexMeta,
-	matchSimpleBashPattern,
-	ruleMatch,
-	matchRule,
-};

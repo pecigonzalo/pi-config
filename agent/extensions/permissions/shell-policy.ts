@@ -7,8 +7,7 @@ export function sandboxFallbackModeForPolicy(mode: PermissionMode): "normal" | "
 	return "normal";
 }
 
-const COMPLEX_BASH_SYNTAX_RE = /(^|[^\\])(?:&&|\|\||[;&|<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/;
-const SIMPLE_COMPOUND_FORBIDDEN_SYNTAX_RE = /(^|[^\\])(?:[;<>]|\$\(|`|\n|\bif\b|\bfor\b|\bwhile\b|\bcase\b)/;
+const CONTROL_FLOW_KEYWORD_RE = /^\s*(if|for|while|case)\b/;
 const DANGEROUS_BASH_CHECKS = [
 	{ re: /\brm\b/i, reason: "Deletes files" },
 	{ re: /\bmv\b/i, reason: "Moves or renames" },
@@ -20,16 +19,102 @@ const DANGEROUS_BASH_CHECKS = [
 
 type ShellQuoteState = "none" | "single" | "double";
 
+function scanShellSyntax(command: string): { hasComplex: boolean; hasForbiddenSimple: boolean } {
+	let hasComplex = CONTROL_FLOW_KEYWORD_RE.test(command);
+	let hasForbiddenSimple = hasComplex;
+	let quoteState: ShellQuoteState = "none";
+	let escaped = false;
+
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		const next = command[i + 1];
+
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+
+		if (ch === "\\" && quoteState !== "single") {
+			if (next === "\n") {
+				i++;
+				continue;
+			}
+			escaped = true;
+			continue;
+		}
+
+		if (quoteState === "single") {
+			if (ch === "'") quoteState = "none";
+			continue;
+		}
+
+		if (quoteState === "double") {
+			if (ch === '"') {
+				quoteState = "none";
+				continue;
+			}
+			if (ch === "`") {
+				hasComplex = true;
+				hasForbiddenSimple = true;
+				continue;
+			}
+			if (ch === "$" && next === "(") {
+				hasComplex = true;
+				hasForbiddenSimple = true;
+				i++;
+				continue;
+			}
+			continue;
+		}
+
+		if (ch === "'") {
+			quoteState = "single";
+			continue;
+		}
+		if (ch === '"') {
+			quoteState = "double";
+			continue;
+		}
+		if (ch === "`") {
+			hasComplex = true;
+			hasForbiddenSimple = true;
+			continue;
+		}
+		if (ch === "$" && next === "(") {
+			hasComplex = true;
+			hasForbiddenSimple = true;
+			i++;
+			continue;
+		}
+		if (ch === "&") {
+			hasComplex = true;
+			if (next === "&") {
+				i++;
+				continue;
+			}
+			hasForbiddenSimple = true;
+			continue;
+		}
+		if (ch === "|") {
+			hasComplex = true;
+			if (next === "|") i++;
+			continue;
+		}
+		if (ch === ";" || ch === ">" || ch === "<" || ch === "\n") {
+			hasComplex = true;
+			hasForbiddenSimple = true;
+		}
+	}
+
+	return { hasComplex, hasForbiddenSimple };
+}
+
 export function hasComplexBashSyntax(command: string): boolean {
-	return COMPLEX_BASH_SYNTAX_RE.test(command);
+	return scanShellSyntax(command).hasComplex;
 }
 
 export function hasForbiddenSimpleBashCompoundSyntax(command: string): boolean {
-	return SIMPLE_COMPOUND_FORBIDDEN_SYNTAX_RE.test(command);
-}
-
-export function isComplexBashCommand(command: string): boolean {
-	return hasComplexBashSyntax(command);
+	return scanShellSyntax(command).hasForbiddenSimple;
 }
 
 export function splitSimpleBashCompound(command: string): string[] | undefined {

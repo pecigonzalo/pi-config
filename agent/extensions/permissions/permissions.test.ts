@@ -2,30 +2,34 @@ import { beforeAll, describe, it, expect, mock } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-let __test__: Awaited<ReturnType<typeof import("./permissions")>>["__test"];
+import { approvalsCoverBash, approvalsCoverPaths, getApprovalsSettings } from "./approvals";
+import { resolveCodemodePolicy } from "./codemode";
+import { isPathOutsideCwd, ruleMatch } from "./matching";
+import {
+	detectDangerousBashPattern,
+	hasComplexBashSyntax,
+	hasForbiddenSimpleBashCompoundSyntax,
+	isAllowedBashCompound,
+	isAllowedSimpleBashCommand,
+	sandboxFallbackModeForPolicy,
+	splitSimpleBashCompound,
+} from "./shell-policy";
+import { compileSandboxConfig, runSandboxedCommand } from "./sandbox";
+
+let configModule: typeof import("./config");
 
 beforeAll(async () => {
 	const td = process.env.TMPDIR || os.tmpdir();
 	await fs.mkdir(td, { recursive: true });
 	mock.module("@mariozechner/pi-coding-agent", () => ({
-		createBashTool: () => ({ execute: async () => ({ content: [{ type: "text", text: "" }] }) }),
 		getAgentDir: () => "/tmp",
 	}));
-	mock.module("@mariozechner/pi-tui", () => ({
-		matchesKey: () => false,
-		Key: { escape: "escape" },
-		Text: class {
-			constructor(_text: string) {}
-			render() { return []; }
-			invalidate() {}
-		},
-	}));
-	__test__ = (await import("./permissions")).__test__;
+	configModule = await import("./config");
 });
 
 describe("permissions config merge", () => {
 	it("deep-merges default config with project-local precedence", () => {
-		const merged = __test__.mergeDefaultConfig(
+		const merged = configModule.mergeDefaultConfig(
 			{ mode: "workspace-write", externalPath: "ask", rules: [{ tool: "read", action: "block" }] },
 			{ externalPath: "block", rules: [{ tool: "bash", action: "ask" }] },
 		);
@@ -36,7 +40,7 @@ describe("permissions config merge", () => {
 	});
 
 	it("resolves protected resources with explicit unprotect overrides", () => {
-		const resolved = __test__.resolveProtectedResources({
+		const resolved = configModule.resolveProtectedResources({
 			protectedResources: {
 				enabled: true,
 				defaults: true,
@@ -62,7 +66,7 @@ describe("external path canonicalization", () => {
 		const linkPath = path.join(cwd, "link");
 		await fs.symlink(outside, linkPath);
 
-		const isOutside = __test__.isPathOutsideCwd("link/secret.txt", cwd);
+		const isOutside = isPathOutsideCwd("link/secret.txt", cwd);
 		expect(isOutside).toBe(true);
 
 		await fs.rm(tmp, { recursive: true, force: true });
@@ -74,14 +78,14 @@ describe("external path canonicalization", () => {
 		await fs.mkdir(cwd, { recursive: true });
 		await fs.writeFile(path.join(cwd, "a.txt"), "ok", "utf8");
 
-		expect(__test__.isPathOutsideCwd("a.txt", cwd)).toBe(false);
+		expect(isPathOutsideCwd("a.txt", cwd)).toBe(false);
 		await fs.rm(tmp, { recursive: true, force: true });
 	});
 });
 
 describe("scoped approvals", () => {
 	it("does not reuse path approvals across project boundaries", () => {
-		const settings = __test__.getApprovalsSettings({ approvals: { scopeByProject: true, scopeByAgent: true } });
+		const settings = getApprovalsSettings({ approvals: { scopeByProject: true, scopeByAgent: true } });
 		const approvals = [
 			{
 				tool: "read",
@@ -94,15 +98,15 @@ describe("scoped approvals", () => {
 		];
 
 		expect(
-			__test__.approvalsCoverPaths(approvals, "read", ["/repo-a/external/file.txt"], "/repo-a", "reviewer", settings),
+			approvalsCoverPaths(approvals, "read", ["/repo-a/external/file.txt"], "/repo-a", "reviewer", settings),
 		).toBe(true);
 		expect(
-			__test__.approvalsCoverPaths(approvals, "read", ["/repo-a/external/file.txt"], "/repo-b", "reviewer", settings),
+			approvalsCoverPaths(approvals, "read", ["/repo-a/external/file.txt"], "/repo-b", "reviewer", settings),
 		).toBe(false);
 	});
 
 	it("matches bash exact and prefix approvals", () => {
-		const settings = __test__.getApprovalsSettings({ approvals: { scopeByProject: true, scopeByAgent: true } });
+		const settings = getApprovalsSettings({ approvals: { scopeByProject: true, scopeByAgent: true } });
 		const approvals = [
 			{
 				tool: "bash",
@@ -122,49 +126,53 @@ describe("scoped approvals", () => {
 			},
 		];
 
-		expect(__test__.approvalsCoverBash(approvals, "git status", "/repo-a", "default", settings)).toBe(true);
-		expect(__test__.approvalsCoverBash(approvals, "npm run test", "/repo-a", "default", settings)).toBe(true);
-		expect(__test__.approvalsCoverBash(approvals, "npm run test", "/repo-a", "reviewer", settings)).toBe(false);
+		expect(approvalsCoverBash(approvals, "git status", "/repo-a", "default", settings)).toBe(true);
+		expect(approvalsCoverBash(approvals, "npm run test", "/repo-a", "default", settings)).toBe(true);
+		expect(approvalsCoverBash(approvals, "npm run test", "/repo-a", "reviewer", settings)).toBe(false);
 	});
 });
 
 describe("bash complexity and fallback", () => {
 	it("detects complex shell commands", () => {
-		expect(__test__.hasComplexBashSyntax("cat file.txt")).toBe(false);
-		expect(__test__.isComplexBashCommand("cat file.txt && rm -rf tmp")).toBe(true);
-		expect(__test__.isComplexBashCommand("echo hi | wc -l")).toBe(true);
-		expect(__test__.isComplexBashCommand("rg foo & head")).toBe(true);
+		expect(hasComplexBashSyntax("cat file.txt")).toBe(false);
+		expect(hasComplexBashSyntax('rg -n "foo|bar|baz" permissions.ts')).toBe(false);
+		expect(hasComplexBashSyntax("echo 'foo && bar || baz'")).toBe(false);
+		expect(hasComplexBashSyntax("cat file.txt && rm -rf tmp")).toBe(true);
+		expect(hasComplexBashSyntax("echo hi | wc -l")).toBe(true);
+		expect(hasComplexBashSyntax("rg foo & head")).toBe(true);
+		expect(hasComplexBashSyntax("printf '%s\\n' foo\nbar")).toBe(true);
 	});
 
 	it("recognizes shell syntax forbidden for simple compounds", () => {
-		expect(__test__.hasForbiddenSimpleBashCompoundSyntax("rg foo src | head -10")).toBe(false);
-		expect(__test__.hasForbiddenSimpleBashCompoundSyntax("rg foo src && head -10")).toBe(false);
-		expect(__test__.hasForbiddenSimpleBashCompoundSyntax("rg foo src || head -10")).toBe(false);
-		expect(__test__.hasForbiddenSimpleBashCompoundSyntax("rg foo src > out.txt")).toBe(true);
-		expect(__test__.hasForbiddenSimpleBashCompoundSyntax("rg foo src ; head -10")).toBe(true);
+		expect(hasForbiddenSimpleBashCompoundSyntax("rg foo src | head -10")).toBe(false);
+		expect(hasForbiddenSimpleBashCompoundSyntax("rg foo src && head -10")).toBe(false);
+		expect(hasForbiddenSimpleBashCompoundSyntax("rg foo src || head -10")).toBe(false);
+		expect(hasForbiddenSimpleBashCompoundSyntax('rg -n "foo|bar" src')).toBe(false);
+		expect(hasForbiddenSimpleBashCompoundSyntax("rg foo src > out.txt")).toBe(true);
+		expect(hasForbiddenSimpleBashCompoundSyntax("rg foo src ; head -10")).toBe(true);
 	});
 
 	it("splits simple bash compounds but rejects unsupported edge cases", () => {
-		expect(__test__.splitSimpleBashCompound("rg foo src | head -10")).toEqual(["rg foo src", "head -10"]);
-		expect(__test__.splitSimpleBashCompound("find . -type f | rg permissions | head")).toEqual([
+		expect(splitSimpleBashCompound("rg foo src | head -10")).toEqual(["rg foo src", "head -10"]);
+		expect(splitSimpleBashCompound("find . -type f | rg permissions | head")).toEqual([
 			"find . -type f",
 			"rg permissions",
 			"head",
 		]);
-		expect(__test__.splitSimpleBashCompound("rg foo src || head -10 && pwd")).toEqual([
+		expect(splitSimpleBashCompound("rg foo src || head -10 && pwd")).toEqual([
 			"rg foo src",
 			"head -10",
 			"pwd",
 		]);
-		expect(__test__.splitSimpleBashCompound("rg 'foo|bar||baz&&qux' src")).toEqual(["rg 'foo|bar||baz&&qux' src"]);
-		expect(__test__.splitSimpleBashCompound('rg "foo|bar" src | head')).toEqual(['rg "foo|bar" src', "head"]);
-		expect(__test__.splitSimpleBashCompound(String.raw`rg foo \| head`)).toEqual([String.raw`rg foo \| head`]);
-		expect(__test__.splitSimpleBashCompound("| head -10")).toBeUndefined();
-		expect(__test__.splitSimpleBashCompound("rg foo src |")).toBeUndefined();
-		expect(__test__.splitSimpleBashCompound("rg foo src &&")).toBeUndefined();
-		expect(__test__.splitSimpleBashCompound("rg foo src & head -10")).toBeUndefined();
-		expect(__test__.splitSimpleBashCompound("rg 'foo src | head -10")).toBeUndefined();
-		expect(__test__.splitSimpleBashCompound("rg foo src ; head -10")).toBeUndefined();
+		expect(splitSimpleBashCompound("rg 'foo|bar||baz&&qux' src")).toEqual(["rg 'foo|bar||baz&&qux' src"]);
+		expect(splitSimpleBashCompound('rg "foo|bar" src | head')).toEqual(['rg "foo|bar" src', "head"]);
+		expect(splitSimpleBashCompound(String.raw`rg foo \| head`)).toEqual([String.raw`rg foo \| head`]);
+		expect(splitSimpleBashCompound("| head -10")).toBeUndefined();
+		expect(splitSimpleBashCompound("rg foo src |")).toBeUndefined();
+		expect(splitSimpleBashCompound("rg foo src &&")).toBeUndefined();
+		expect(splitSimpleBashCompound("rg foo src & head -10")).toBeUndefined();
+		expect(splitSimpleBashCompound("rg 'foo src | head -10")).toBeUndefined();
+		expect(splitSimpleBashCompound("rg foo src ; head -10")).toBeUndefined();
 	});
 
 	it("allows compounds only when every segment is individually allowed", () => {
@@ -176,11 +184,11 @@ describe("bash complexity and fallback", () => {
 			{ tool: "bash", action: "ask" as const },
 		];
 
-		expect(__test__.isAllowedSimpleBashCommand("rg foo src", rules)).toBe(true);
-		expect(__test__.isAllowedSimpleBashCommand("sed -n 1,10p file", rules)).toBe(false);
-		expect(__test__.isAllowedBashCompound("rg foo src | head -10", rules)).toBe(true);
-		expect(__test__.isAllowedBashCompound("find . -type f | rg foo | sort", rules)).toBe(true);
-		expect(__test__.isAllowedBashCompound("rg foo src || head -10 && pwd", [
+		expect(isAllowedSimpleBashCommand("rg foo src", rules)).toBe(true);
+		expect(isAllowedSimpleBashCommand("sed -n 1,10p file", rules)).toBe(false);
+		expect(isAllowedBashCompound("rg foo src | head -10", rules)).toBe(true);
+		expect(isAllowedBashCompound("find . -type f | rg foo | sort", rules)).toBe(true);
+		expect(isAllowedBashCompound("rg foo src || head -10 && pwd", [
 			{ tool: "bash", match: "rg *", action: "allow" as const },
 			{ tool: "bash", match: "find *", action: "allow" as const },
 			{ tool: "bash", match: "head *", action: "allow" as const },
@@ -188,43 +196,111 @@ describe("bash complexity and fallback", () => {
 			{ tool: "bash", match: "pwd *", action: "allow" as const },
 			{ tool: "bash", action: "ask" as const },
 		])).toBe(true);
-		expect(__test__.isAllowedBashCompound("rg foo src | sed -n 1,10p", rules)).toBe(false);
-		expect(__test__.isAllowedBashCompound("rg foo src | rm -rf tmp", rules)).toBe(false);
-		expect(__test__.isAllowedBashCompound("rg foo src && head -10", rules)).toBe(true);
-		expect(__test__.isAllowedBashCompound("rg foo src && head -10 & pwd", rules)).toBe(false);
+		expect(isAllowedBashCompound("rg foo src | sed -n 1,10p", rules)).toBe(false);
+		expect(isAllowedBashCompound("rg foo src | rm -rf tmp", rules)).toBe(false);
+		expect(isAllowedBashCompound("rg foo src && head -10", rules)).toBe(true);
+		expect(isAllowedBashCompound("rg foo src && head -10 & pwd", rules)).toBe(false);
 	});
 
 	it("detects dangerous bash patterns", () => {
-		expect(__test__.detectDangerousBashPattern("rm -rf tmp")).toBe("Deletes files");
-		expect(__test__.detectDangerousBashPattern("sudo ls")).toBe("Elevated privileges");
-		expect(__test__.detectDangerousBashPattern("git status")).toBeUndefined();
+		expect(detectDangerousBashPattern("rm -rf tmp")).toBe("Deletes files");
+		expect(detectDangerousBashPattern("sudo ls")).toBe("Elevated privileges");
+		expect(detectDangerousBashPattern("git status")).toBeUndefined();
 	});
 
 	it("returns expected sandbox fallback mode by permission mode", () => {
-		expect(__test__.sandboxFallbackModeForPolicy("plan")).toBe("block-all-bash");
-		expect(__test__.sandboxFallbackModeForPolicy("workspace-write")).toBe("ask-all-bash");
-		expect(__test__.sandboxFallbackModeForPolicy("full-access")).toBe("normal");
+		expect(sandboxFallbackModeForPolicy("plan")).toBe("block-all-bash");
+		expect(sandboxFallbackModeForPolicy("workspace-write")).toBe("ask-all-bash");
+		expect(sandboxFallbackModeForPolicy("full-access")).toBe("normal");
 	});
 });
 
 describe("simple matcher shorthand", () => {
 	it("treats bash 'rg' as word-boundary shorthand", () => {
 		const rule = { tool: "bash", match: "rg", action: "allow" as const };
-		expect(__test__.ruleMatch(rule, "bash", "rg foo src")).toBe(true);
-		expect(__test__.ruleMatch(rule, "bash", "xrg foo src")).toBe(false);
+		expect(ruleMatch(rule, "bash", "rg foo src")).toBe(true);
+		expect(ruleMatch(rule, "bash", "xrg foo src")).toBe(false);
 	});
 
 	it("treats bash 'rg *' as command-prefix shorthand", () => {
 		const rule = { tool: "bash", match: "rg *", action: "allow" as const };
-		expect(__test__.ruleMatch(rule, "bash", "rg foo src")).toBe(true);
-		expect(__test__.ruleMatch(rule, "bash", "rg")).toBe(true);
-		expect(__test__.ruleMatch(rule, "bash", "grep foo src")).toBe(false);
+		expect(ruleMatch(rule, "bash", "rg foo src")).toBe(true);
+		expect(ruleMatch(rule, "bash", "rg")).toBe(true);
+		expect(ruleMatch(rule, "bash", "grep foo src")).toBe(false);
 	});
 
 	it("keeps regex behavior when regex metacharacters are used", () => {
 		const rule = { tool: "bash", match: "^git\\b", action: "allow" as const };
-		expect(__test__.ruleMatch(rule, "bash", "git status")).toBe(true);
-		expect(__test__.ruleMatch(rule, "bash", "xgit status")).toBe(false);
+		expect(ruleMatch(rule, "bash", "git status")).toBe(true);
+		expect(ruleMatch(rule, "bash", "xgit status")).toBe(false);
+	});
+});
+
+describe("codemode policy", () => {
+	const basePolicy = {
+		mode: "workspace-write" as const,
+		rules: [],
+		externalPath: "ask" as const,
+		protectedResources: { denyRead: [], denyWrite: [] },
+	};
+
+	it("maps analysis profile to plan mode with limited capabilities", () => {
+		const resolved = resolveCodemodePolicy(basePolicy, "/repo", { enabled: true, network: true }, "analysis");
+		expect(resolved.mode).toBe("plan");
+		expect(resolved.capabilities).toEqual(["message", "artifact"]);
+		expect(resolved.allowProjectAgents).toBe(false);
+		expect(resolved.sandbox.enabled).toBe(true);
+		expect(resolved.sandbox.config.network?.allowedDomains).toEqual([]);
+	});
+
+	it("keeps orchestrator constrained even when outer mode is full-access", () => {
+		const resolved = resolveCodemodePolicy(
+			{ ...basePolicy, mode: "full-access" },
+			"/repo",
+			{ enabled: true, network: true },
+			"orchestrator",
+		);
+		expect(resolved.mode).toBe("workspace-write");
+		expect(resolved.capabilities).toEqual(["message", "artifact", "task", "todo"]);
+		expect(resolved.sandbox.enabled).toBe(true);
+	});
+});
+
+describe("sandboxed command runner", () => {
+	it("runs wrapped commands and streams output", async () => {
+		const chunks: string[] = [];
+		const result = await runSandboxedCommand(
+			{
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command) => command,
+			},
+			{
+				command: "printf 'hello from sandbox'",
+				cwd: process.cwd(),
+				onData: (chunk) => chunks.push(chunk.toString("utf8")),
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(chunks.join("")).toContain("hello from sandbox");
+	});
+
+	it("rejects with timeout errors", async () => {
+		await expect(
+			runSandboxedCommand(
+				{
+					initialize: async () => {},
+					reset: async () => {},
+					wrapWithSandbox: async (command) => command,
+				},
+				{
+					command: "sleep 1",
+					cwd: process.cwd(),
+					timeout: 0.01,
+				},
+			),
+		).rejects.toThrow("timeout:0.01");
 	});
 });
 
@@ -237,13 +313,13 @@ describe("sandbox network config", () => {
 	};
 
 	it("uses unrestricted network shape by default when enabled", () => {
-		const compiled = __test__.compileSandboxConfig(policy, "/repo", { enabled: true, network: true });
+		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, network: true });
 		expect(compiled.config.network?.allowedDomains).toBeUndefined();
 		expect(compiled.config.network?.deniedDomains).toBeUndefined();
 	});
 
 	it("applies explicit allow/deny domain lists when provided", () => {
-		const compiled = __test__.compileSandboxConfig(policy, "/repo", {
+		const compiled = compileSandboxConfig(policy, "/repo", {
 			enabled: true,
 			network: true,
 			allowedDomains: ["api.github.com", "*.npmjs.org", "api.github.com"],
@@ -254,13 +330,13 @@ describe("sandbox network config", () => {
 	});
 
 	it("blocks all network when disabled", () => {
-		const compiled = __test__.compileSandboxConfig(policy, "/repo", { enabled: true, network: false });
+		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, network: false });
 		expect(compiled.config.network?.allowedDomains).toEqual([]);
 		expect(compiled.config.network?.deniedDomains).toEqual([]);
 	});
 
 	it("includes configured tmpDir in allowWrite", () => {
-		const compiled = __test__.compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
+		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
 		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/custom-pi");
 	});
 });

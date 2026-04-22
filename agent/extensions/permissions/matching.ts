@@ -5,7 +5,6 @@ import {
 	type PermissionToolInput,
 	type PermissionToolName,
 	type Rule,
-	FILESYSTEM_TOOLS,
 	isFilesystemToolName,
 } from "./shared";
 
@@ -139,7 +138,7 @@ export function isPathOutsideCwd(rawPath: string, cwd: string): boolean {
 }
 
 export function getExternalPaths(toolName: PermissionToolName, input: PermissionToolInput, cwd: string): string[] {
-	if (!isFilesystemToolName(toolName) || !FILESYSTEM_TOOLS.has(toolName)) return [];
+	if (!isFilesystemToolName(toolName)) return [];
 
 	const target = getMatchTarget(toolName, input);
 	if (!target || !isPathOutsideCwd(target, cwd)) return [];
