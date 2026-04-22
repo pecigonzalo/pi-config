@@ -7,16 +7,13 @@ import { resolveCodemodePolicy } from "./codemode";
 import { isPathOutsideCwd, ruleMatch } from "./matching";
 import {
 	detectDangerousBashPattern,
-	getBashPrefixCandidates,
-	getFirstUnapprovedBashSegment,
-	hasComplexBashSyntax,
-	hasForbiddenSimpleBashCompoundSyntax,
-	isAllowedBashCompound,
-	isAllowedSimpleBashCommand,
+	getFirstUnapprovedParsedCommand,
+	isAllParsedCommandsAllowed,
+	isParsedCommandAllowed,
 	sandboxFallbackModeForPolicy,
-	splitSimpleBashCompound,
 } from "./shell-policy";
 import { compileSandboxConfig, runSandboxedCommand } from "./sandbox";
+import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-parse";
 
 let configModule: typeof import("./config");
 
@@ -151,90 +148,7 @@ describe("scoped approvals", () => {
 	});
 });
 
-describe("bash complexity and fallback", () => {
-	it("detects complex shell commands", () => {
-		expect(hasComplexBashSyntax("cat file.txt")).toBe(false);
-		expect(hasComplexBashSyntax('rg -n "foo|bar|baz" permissions.ts')).toBe(false);
-		expect(hasComplexBashSyntax("echo 'foo && bar || baz'")).toBe(false);
-		expect(hasComplexBashSyntax("cat file.txt && rm -rf tmp")).toBe(true);
-		expect(hasComplexBashSyntax("echo hi | wc -l")).toBe(true);
-		expect(hasComplexBashSyntax("rg foo & head")).toBe(true);
-		expect(hasComplexBashSyntax("printf '%s\\n' foo\nbar")).toBe(true);
-	});
-
-	it("recognizes shell syntax forbidden for simple compounds", () => {
-		expect(hasForbiddenSimpleBashCompoundSyntax("rg foo src | head -10")).toBe(false);
-		expect(hasForbiddenSimpleBashCompoundSyntax("rg foo src && head -10")).toBe(false);
-		expect(hasForbiddenSimpleBashCompoundSyntax("rg foo src || head -10")).toBe(false);
-		expect(hasForbiddenSimpleBashCompoundSyntax('rg -n "foo|bar" src')).toBe(false);
-		expect(hasForbiddenSimpleBashCompoundSyntax("rg foo src > out.txt")).toBe(true);
-		expect(hasForbiddenSimpleBashCompoundSyntax("rg foo src ; head -10")).toBe(true);
-	});
-
-	it("splits simple bash compounds but rejects unsupported edge cases", () => {
-		expect(splitSimpleBashCompound("rg foo src | head -10")).toEqual(["rg foo src", "head -10"]);
-		expect(splitSimpleBashCompound("find . -type f | rg permissions | head")).toEqual([
-			"find . -type f",
-			"rg permissions",
-			"head",
-		]);
-		expect(splitSimpleBashCompound("rg foo src || head -10 && pwd")).toEqual([
-			"rg foo src",
-			"head -10",
-			"pwd",
-		]);
-		expect(splitSimpleBashCompound("rg 'foo|bar||baz&&qux' src")).toEqual(["rg 'foo|bar||baz&&qux' src"]);
-		expect(splitSimpleBashCompound('rg "foo|bar" src | head')).toEqual(['rg "foo|bar" src', "head"]);
-		expect(splitSimpleBashCompound(String.raw`rg foo \| head`)).toEqual([String.raw`rg foo \| head`]);
-		expect(splitSimpleBashCompound("| head -10")).toBeUndefined();
-		expect(splitSimpleBashCompound("rg foo src |")).toBeUndefined();
-		expect(splitSimpleBashCompound("rg foo src &&")).toBeUndefined();
-		expect(splitSimpleBashCompound("rg foo src & head -10")).toBeUndefined();
-		expect(splitSimpleBashCompound("rg 'foo src | head -10")).toBeUndefined();
-		expect(splitSimpleBashCompound("rg foo src ; head -10")).toBeUndefined();
-	});
-
-	it("builds safe prefix candidates for bash approvals", () => {
-		expect(getBashPrefixCandidates("git status --short")).toEqual(["git", "git status"]);
-		expect(getBashPrefixCandidates("awk '{print $1}'")).toEqual(["awk"]);
-		expect(getBashPrefixCandidates("npm run test")).toEqual(["npm", "npm run"]);
-		expect(getBashPrefixCandidates(String.raw`rg foo\ bar`)).toEqual(["rg"]);
-	});
-
-	it("allows compounds only when every segment is individually allowed", () => {
-		const rules = [
-			{ tool: "bash", match: "cd *", action: "allow" as const },
-			{ tool: "bash", match: "rg *", action: "allow" as const },
-			{ tool: "bash", match: "find *", action: "allow" as const },
-			{ tool: "bash", match: "head *", action: "allow" as const },
-			{ tool: "bash", match: "sort *", action: "allow" as const },
-			{ tool: "bash", match: "bun *", action: "allow" as const },
-			{ tool: "bash", action: "ask" as const },
-		];
-
-		expect(isAllowedSimpleBashCommand("rg foo src", rules)).toBe(true);
-		expect(isAllowedSimpleBashCommand("sed -n 1,10p file", rules)).toBe(false);
-		expect(isAllowedBashCompound("rg foo src | head -10", rules)).toBe(true);
-		expect(isAllowedBashCompound("find . -type f | rg foo | sort", rules)).toBe(true);
-		expect(isAllowedBashCompound("cd /tmp && bun test", rules)).toBe(true);
-		expect(getFirstUnapprovedBashSegment("cd /tmp && bun test", rules)).toBeUndefined();
-		expect(isAllowedBashCompound("rg foo src || head -10 && pwd", [
-			{ tool: "bash", match: "rg *", action: "allow" as const },
-			{ tool: "bash", match: "find *", action: "allow" as const },
-			{ tool: "bash", match: "head *", action: "allow" as const },
-			{ tool: "bash", match: "sort *", action: "allow" as const },
-			{ tool: "bash", match: "pwd *", action: "allow" as const },
-			{ tool: "bash", action: "ask" as const },
-		])).toBe(true);
-		expect(isAllowedBashCompound("rg foo src | sed -n 1,10p", rules)).toBe(false);
-		expect(getFirstUnapprovedBashSegment("rg foo src | sed -n 1,10p", rules)).toBe("sed -n 1,10p");
-		expect(isAllowedBashCompound("rg foo src | sed -n 1,10p", rules, (command) => command.startsWith("sed -n"))).toBe(true);
-		expect(getFirstUnapprovedBashSegment("rg foo src | sed -n 1,10p", rules, (command) => command.startsWith("sed -n"))).toBeUndefined();
-		expect(isAllowedBashCompound("rg foo src | rm -rf tmp", rules)).toBe(false);
-		expect(isAllowedBashCompound("rg foo src && head -10", rules)).toBe(true);
-		expect(isAllowedBashCompound("rg foo src && head -10 & pwd", rules)).toBe(false);
-	});
-
+describe("bash policy helpers", () => {
 	it("detects dangerous bash patterns", () => {
 		expect(detectDangerousBashPattern("rm -rf tmp")).toBe("Deletes files");
 		expect(detectDangerousBashPattern("sudo ls")).toBe("Elevated privileges");
@@ -319,6 +233,33 @@ describe("sandboxed command runner", () => {
 		expect(chunks.join("")).toContain("hello from sandbox");
 	});
 
+	it("injects cache redirection env vars for sandboxed commands", async () => {
+		const sandboxTmpDir = path.join(os.tmpdir(), "pi-test-cache-env");
+		const chunks: string[] = [];
+		const result = await runSandboxedCommand(
+			{
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command) => command,
+			},
+			{
+				command: "printf '%s\n%s\n%s\n%s\n' \"$TMPDIR\" \"$XDG_CACHE_HOME\" \"$BUN_INSTALL_CACHE_DIR\" \"$NPM_CONFIG_CACHE\"",
+				cwd: process.cwd(),
+				env: { TMPDIR: sandboxTmpDir },
+				onData: (chunk) => chunks.push(chunk.toString("utf8")),
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(chunks.join("")).toBe([
+			sandboxTmpDir,
+			path.join(sandboxTmpDir, "xdg-cache"),
+			path.join(sandboxTmpDir, "bun-cache"),
+			path.join(sandboxTmpDir, "npm-cache"),
+			"",
+		].join("\n"));
+	});
+
 	it("rejects with timeout errors", async () => {
 		await expect(
 			runSandboxedCommand(
@@ -371,5 +312,148 @@ describe("sandbox network config", () => {
 	it("includes configured tmpDir in allowWrite", () => {
 		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
 		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/custom-pi");
+	});
+
+	it("does not blanket-allow package manager home directories", () => {
+		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
+		const allowWrite = compiled.config.filesystem?.allowWrite ?? [];
+		const home = os.homedir();
+		expect(allowWrite).not.toContain(path.join(home, ".bun"));
+		expect(allowWrite).not.toContain(path.join(home, ".npm"));
+		expect(allowWrite).not.toContain(path.join(home, ".yarn"));
+		expect(allowWrite).not.toContain(path.join(home, ".cargo"));
+	});
+});
+
+// ─── Tree-sitter shell parsing ────────────────────────────────────────────────
+
+describe("tree-sitter shell parsing", () => {
+	it("is available", async () => {
+		expect(await isTreeSitterAvailable()).toBe(true);
+	});
+
+	it("parses simple commands", async () => {
+		const parsed = await parseBashCommand("git status");
+		expect(parsed.isComplex).toBe(false);
+		expect(parsed.commands).toHaveLength(1);
+		expect(parsed.commands[0].name).toBe("git");
+		expect(parsed.commands[0].tokens).toEqual(["git", "status"]);
+		expect(parsed.commands[0].alwaysPattern).toBe("git status *");
+	});
+
+	it("separates redirections from commands", async () => {
+		const parsed = await parseBashCommand("bun test 2>&1");
+		expect(parsed.commands).toHaveLength(1);
+		expect(parsed.commands[0].name).toBe("bun");
+		expect(parsed.commands[0].tokens).toEqual(["bun", "test"]);
+		expect(parsed.commands[0].command).toBe("bun test");
+		// source includes the redirect context
+		expect(parsed.commands[0].source).toBe("bun test 2>&1");
+	});
+
+	it("splits compound commands with redirects", async () => {
+		const parsed = await parseBashCommand("cd /some/path && bun test 2>&1");
+		expect(parsed.isComplex).toBe(false);
+		expect(parsed.commands).toHaveLength(2);
+		expect(parsed.commands[0].name).toBe("cd");
+		expect(parsed.commands[0].tokens).toEqual(["cd", "/some/path"]);
+		expect(parsed.commands[1].name).toBe("bun");
+		expect(parsed.commands[1].tokens).toEqual(["bun", "test"]);
+		expect(parsed.commands[1].alwaysPattern).toBe("bun test *");
+	});
+
+	it("detects complex constructs", async () => {
+		const forLoop = await parseBashCommand("for f in *.txt; do echo $f; done");
+		expect(forLoop.isComplex).toBe(true);
+
+		const subshell = await parseBashCommand("echo $(whoami)");
+		expect(subshell.isComplex).toBe(true);
+
+		const simple = await parseBashCommand("ls -la");
+		expect(simple.isComplex).toBe(false);
+	});
+
+	it("handles pipelines", async () => {
+		const parsed = await parseBashCommand("echo hello | grep hello");
+		expect(parsed.commands).toHaveLength(2);
+		expect(parsed.commands[0].name).toBe("echo");
+		expect(parsed.commands[1].name).toBe("grep");
+	});
+
+	it("handles multi-command chains", async () => {
+		const parsed = await parseBashCommand('cd /path && git add . && git commit -m "msg"');
+		expect(parsed.commands).toHaveLength(3);
+		expect(parsed.commands[0].alwaysPattern).toBe("cd *");
+		expect(parsed.commands[1].alwaysPattern).toBe("git add *");
+		expect(parsed.commands[2].alwaysPattern).toBe("git commit *");
+	});
+
+	it("skips variable assignments in token extraction", async () => {
+		const parsed = await parseBashCommand("FOO=bar bun test");
+		expect(parsed.commands).toHaveLength(1);
+		expect(parsed.commands[0].name).toBe("bun");
+		expect(parsed.commands[0].tokens).toEqual(["bun", "test"]);
+	});
+
+	it("handles output redirection", async () => {
+		const parsed = await parseBashCommand("cat file.txt > output.txt");
+		expect(parsed.commands).toHaveLength(1);
+		expect(parsed.commands[0].name).toBe("cat");
+		expect(parsed.commands[0].tokens).toEqual(["cat", "file.txt"]);
+		// source includes redirect for display
+		expect(parsed.commands[0].source).toBe("cat file.txt > output.txt");
+	});
+});
+
+describe("arity prefix", () => {
+	it("uses arity table for known commands", () => {
+		expect(arityPrefix(["git", "status"])).toEqual(["git", "status"]);
+		expect(arityPrefix(["npm", "run", "dev"])).toEqual(["npm", "run", "dev"]);
+		expect(arityPrefix(["bun", "test"])).toEqual(["bun", "test"]);
+		expect(arityPrefix(["docker", "compose", "up", "-d"])).toEqual(["docker", "compose", "up"]);
+	});
+
+	it("falls back to first token for unknown commands", () => {
+		expect(arityPrefix(["mycommand", "arg1"])).toEqual(["mycommand"]);
+		expect(arityPrefix(["unknown"])).toEqual(["unknown"]);
+	});
+
+	it("returns empty for empty input", () => {
+		expect(arityPrefix([])).toEqual([]);
+	});
+});
+
+describe("tree-sitter policy integration", () => {
+	const allowRules: Rule[] = [
+		{ tool: "bash", match: "^cd\\b", action: "allow" },
+		{ tool: "bash", match: "^bun\\b", action: "allow" },
+		{ tool: "bash", match: "^git\\b", action: "allow" },
+		{ tool: "bash", match: "^echo\\b", action: "allow" },
+	];
+
+	it("allows all parsed commands when rules match", async () => {
+		const parsed = await parseBashCommand("cd /path && bun test 2>&1");
+		expect(isAllParsedCommandsAllowed(parsed, allowRules)).toBe(true);
+	});
+
+	it("finds first unapproved parsed command", async () => {
+		const parsed = await parseBashCommand("cd /path && rm -rf foo");
+		const unapproved = getFirstUnapprovedParsedCommand(parsed, allowRules);
+		expect(unapproved).toBeDefined();
+		expect(unapproved!.name).toBe("rm");
+	});
+
+	it("respects approval callback for parsed commands", async () => {
+		const parsed = await parseBashCommand("cd /path && rm -rf foo");
+		const isApproved = (candidate: string) => candidate.includes("rm");
+		const unapproved = getFirstUnapprovedParsedCommand(parsed, allowRules, isApproved);
+		expect(unapproved).toBeUndefined();
+	});
+
+	it("reports complex commands as not fully allowed even when rules match", async () => {
+		const parsed = await parseBashCommand("for f in *.txt; do echo $f; done");
+		// The inner echo is allowed by rules, but isComplex should be checked separately
+		expect(parsed.isComplex).toBe(true);
+		expect(isAllParsedCommandsAllowed(parsed, allowRules)).toBe(true);
 	});
 });

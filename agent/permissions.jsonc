@@ -88,7 +88,7 @@
       // - "rg *" => command-prefix match ("rg" or "rg ...")
       {
         "tool": "bash",
-        "match": "^(cat|rg|find|wc|grep|head|uniq|ls|sort|tail|tee|echo|pwd|which|file|diff|stat|du|df|date|uname|env|printenv|type|true|false)\\b",
+        "match": "^(cd|cat|rg|find|wc|grep|head|uniq|ls|sort|tail|tee|echo|pwd|which|file|diff|stat|du|df|date|uname|env|printenv|type|true|false|pwd)\\b",
         "action": "allow",
       },
       {
@@ -212,7 +212,6 @@
   //   "scopeByAgent": true,
   //   "maxAgeDays": 30
   // },
-
   // Built-in protected resources are defaults and are always overridable here.
   // Effective sets are computed as: (built-ins + addDeny*) - unprotect*
   // "protectedResources": {
@@ -223,7 +222,6 @@
   //   "unprotectRead": ["\\.env(\\..+)?$"],
   //   "unprotectWrite": ["(^|[/])\\.git/(hooks/|config$)"]
   // },
-
   // Optional bash sandbox backend. If the sandbox runtime is installed,
   // workspace-write and plan modes enable it automatically unless disabled.
   //
@@ -253,9 +251,6 @@
   "sandbox": {
     "enabled": true,
     "allowSshAuthSock": true,
-    "denyRead": [
-      "~/.aws",
-      "~/.gnupg"
-    ],
+    "denyRead": ["~/.aws", "~/.gnupg"],
   },
 }

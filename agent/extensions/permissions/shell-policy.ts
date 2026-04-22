@@ -1,5 +1,6 @@
 import { matchRule } from "./matching";
 import type { PermissionMode, Rule } from "./shared";
+import type { ParsedBash, ParsedCommand } from "./shell-parse";
 
 export function sandboxFallbackModeForPolicy(mode: PermissionMode): "normal" | "ask-all-bash" | "block-all-bash" {
 	if (mode === "plan") return "block-all-bash";
@@ -7,7 +8,8 @@ export function sandboxFallbackModeForPolicy(mode: PermissionMode): "normal" | "
 	return "normal";
 }
 
-const CONTROL_FLOW_KEYWORD_RE = /^\s*(if|for|while|case)\b/;
+// ── Dangerous pattern detection (regex-based, always available) ───────────────
+
 const DANGEROUS_BASH_CHECKS = [
 	{ re: /\brm\b/i, reason: "Deletes files" },
 	{ re: /\bmv\b/i, reason: "Moves or renames" },
@@ -17,279 +19,6 @@ const DANGEROUS_BASH_CHECKS = [
 	{ re: /\bcurl\b.+(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|PUT|DELETE|PATCH))/i, reason: "HTTP write operation" },
 ] as const;
 
-type ShellQuoteState = "none" | "single" | "double";
-
-type ShellToken = {
-	text: string;
-	hadQuotes: boolean;
-	hadEscapes: boolean;
-};
-
-function scanShellSyntax(command: string): { hasComplex: boolean; hasForbiddenSimple: boolean } {
-	let hasComplex = CONTROL_FLOW_KEYWORD_RE.test(command);
-	let hasForbiddenSimple = hasComplex;
-	let quoteState: ShellQuoteState = "none";
-	let escaped = false;
-
-	for (let i = 0; i < command.length; i++) {
-		const ch = command[i];
-		const next = command[i + 1];
-
-		if (escaped) {
-			escaped = false;
-			continue;
-		}
-
-		if (ch === "\\" && quoteState !== "single") {
-			if (next === "\n") {
-				i++;
-				continue;
-			}
-			escaped = true;
-			continue;
-		}
-
-		if (quoteState === "single") {
-			if (ch === "'") quoteState = "none";
-			continue;
-		}
-
-		if (quoteState === "double") {
-			if (ch === '"') {
-				quoteState = "none";
-				continue;
-			}
-			if (ch === "`") {
-				hasComplex = true;
-				hasForbiddenSimple = true;
-				continue;
-			}
-			if (ch === "$" && next === "(") {
-				hasComplex = true;
-				hasForbiddenSimple = true;
-				i++;
-				continue;
-			}
-			continue;
-		}
-
-		if (ch === "'") {
-			quoteState = "single";
-			continue;
-		}
-		if (ch === '"') {
-			quoteState = "double";
-			continue;
-		}
-		if (ch === "`") {
-			hasComplex = true;
-			hasForbiddenSimple = true;
-			continue;
-		}
-		if (ch === "$" && next === "(") {
-			hasComplex = true;
-			hasForbiddenSimple = true;
-			i++;
-			continue;
-		}
-		if (ch === "&") {
-			hasComplex = true;
-			if (next === "&") {
-				i++;
-				continue;
-			}
-			hasForbiddenSimple = true;
-			continue;
-		}
-		if (ch === "|") {
-			hasComplex = true;
-			if (next === "|") i++;
-			continue;
-		}
-		if (ch === ";" || ch === ">" || ch === "<" || ch === "\n") {
-			hasComplex = true;
-			hasForbiddenSimple = true;
-		}
-	}
-
-	return { hasComplex, hasForbiddenSimple };
-}
-
-export function hasComplexBashSyntax(command: string): boolean {
-	return scanShellSyntax(command).hasComplex;
-}
-
-export function hasForbiddenSimpleBashCompoundSyntax(command: string): boolean {
-	return scanShellSyntax(command).hasForbiddenSimple;
-}
-
-export function splitSimpleBashCompound(command: string): string[] | undefined {
-	const trimmed = command.trim();
-	if (!trimmed) return undefined;
-	if (hasForbiddenSimpleBashCompoundSyntax(command)) return undefined;
-
-	const parts: string[] = [];
-	let current = "";
-	let quoteState: ShellQuoteState = "none";
-	let escaped = false;
-
-	for (let i = 0; i < command.length; i++) {
-		const ch = command[i];
-		const next = command[i + 1];
-
-		if (escaped) {
-			current += ch;
-			escaped = false;
-			continue;
-		}
-
-		if (ch === "\\" && quoteState !== "single") {
-			current += ch;
-			escaped = true;
-			continue;
-		}
-
-		if (ch === '"' && quoteState !== "single") {
-			quoteState = quoteState === "double" ? "none" : "double";
-			current += ch;
-			continue;
-		}
-
-		if (ch === "'" && quoteState !== "double") {
-			quoteState = quoteState === "single" ? "none" : "single";
-			current += ch;
-			continue;
-		}
-
-		if (quoteState === "none") {
-			if (ch === "&") {
-				if (next !== "&") return undefined;
-				const segment = current.trim();
-				if (!segment) return undefined;
-				parts.push(segment);
-				current = "";
-				i++;
-				continue;
-			}
-
-			if (ch === "|") {
-				const segment = current.trim();
-				if (!segment) return undefined;
-				parts.push(segment);
-				current = "";
-				if (next === "|") i++;
-				continue;
-			}
-		}
-
-		current += ch;
-	}
-
-	if (escaped || quoteState !== "none") return undefined;
-	const tail = current.trim();
-	if (!tail) return undefined;
-	parts.push(tail);
-	return parts;
-}
-
-function tokenizeShellWords(command: string): ShellToken[] | undefined {
-	const tokens: ShellToken[] = [];
-	let current = "";
-	let quoteState: ShellQuoteState = "none";
-	let escaped = false;
-	let tokenStarted = false;
-	let hadQuotes = false;
-	let hadEscapes = false;
-
-	const pushToken = () => {
-		if (!tokenStarted) return;
-		tokens.push({ text: current, hadQuotes, hadEscapes });
-		current = "";
-		tokenStarted = false;
-		hadQuotes = false;
-		hadEscapes = false;
-	};
-
-	for (let i = 0; i < command.length; i++) {
-		const ch = command[i];
-
-		if (escaped) {
-			current += ch;
-			escaped = false;
-			tokenStarted = true;
-			hadEscapes = true;
-			continue;
-		}
-
-		if (quoteState === "none" && /\s/.test(ch)) {
-			pushToken();
-			continue;
-		}
-
-		tokenStarted = true;
-
-		if (ch === "\\" && quoteState !== "single") {
-			escaped = true;
-			hadEscapes = true;
-			continue;
-		}
-
-		if (quoteState === "single") {
-			if (ch === "'") {
-				quoteState = "none";
-				hadQuotes = true;
-				continue;
-			}
-			current += ch;
-			continue;
-		}
-
-		if (quoteState === "double") {
-			if (ch === '"') {
-				quoteState = "none";
-				hadQuotes = true;
-				continue;
-			}
-			current += ch;
-			continue;
-		}
-
-		if (ch === "'") {
-			quoteState = "single";
-			hadQuotes = true;
-			continue;
-		}
-		if (ch === '"') {
-			quoteState = "double";
-			hadQuotes = true;
-			continue;
-		}
-
-		current += ch;
-	}
-
-	if (escaped || quoteState !== "none") return undefined;
-	pushToken();
-	return tokens;
-}
-
-function isSafePrefixToken(token: ShellToken | undefined): boolean {
-	if (!token) return false;
-	if (!token.text || token.text.startsWith("-")) return false;
-	if (token.hadQuotes || token.hadEscapes) return false;
-	return /^[A-Za-z0-9_./:@%+=,-]+$/.test(token.text);
-}
-
-export function getBashPrefixCandidates(command: string): string[] {
-	const tokens = tokenizeShellWords(command.trim());
-	if (!tokens || tokens.length === 0) return [];
-	const candidates = [tokens[0].text].filter(Boolean);
-	if (isSafePrefixToken(tokens[1])) {
-		candidates.push(`${tokens[0].text} ${tokens[1].text}`);
-	}
-	return candidates;
-}
-
 export function detectDangerousBashPattern(command: string): string | undefined {
 	for (const check of DANGEROUS_BASH_CHECKS) {
 		if (check.re.test(command)) return check.reason;
@@ -297,35 +26,53 @@ export function detectDangerousBashPattern(command: string): string | undefined 
 	return undefined;
 }
 
-export function isAllowedSimpleBashCommand(command: string, rules: Rule[]): boolean {
-	const trimmed = command.trim();
-	if (!trimmed) return false;
-	if (detectDangerousBashPattern(trimmed)) return false;
-	const rule = matchRule(rules, "bash", { command: trimmed });
+// ── Tree-sitter-based policy functions ────────────────────────────────────────
+// These operate on a pre-parsed AST (ParsedBash) from shell-parse.ts.
+
+/**
+ * Check if a single parsed command is allowed by rules (not dangerous, rule matches "allow").
+ */
+export function isParsedCommandAllowed(cmd: ParsedCommand, rules: Rule[]): boolean {
+	if (detectDangerousBashPattern(cmd.source)) return false;
+	const rule = matchRule(rules, "bash", { command: cmd.source });
 	return rule?.action === "allow";
 }
 
-export function getFirstUnapprovedBashSegment(
-	command: string,
+/**
+ * Check if a parsed command is covered by existing approvals.
+ */
+export function isParsedCommandApproved(
+	cmd: ParsedCommand,
+	isApproved: (candidate: string) => boolean,
+): boolean {
+	return isApproved(cmd.source) || isApproved(cmd.command) || isApproved(cmd.alwaysPattern);
+}
+
+/**
+ * Find the first unapproved command in a parsed bash AST.
+ * Returns the ParsedCommand that needs approval, or undefined if all are approved.
+ */
+export function getFirstUnapprovedParsedCommand(
+	parsed: ParsedBash,
 	rules: Rule[],
-	isApproved?: (command: string) => boolean,
-): string | undefined {
-	const parts = splitSimpleBashCompound(command);
-	if (!parts || parts.length < 2) return undefined;
-	for (const part of parts) {
-		if (isAllowedSimpleBashCommand(part, rules)) continue;
-		if (isApproved?.(part) === true) continue;
-		return part;
+	isApproved?: (candidate: string) => boolean,
+): ParsedCommand | undefined {
+	for (const cmd of parsed.commands) {
+		if (isParsedCommandAllowed(cmd, rules)) continue;
+		if (isApproved && isParsedCommandApproved(cmd, isApproved)) continue;
+		return cmd;
 	}
 	return undefined;
 }
 
-export function isAllowedBashCompound(
-	command: string,
+/**
+ * Check if all commands in a parsed bash AST are allowed (by rules or approvals).
+ */
+export function isAllParsedCommandsAllowed(
+	parsed: ParsedBash,
 	rules: Rule[],
-	isApproved?: (command: string) => boolean,
+	isApproved?: (candidate: string) => boolean,
 ): boolean {
-	const parts = splitSimpleBashCompound(command);
-	if (!parts || parts.length < 2) return false;
-	return getFirstUnapprovedBashSegment(command, rules, isApproved) === undefined;
+	if (parsed.commands.length === 0) return false;
+	return getFirstUnapprovedParsedCommand(parsed, rules, isApproved) === undefined;
 }

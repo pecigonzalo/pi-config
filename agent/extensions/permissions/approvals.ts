@@ -85,6 +85,22 @@ function bashApprovalMatches(
 	return false;
 }
 
+export function approvalsCoverTool(
+	approvals: ApprovalRecord[],
+	toolName: PermissionToolName,
+	projectRoot: string,
+	agentName: string,
+	settings: ResolvedApprovalsSettings,
+): boolean {
+	return approvals.some((a) => {
+		if (a.scopeType !== "tool") return false;
+		if (a.tool !== toolName && a.tool !== "*") return false;
+		if (settings.scopeByProject && a.projectRoot !== projectRoot) return false;
+		if (settings.scopeByAgent && a.agentName !== agentName) return false;
+		return true;
+	});
+}
+
 export function approvalsCoverBash(
 	approvals: ApprovalRecord[],
 	command: string,

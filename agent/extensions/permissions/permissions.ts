@@ -87,6 +87,7 @@ import {
 import {
 	approvalsCoverBash,
 	approvalsCoverPaths,
+	approvalsCoverTool,
 	dedupeApprovals,
 	formatApprovalScope,
 	getApprovalsSettings,
@@ -96,7 +97,9 @@ import {
 	asPermissionToolInput,
 	asPermissionToolName,
 	canonicalizePath,
+	canonicalizePathToken,
 	getCommandInput,
+	getPathInput,
 	getExternalPaths,
 	getMatchTarget,
 	matchRule,
@@ -104,12 +107,16 @@ import {
 } from "./matching";
 import {
 	detectDangerousBashPattern,
-	getBashPrefixCandidates,
-	getFirstUnapprovedBashSegment,
-	hasComplexBashSyntax,
-	isAllowedBashCompound,
+	getFirstUnapprovedParsedCommand,
+	isAllParsedCommandsAllowed,
 	sandboxFallbackModeForPolicy,
 } from "./shell-policy";
+import {
+	isTreeSitterAvailable,
+	parseBashCommand,
+	type ParsedBash,
+	type ParsedCommand,
+} from "./shell-parse";
 import {
 	compileSandboxConfig,
 	createSandboxedBashOps,
@@ -118,6 +125,7 @@ import {
 } from "./sandbox";
 import {
 	dedupeStrings,
+	isFilesystemToolName,
 	type ApprovalFile,
 	type ApprovalRecord,
 	type PermissionToolInput,
@@ -155,6 +163,7 @@ export default function (pi: ExtensionAPI) {
 	let sandboxManager: SandboxManagerLike | undefined;
 	let sandboxAvailable = false;
 	let sandboxEnabled = false;
+	let treeSitterReady = false;
 	let sandboxReason = "inactive";
 	let sandboxMode: "normal" | "ask-all-bash" | "block-all-bash" = "normal";
 	let sandboxConfig: SandboxRuntimeConfigLike | undefined;
@@ -310,11 +319,17 @@ export default function (pi: ExtensionAPI) {
 		sandboxTmpDir = undefined;
 		sandboxTmpDirEphemeral = false;
 		reload(ctx.cwd);
+		treeSitterReady = await isTreeSitterAvailable();
+		if (ctx.hasUI) {
+			if (treeSitterReady) ctx.ui.notify("Shell parser active: tree-sitter", "info");
+			else ctx.ui.notify("Shell parser unavailable: falling back to simple whole-command bash approvals", "warning");
+		}
 		await initializeSandbox(ctx);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
 		reload(ctx.cwd);
+		treeSitterReady = await isTreeSitterAvailable();
 		await initializeSandbox(ctx);
 	});
 
@@ -349,6 +364,7 @@ export default function (pi: ExtensionAPI) {
 		projectRoot: string,
 		ctx: ExtensionContext,
 		bashFocusCommand?: string,
+		parsedFocusCommand?: ParsedCommand,
 	): Promise<{ block: boolean; reason: string } | undefined> {
 		if (!ctx.hasUI) {
 			return {
@@ -368,7 +384,10 @@ export default function (pi: ExtensionAPI) {
 		if (toolName === "bash") {
 			const command = getCommandInput(input) ?? "";
 			const approvalTarget = bashFocusCommand?.trim() ? bashFocusCommand.trim() : command;
-			const uniquePrefixCandidates = dedupeStrings(getBashPrefixCandidates(approvalTarget));
+			// Use tree-sitter arity-based prefix when available, fall back to simple first-word
+			const uniquePrefixCandidates = parsedFocusCommand
+				? dedupeStrings([parsedFocusCommand.prefixTokens.join(" ")].filter(Boolean))
+				: dedupeStrings([approvalTarget.trim().split(/\s+/)[0]].filter(Boolean));
 			const segmentNote = approvalTarget !== command ? `Unapproved shell segment: ${approvalTarget}` : undefined;
 			const displayNote = note && note !== segmentNote ? note : undefined;
 
@@ -382,14 +401,20 @@ export default function (pi: ExtensionAPI) {
 				bashLines.push(`Prefix options: ${uniquePrefixCandidates.map((p) => `${p} *`).join(" | ")}`);
 			}
 
-			const prefixOptionToValue = new Map<string, string>();
+			const prefixSessionToValue = new Map<string, string>();
+			const prefixPermanentToValue = new Map<string, string>();
 			for (const candidate of uniquePrefixCandidates) {
-				prefixOptionToValue.set(`Allow prefix for this session (${candidate} *)`, candidate);
+				prefixSessionToValue.set(`Allow prefix for this session (${candidate} *)`, candidate);
+				prefixPermanentToValue.set(`Save prefix permanently (${candidate} *)`, candidate);
 			}
+			const prefixOptionToValue = new Map([...prefixSessionToValue, ...prefixPermanentToValue]);
 			const allowExactLabel = approvalTarget === command
 				? `Allow exact command for this session (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`
 				: `Allow exact segment for this session (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`;
-			const options = ["Allow once", allowExactLabel, ...prefixOptionToValue.keys(), "Block"];
+			const saveExactLabel = approvalTarget === command
+				? `Save exact command permanently (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`
+				: `Save exact segment permanently (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`;
+			const options = ["Allow once", allowExactLabel, saveExactLabel, ...prefixSessionToValue.keys(), ...prefixPermanentToValue.keys(), "Block"];
 			const choice = await ctx.ui.select(`⚠️  Permission required\n\n${bashLines.join("\n")}`, options);
 
 			if (choice === "Block" || choice === undefined) {
@@ -408,27 +433,78 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`✓ Bash session rule added: bash-exact:${approvalTarget}`, "info");
 			}
 
+			if (choice === saveExactLabel) {
+				persistentApprovals = dedupeApprovals([
+					...persistentApprovals,
+					{
+						tool: "bash",
+						scopeType: "bash-exact",
+						scopeValue: approvalTarget,
+						projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
+						agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
+						createdAt: Date.now(),
+					},
+				]);
+				saveApprovals();
+				ctx.ui.notify(`✓ Bash command saved permanently: bash-exact:${approvalTarget}`, "info");
+			}
+
 			const selectedPrefix = typeof choice === "string" ? prefixOptionToValue.get(choice) : undefined;
 			if (selectedPrefix) {
-				sessionBashApprovals.push({
-					tool: "bash",
-					scopeType: "bash-prefix",
-					scopeValue: selectedPrefix,
-					projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
-					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
-					createdAt: Date.now(),
-				});
-				ctx.ui.notify(`✓ Bash session rule added: bash-prefix:${selectedPrefix} (matches: ${selectedPrefix} *)`, "info");
+				const isPermanent = prefixPermanentToValue.has(choice as string);
+				if (isPermanent) {
+					persistentApprovals = dedupeApprovals([
+						...persistentApprovals,
+						{
+							tool: "bash",
+							scopeType: "bash-prefix",
+							scopeValue: selectedPrefix,
+							projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
+							agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
+							createdAt: Date.now(),
+						},
+					]);
+					saveApprovals();
+					ctx.ui.notify(`✓ Bash prefix saved permanently: bash-prefix:${selectedPrefix} (matches: ${selectedPrefix} *)`, "info");
+				} else {
+					sessionBashApprovals.push({
+						tool: "bash",
+						scopeType: "bash-prefix",
+						scopeValue: selectedPrefix,
+						projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
+						agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
+						createdAt: Date.now(),
+					});
+					ctx.ui.notify(`✓ Bash session rule added: bash-prefix:${selectedPrefix} (matches: ${selectedPrefix} *)`, "info");
+				}
 			}
 
 			return undefined;
 		}
 
-		const choice = await ctx.ui.select(`⚠️  Permission required\n\n${lines.join("\n")}`, [
+		// Compute folder path for filesystem tools so we can offer a folder-scoped approval
+		let folderPath: string | undefined;
+		if (isFilesystemToolName(toolName)) {
+			const rawPath = getPathInput(input);
+			if (rawPath) {
+				const canonPath = canonicalizePathToken(rawPath, ctx.cwd);
+				folderPath = path.dirname(canonPath);
+			}
+		}
+
+		const allowFolderSessionLabel = folderPath ? `Allow folder for this session (${folderPath})` : undefined;
+		const allowFolderPermanentLabel = folderPath ? `Allow folder permanently (${folderPath})` : undefined;
+
+		const options = [
 			"Allow once",
 			"Allow tool for this session",
+			"Allow tool permanently",
+			...(allowFolderSessionLabel ? [allowFolderSessionLabel] : []),
+			...(allowFolderPermanentLabel ? [allowFolderPermanentLabel] : []),
 			"Block",
-		]);
+		];
+
+		const choice = await ctx.ui.select(`⚠️  Permission required\n\n${lines.join("\n")}`, options);
 
 		if (choice === "Block" || choice === undefined) {
 			return { block: true, reason: "Blocked by user" };
@@ -437,6 +513,50 @@ export default function (pi: ExtensionAPI) {
 		if (choice === "Allow tool for this session") {
 			sessionAllows.add(toolName);
 			ctx.ui.notify(`✓ ${toolName} allowed for the rest of this session`, "info");
+		}
+
+		if (choice === "Allow tool permanently") {
+			persistentApprovals = dedupeApprovals([
+				...persistentApprovals,
+				{
+					tool: toolName,
+					scopeType: "tool",
+					scopeValue: toolName,
+					projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
+					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
+					createdAt: Date.now(),
+				},
+			]);
+			saveApprovals();
+			ctx.ui.notify(`✓ ${toolName} allowed permanently`, "info");
+		}
+
+		if (folderPath && choice === allowFolderSessionLabel) {
+			sessionPathApprovals.push({
+				tool: toolName,
+				scopeType: "path-prefix",
+				scopeValue: folderPath,
+				projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
+				agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
+				createdAt: Date.now(),
+			});
+			ctx.ui.notify(`✓ Folder approved for this session: ${folderPath}`, "info");
+		}
+
+		if (folderPath && choice === allowFolderPermanentLabel) {
+			persistentApprovals = dedupeApprovals([
+				...persistentApprovals,
+				{
+					tool: toolName,
+					scopeType: "path-prefix",
+					scopeValue: folderPath,
+					projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
+					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
+					createdAt: Date.now(),
+				},
+			]);
+			saveApprovals();
+			ctx.ui.notify(`✓ Folder approved permanently: ${folderPath}`, "info");
 		}
 
 		return undefined;
@@ -530,6 +650,7 @@ export default function (pi: ExtensionAPI) {
 
 		let bashApprovals: ApprovalRecord[] = [];
 		let isApprovedBashSegment: ((candidate: string) => boolean) | undefined;
+		let parsedBash: ParsedBash | undefined;
 
 		if (toolName === "bash") {
 			const command = getCommandInput(input) ?? "";
@@ -539,6 +660,16 @@ export default function (pi: ExtensionAPI) {
 			}
 			isApprovedBashSegment = (candidate: string) =>
 				approvalsCoverBash(bashApprovals, candidate, projectRoot, agentName, approvalsSettings);
+
+			// Parse with tree-sitter for compound command handling
+			if (treeSitterReady) {
+				try {
+					parsedBash = await parseBashCommand(command);
+				} catch {
+					// tree-sitter failed; parsedBash stays undefined → simple fallback
+				}
+			}
+
 			if (sandboxMode === "block-all-bash") {
 				return { block: true, reason: `Bash blocked: sandbox unavailable in ${policy.mode} mode` };
 			}
@@ -549,14 +680,27 @@ export default function (pi: ExtensionAPI) {
 			if (dangerousReason) {
 				return askPermission(toolName, input, dangerousReason, projectRoot, ctx);
 			}
+
+			// If tree-sitter parsed successfully, check if all commands are allowed/approved
+			if (parsedBash && isAllParsedCommandsAllowed(parsedBash, policy.rules, isApprovedBashSegment)) {
+				return undefined;
+			}
 		} else if (sessionAllows.has(toolName)) {
+			return undefined;
+		} else if (approvalsCoverTool(persistentApprovals, toolName, projectRoot, agentName, approvalsSettings)) {
 			return undefined;
 		}
 
-		const getUnapprovedBashSegment = () => {
-			if (toolName !== "bash") return undefined;
+		const getUnapprovedBashSegment = (): { segment?: string; parsed?: ParsedCommand } => {
+			if (toolName !== "bash") return {};
+			if (parsedBash) {
+				const unapproved = getFirstUnapprovedParsedCommand(parsedBash, policy.rules, isApprovedBashSegment);
+				if (unapproved) return { segment: unapproved.source, parsed: unapproved };
+				return {};
+			}
+			// No tree-sitter: can't decompose, return the whole command as the segment
 			const command = getCommandInput(input) ?? "";
-			return getFirstUnapprovedBashSegment(command, policy.rules, isApprovedBashSegment);
+			return { segment: command };
 		};
 
 		const rule = policy.rules.length > 0 ? matchRule(policy.rules, toolName, input) : undefined;
@@ -570,13 +714,24 @@ export default function (pi: ExtensionAPI) {
 
 			if (rule.action === "ask") {
 				if (toolName === "bash") {
-					const command = getCommandInput(input) ?? "";
-					if (isAllowedBashCompound(command, policy.rules, isApprovedBashSegment)) {
+					// If tree-sitter confirms all commands are allowed, skip
+					if (parsedBash && isAllParsedCommandsAllowed(parsedBash, policy.rules, isApprovedBashSegment)) {
 						return undefined;
 					}
-					const unapprovedSegment = getUnapprovedBashSegment();
+					const { segment: unapprovedSegment, parsed: unapprovedParsed } = getUnapprovedBashSegment();
 					const note = rule.reason ?? (unapprovedSegment ? `Unapproved shell segment: ${unapprovedSegment}` : undefined);
-					return askPermission(toolName, input, note, projectRoot, ctx, unapprovedSegment);
+					return askPermission(toolName, input, note, projectRoot, ctx, unapprovedSegment, unapprovedParsed);
+				}
+				// For filesystem tools, check if an existing folder/path approval already covers this path
+				if (isFilesystemToolName(toolName)) {
+					const rawPath = getPathInput(input);
+					if (rawPath) {
+						const canonPath = canonicalizePathToken(rawPath, ctx.cwd);
+						const effectiveApprovals = [...persistentApprovals, ...sessionPathApprovals];
+						if (approvalsCoverPaths(effectiveApprovals, toolName, [canonPath], projectRoot, agentName, approvalsSettings)) {
+							return undefined;
+						}
+					}
 				}
 				return askPermission(toolName, input, rule.reason, projectRoot, ctx);
 			}
@@ -584,14 +739,17 @@ export default function (pi: ExtensionAPI) {
 			// action === "allow" — still check external path unless opted out
 			if (rule.action === "allow") {
 				if (toolName === "bash") {
-					const command = getCommandInput(input) ?? "";
-					if (!isAllowedBashCompound(command, policy.rules, isApprovedBashSegment) && hasComplexBashSyntax(command)) {
-						const unapprovedSegment = getUnapprovedBashSegment();
-						const note = unapprovedSegment
-							? `Unapproved shell segment: ${unapprovedSegment}`
-							: "Complex shell command requires confirmation";
-						return askPermission(toolName, input, note, projectRoot, ctx, unapprovedSegment);
+					if (parsedBash) {
+						// Ask if complex or any command isn't allowed
+						if (parsedBash.isComplex || !isAllParsedCommandsAllowed(parsedBash, policy.rules, isApprovedBashSegment)) {
+							const { segment: unapprovedSegment, parsed: unapprovedParsed } = getUnapprovedBashSegment();
+							const note = unapprovedSegment
+								? `Unapproved shell segment: ${unapprovedSegment}`
+								: parsedBash.isComplex ? "Complex shell command requires confirmation" : undefined;
+							if (note) return askPermission(toolName, input, note, projectRoot, ctx, unapprovedSegment, unapprovedParsed);
+						}
 					}
+					// No tree-sitter: rule already matched "allow", let it through
 				}
 
 				const epa = rule.externalPathAction ?? "inherit";
@@ -626,8 +784,8 @@ export default function (pi: ExtensionAPI) {
 	// ── /permissions command ──────────────────────────────────────────────────
 
 	pi.registerCommand("permissions", {
-		description: "Show active permission rules for the current agent profile",
-		handler: async (_args, ctx) => {
+		description: "Show permission summary (/permissions verbose for full details)",
+		handler: async (args, ctx) => {
 			const policy = activePolicy(config, agentName);
 			const rules = policy.rules;
 			const externalPath = policy.externalPath;
@@ -638,11 +796,28 @@ export default function (pi: ExtensionAPI) {
 			const isFullOverride = hasAgentOverride && config.agents![agentName].inherit === false;
 			const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
 			const bashExecutionMode = sandboxEnabled ? "sandboxed" : sandboxMode === "normal" ? "local" : `local (${sandboxMode})`;
+			const shellParserStatus = treeSitterReady ? "tree-sitter (active)" : "simple fallback";
+			const verbose = /^(verbose|full|debug|all)$/i.test((args || "").trim());
+			const sessionApprovalCount = sessionPathApprovals.length + sessionBashApprovals.length;
+			const actionCounts = {
+				allow: rules.filter((r) => r.action === "allow").length,
+				ask: rules.filter((r) => r.action === "ask").length,
+				block: rules.filter((r) => r.action === "block").length,
+			};
+			const toolCounts = new Map<string, number>();
+			for (const rule of rules) toolCounts.set(rule.tool, (toolCounts.get(rule.tool) ?? 0) + 1);
+			const topTools = [...toolCounts.entries()]
+				.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+				.slice(0, 6)
+				.map(([tool, count]) => `${tool}:${count}`)
+				.join(", ");
+			const sampleRules = rules.slice(0, 5).map((r) => `[${r.action}] ${r.tool}${r.match ? ` /${r.match}/` : ""}`);
 
 			if (!ctx.hasUI) {
-				const summary = rules.map((r) => `[${r.action}] ${r.tool}${r.match ? ` /${r.match}/` : ""}`).join(", ");
 				ctx.ui.notify(
-					`Permissions (${profileLabel}): mode=${mode}, ${summary || "none"}, externalPath: ${externalPath}, protected: read=${protectedResources.denyRead.length}/write=${protectedResources.denyWrite.length}, sandbox: ${sandboxStatus}, bashMode: ${bashExecutionMode}, approvals: ${sessionPathApprovals.length + sessionBashApprovals.length} session/${persistentApprovals.length} saved`,
+					verbose
+						? `Permissions (${profileLabel}): mode=${mode}, rules=${rules.length} (allow=${actionCounts.allow} ask=${actionCounts.ask} block=${actionCounts.block}), externalPath=${externalPath}, sandbox=${sandboxStatus}, bashMode=${bashExecutionMode}, shellParser=${shellParserStatus}, protected=read:${protectedResources.denyRead.length}/write:${protectedResources.denyWrite.length}, approvals=${sessionApprovalCount} session/${persistentApprovals.length} saved, sampleRules=${sampleRules.join("; ") || "none"}`
+						: `Permissions (${profileLabel}): mode=${mode}, externalPath=${externalPath}, sandbox=${sandboxStatus}, bashMode=${bashExecutionMode}, shellParser=${shellParserStatus}, rules=${rules.length} (allow=${actionCounts.allow} ask=${actionCounts.ask} block=${actionCounts.block}), approvals=${sessionApprovalCount} session/${persistentApprovals.length} saved`,
 					"info",
 				);
 				return;
@@ -658,156 +833,164 @@ export default function (pi: ExtensionAPI) {
 					(hasAgentOverride ? theme.fg("dim", isFullOverride ? " (override)" : " (+ defaults)") : ""),
 				);
 
-				if (sessionAllows.size > 0) {
+				if (!verbose) {
+					const epColor = externalPath === "block" ? "error" : externalPath === "ask" ? "warning" : "dim";
 					lines.push("");
-					lines.push(`  ${theme.fg("warning", "Session tool allows:")} ${theme.fg("dim", [...sessionAllows].join(", "))}`);
-				}
-				if (sessionBashApprovals.length > 0) {
+					lines.push(`  ${theme.fg("muted", "Mode:         ")}${theme.fg("accent", mode)}`);
+					lines.push(`  ${theme.fg("muted", "External path:")}${theme.fg(epColor, ` ${externalPath}`)}${theme.fg("dim", " (structured tools)")}`);
+					lines.push(`  ${theme.fg("muted", "Bash sandbox: ")}${theme.fg(sandboxEnabled ? "success" : "dim", sandboxStatus)}`);
+					lines.push(`  ${theme.fg("muted", "Bash exec:    ")}${theme.fg(sandboxEnabled ? "success" : "warning", bashExecutionMode)}`);
+					lines.push(`  ${theme.fg("muted", "Shell parser: ")}${theme.fg(treeSitterReady ? "success" : "warning", shellParserStatus)}${!treeSitterReady ? theme.fg("dim", " — whole-command approvals only") : ""}`);
+					lines.push(`  ${theme.fg("muted", "Approvals:    ")}${theme.fg("warning", `${sessionApprovalCount} session`)}${theme.fg("dim", ", ")}${theme.fg("accent", `${persistentApprovals.length} saved`)}`);
+					if (sessionAllows.size > 0) {
+						lines.push(`  ${theme.fg("muted", "Session tools:")}${theme.fg("dim", ` ${[...sessionAllows].join(", ")}`)}`);
+					}
 					lines.push("");
-					lines.push(`  ${theme.fg("warning", "Session bash approvals:")} ${theme.fg("dim", `${sessionBashApprovals.length}`)}`);
-				}
-
-				if (sessionPathApprovals.length > 0 || persistentApprovals.length > 0) {
-					lines.push("");
-					lines.push(
-						`  ${theme.fg("muted", "Path approvals:   ")}` +
-						`${theme.fg("warning", `${sessionPathApprovals.length} session`)}` +
-						`${theme.fg("dim", ", ")}` +
-						`${theme.fg("accent", `${persistentApprovals.length} saved`)}`,
-					);
-					for (const approval of persistentApprovals.slice(0, 5)) {
-						const scope = formatApprovalScope(approval);
-						const scopeSuffix = [
-							approval.projectRoot ? `project=${approval.projectRoot}` : undefined,
-							approval.agentName ? `agent=${approval.agentName}` : undefined,
-						].filter(Boolean).join(" ");
-						lines.push(
-							`  ${theme.fg("dim", "  ↳ ")}${theme.fg("muted", approval.tool)} ${theme.fg("dim", scope)}${scopeSuffix ? " " + theme.fg("muted", `[${scopeSuffix}]`) : ""}`,
-						);
-					}
-					if (persistentApprovals.length > 5) {
-						lines.push(`  ${theme.fg("dim", `  ... ${persistentApprovals.length - 5} more saved approvals`)}`);
-					}
-				}
-
-				// Mode + external path policy
-				lines.push("");
-				lines.push(`  ${theme.fg("muted", "Mode:           ")}${theme.fg("accent", mode)}`);
-				const epColor = externalPath === "block" ? "error" : externalPath === "ask" ? "warning" : "dim";
-				lines.push(`  ${theme.fg("muted", "External path:  ")}${theme.fg(epColor, externalPath)}${theme.fg("dim", " (structured tools)")}`);
-				lines.push(`  ${theme.fg("muted", "Bash sandbox:   ")}${theme.fg(sandboxEnabled ? "success" : "dim", sandboxStatus)}`);
-				lines.push(`  ${theme.fg("muted", "Bash exec mode: ")}${theme.fg(sandboxEnabled ? "success" : "warning", bashExecutionMode)}`);
-				lines.push(`  ${theme.fg("muted", "Sandbox TMPDIR: ")}${theme.fg("dim", sandboxTmpDir ?? getEffectiveSandboxTmpDir(ctx.cwd, config.sandbox))}${theme.fg("dim", sandboxTmpDirEphemeral ? " (session)" : " (shared)")}`);
-				lines.push(`  ${theme.fg("muted", "Protected read: ")}${theme.fg("warning", `${protectedResources.denyRead.length}`)}`);
-				for (const pattern of protectedResources.denyRead.slice(0, 4)) {
-					lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", pattern)}`);
-				}
-				if (protectedResources.denyRead.length > 4) {
-					lines.push(`  ${theme.fg("dim", `  ... ${protectedResources.denyRead.length - 4} more`)}`);
-				}
-				lines.push(`  ${theme.fg("muted", "Protected write:")}${theme.fg("warning", ` ${protectedResources.denyWrite.length}`)}`);
-				for (const pattern of protectedResources.denyWrite.slice(0, 4)) {
-					lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", pattern)}`);
-				}
-				if (protectedResources.denyWrite.length > 4) {
-					lines.push(`  ${theme.fg("dim", `  ... ${protectedResources.denyWrite.length - 4} more`)}`);
-				}
-				const pr = config.protectedResources ?? {};
-				const builtinsState = (pr.enabled ?? true) ? ((pr.defaults ?? true) ? "on" : "off") : "disabled";
-				lines.push(`  ${theme.fg("muted", "Protected built-ins:")}${theme.fg("accent", ` ${builtinsState}`)}`);
-				lines.push(`  ${theme.fg("muted", "Overrides:      ")}${theme.fg("dim", `+read=${(pr.addDenyRead ?? []).length} +write=${(pr.addDenyWrite ?? []).length} -read=${(pr.unprotectRead ?? []).length} -write=${(pr.unprotectWrite ?? []).length}`)}`);
-				if (sandboxConfig?.filesystem) {
-					const fsCfg = sandboxConfig.filesystem;
-					lines.push(`  ${theme.fg("muted", "  denyRead:     ")}${theme.fg("dim", (fsCfg.denyRead ?? []).join(", ") || "(none)")}`);
-					if ((fsCfg.allowRead ?? []).length > 0) {
-						lines.push(`  ${theme.fg("muted", "  allowRead:    ")}${theme.fg("dim", fsCfg.allowRead!.join(", "))}`);
-					}
-					lines.push(`  ${theme.fg("muted", "  allowWrite:   ")}${theme.fg("dim", (fsCfg.allowWrite ?? []).join(", ") || "(none)")}`);
-					lines.push(`  ${theme.fg("muted", "  denyWrite:    ")}${theme.fg("dim", (fsCfg.denyWrite ?? []).join(", ") || "(none)")}`);
-				}
-				if (sandboxConfig?.network) {
-					const netCfg = sandboxConfig.network;
-					const unrestricted = netCfg.allowedDomains === undefined && netCfg.deniedDomains === undefined;
-					const allowLabel = unrestricted ? "* (unrestricted)" : (netCfg.allowedDomains ?? []).join(", ") || "(none)";
-					const denyLabel = unrestricted ? "(none)" : (netCfg.deniedDomains ?? []).join(", ") || "(none)";
-					lines.push(`  ${theme.fg("muted", "  network:      ")}${theme.fg("dim", `allow=${allowLabel} deny=${denyLabel}`)}`);
-					if ((netCfg.allowUnixSockets ?? []).length > 0 || netCfg.allowAllUnixSockets) {
-						lines.push(
-							`  ${theme.fg("muted", "  unix sockets: ")}${theme.fg("dim", netCfg.allowAllUnixSockets ? "all" : (netCfg.allowUnixSockets ?? []).join(", "))}`,
-						);
-					}
-				}
-
-				// Rules table
-				lines.push("");
-				if (rules.length === 0) {
-					lines.push(`  ${theme.fg("dim", "No rules configured.")}`);
-				} else {
-					const actionColor = (a: Rule["action"]) =>
-						a === "allow" ? "success" : a === "block" ? "error" : "warning";
-					const actionIcon  = (a: Rule["action"]) =>
-						a === "allow" ? "✓" : a === "block" ? "✗" : "?";
-
-					const truncate = (s: string, max: number) => {
-						if (max <= 1) return s.slice(0, Math.max(0, max));
-						return s.length > max ? `${s.slice(0, max - 1)}…` : s;
-					};
-					const wrap = (s: string, max: number) => {
-						if (max <= 1 || s.length <= max) return [s];
-						const parts: string[] = [];
-						for (let i = 0; i < s.length; i += max) parts.push(s.slice(i, i + max));
-						return parts;
-					};
-					const toolW  = Math.min(18, Math.max(4, ...rules.map((r) => r.tool.length)));
-					const matchW = Math.min(48, Math.max(5, ...rules.map((r) => (r.match ? r.match.length + 2 : 1))));
-					const actionW = 10;
-					const extW = 10;
-					const reasonW = 40;
-
-					lines.push(
-						`  ${theme.fg("dim", pad("TOOL", toolW + 2))}` +
-						`${theme.fg("dim", pad("MATCH", matchW + 2))}` +
-						`${theme.fg("dim", pad("ACTION", actionW))}` +
-						`${theme.fg("dim", pad("EXT PATH", extW + 2))}` +
-						`${theme.fg("dim", "REASON")}`,
-					);
-					lines.push(`  ${theme.fg("borderMuted", "─".repeat(toolW + matchW + actionW + extW + reasonW + 10))}`);
-
-					for (const rule of rules) {
-						const toolRaw = truncate(rule.tool, toolW);
-						const matchSource = rule.match ? `/${rule.match}/` : "-";
-						const matchParts = wrap(matchSource, matchW);
-						const actionRaw = truncate(`${actionIcon(rule.action)} ${rule.action}`, actionW - 1);
-						const epa = rule.externalPathAction ?? "inherit";
-						const reasonRaw = truncate(rule.reason ?? "-", reasonW);
-
-						const tool = theme.fg("text", pad(toolRaw, toolW + 2));
-						const action = theme.fg(actionColor(rule.action), pad(actionRaw, actionW));
-						const epaColor = epa === "allow" ? "success" : epa === "block" ? "error" : epa === "ask" ? "warning" : "dim";
-						const epaStr = theme.fg(epaColor, pad(truncate(epa, extW), extW + 2));
-						const reason = theme.fg("dim", reasonRaw);
-						lines.push(`  ${tool}${theme.fg("muted", pad(matchParts[0], matchW + 2))}${action}${epaStr}${reason}`);
-
-						for (const continuation of matchParts.slice(1)) {
-							const emptyTool = pad("", toolW + 2);
-							const emptyAction = pad("", actionW);
-							const emptyExt = pad("", extW + 2);
-							lines.push(
-								`  ${theme.fg("dim", emptyTool)}${theme.fg("dim", pad(`↳ ${continuation}`, matchW + 2))}${theme.fg("dim", emptyAction)}${theme.fg("dim", emptyExt)}`,
-							);
+					lines.push(`  ${theme.fg("muted", "Rules:        ")}${theme.fg("text", `${rules.length} total`)} ${theme.fg("success", `allow=${actionCounts.allow}`)} ${theme.fg("warning", `ask=${actionCounts.ask}`)} ${theme.fg("error", `block=${actionCounts.block}`)}`);
+					if (topTools) lines.push(`  ${theme.fg("muted", "Top tools:    ")}${theme.fg("dim", topTools)}`);
+					if (sampleRules.length > 0) {
+						lines.push(`  ${theme.fg("muted", "Examples:     ")}${theme.fg("dim", sampleRules[0])}`);
+						for (const sample of sampleRules.slice(1)) {
+							lines.push(`  ${theme.fg("dim", "              ")}${theme.fg("dim", sample)}`);
 						}
 					}
-					lines.push(`  ${theme.fg("dim", "(Long MATCH values wrap to continuation lines)")}`);
-				}
+					lines.push("");
+					lines.push(`  ${theme.fg("muted", "Protected:    ")}${theme.fg("warning", `read=${protectedResources.denyRead.length} write=${protectedResources.denyWrite.length}`)}`);
+					lines.push(`  ${theme.fg("muted", "More:         ")}${theme.fg("dim", "/permissions verbose  •  /permissions-approvals  •  /permissions-reset")}`);
+					lines.push("");
+					lines.push(`  ${theme.fg("dim", "Press Escape to close")}`);
+					lines.push("");
+				} else {
+					// Verbose view (previous detailed output)
+					if (sessionAllows.size > 0) {
+						lines.push("");
+						lines.push(`  ${theme.fg("warning", "Session tool allows:")} ${theme.fg("dim", [...sessionAllows].join(", "))}`);
+					}
+					if (sessionBashApprovals.length > 0) {
+						lines.push("");
+						lines.push(`  ${theme.fg("warning", "Session bash approvals:")} ${theme.fg("dim", `${sessionBashApprovals.length}`)}`);
+					}
 
-				lines.push("");
-				lines.push(`  ${theme.fg("dim", "Press Escape to close")}`);
-				lines.push("");
+					if (sessionPathApprovals.length > 0 || persistentApprovals.length > 0) {
+						lines.push("");
+						lines.push(
+							`  ${theme.fg("muted", "Path approvals:   ")}` +
+							`${theme.fg("warning", `${sessionPathApprovals.length} session`)}` +
+							`${theme.fg("dim", ", ")}` +
+							`${theme.fg("accent", `${persistentApprovals.length} saved`)}`,
+						);
+						for (const approval of persistentApprovals.slice(0, 5)) {
+							const scope = formatApprovalScope(approval);
+							const scopeSuffix = [
+								approval.projectRoot ? `project=${approval.projectRoot}` : undefined,
+								approval.agentName ? `agent=${approval.agentName}` : undefined,
+							].filter(Boolean).join(" ");
+							lines.push(
+								`  ${theme.fg("dim", "  ↳ ")}${theme.fg("muted", approval.tool)} ${theme.fg("dim", scope)}${scopeSuffix ? " " + theme.fg("muted", `[${scopeSuffix}]`) : ""}`,
+							);
+						}
+						if (persistentApprovals.length > 5) {
+							lines.push(`  ${theme.fg("dim", `  ... ${persistentApprovals.length - 5} more saved approvals`)}`);
+						}
+					}
+
+					lines.push("");
+					lines.push(`  ${theme.fg("muted", "Mode:           ")}${theme.fg("accent", mode)}`);
+					const epColor = externalPath === "block" ? "error" : externalPath === "ask" ? "warning" : "dim";
+					lines.push(`  ${theme.fg("muted", "External path:  ")}${theme.fg(epColor, externalPath)}${theme.fg("dim", " (structured tools)")}`);
+					lines.push(`  ${theme.fg("muted", "Bash sandbox:   ")}${theme.fg(sandboxEnabled ? "success" : "dim", sandboxStatus)}`);
+					lines.push(`  ${theme.fg("muted", "Bash exec mode: ")}${theme.fg(sandboxEnabled ? "success" : "warning", bashExecutionMode)}`);
+					lines.push(`  ${theme.fg("muted", "Shell parser:   ")}${theme.fg(treeSitterReady ? "success" : "warning", shellParserStatus)}${!treeSitterReady ? theme.fg("dim", " — whole-command approvals only") : ""}`);
+					lines.push(`  ${theme.fg("muted", "Sandbox TMPDIR: ")}${theme.fg("dim", sandboxTmpDir ?? getEffectiveSandboxTmpDir(ctx.cwd, config.sandbox))}${theme.fg("dim", sandboxTmpDirEphemeral ? " (session)" : " (shared)")}`);
+					lines.push(`  ${theme.fg("muted", "Protected read: ")}${theme.fg("warning", `${protectedResources.denyRead.length}`)}`);
+					for (const pattern of protectedResources.denyRead.slice(0, 4)) lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", pattern)}`);
+					if (protectedResources.denyRead.length > 4) lines.push(`  ${theme.fg("dim", `  ... ${protectedResources.denyRead.length - 4} more`)}`);
+					lines.push(`  ${theme.fg("muted", "Protected write:")}${theme.fg("warning", ` ${protectedResources.denyWrite.length}`)}`);
+					for (const pattern of protectedResources.denyWrite.slice(0, 4)) lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", pattern)}`);
+					if (protectedResources.denyWrite.length > 4) lines.push(`  ${theme.fg("dim", `  ... ${protectedResources.denyWrite.length - 4} more`)}`);
+					const pr = config.protectedResources ?? {};
+					const builtinsState = (pr.enabled ?? true) ? ((pr.defaults ?? true) ? "on" : "off") : "disabled";
+					lines.push(`  ${theme.fg("muted", "Protected built-ins:")}${theme.fg("accent", ` ${builtinsState}`)}`);
+					lines.push(`  ${theme.fg("muted", "Overrides:      ")}${theme.fg("dim", `+read=${(pr.addDenyRead ?? []).length} +write=${(pr.addDenyWrite ?? []).length} -read=${(pr.unprotectRead ?? []).length} -write=${(pr.unprotectWrite ?? []).length}`)}`);
+					if (sandboxConfig?.filesystem) {
+						const fsCfg = sandboxConfig.filesystem;
+						lines.push(`  ${theme.fg("muted", "  denyRead:     ")}${theme.fg("dim", (fsCfg.denyRead ?? []).join(", ") || "(none)")}`);
+						if ((fsCfg.allowRead ?? []).length > 0) lines.push(`  ${theme.fg("muted", "  allowRead:    ")}${theme.fg("dim", fsCfg.allowRead!.join(", "))}`);
+						lines.push(`  ${theme.fg("muted", "  allowWrite:   ")}${theme.fg("dim", (fsCfg.allowWrite ?? []).join(", ") || "(none)")}`);
+						lines.push(`  ${theme.fg("muted", "  denyWrite:    ")}${theme.fg("dim", (fsCfg.denyWrite ?? []).join(", ") || "(none)")}`);
+					}
+					if (sandboxConfig?.network) {
+						const netCfg = sandboxConfig.network;
+						const unrestricted = netCfg.allowedDomains === undefined && netCfg.deniedDomains === undefined;
+						const allowLabel = unrestricted ? "* (unrestricted)" : (netCfg.allowedDomains ?? []).join(", ") || "(none)";
+						const denyLabel = unrestricted ? "(none)" : (netCfg.deniedDomains ?? []).join(", ") || "(none)";
+						lines.push(`  ${theme.fg("muted", "  network:      ")}${theme.fg("dim", `allow=${allowLabel} deny=${denyLabel}`)}`);
+						if ((netCfg.allowUnixSockets ?? []).length > 0 || netCfg.allowAllUnixSockets) {
+							lines.push(`  ${theme.fg("muted", "  unix sockets: ")}${theme.fg("dim", netCfg.allowAllUnixSockets ? "all" : (netCfg.allowUnixSockets ?? []).join(", "))}`);
+						}
+					}
+
+					lines.push("");
+					if (rules.length === 0) {
+						lines.push(`  ${theme.fg("dim", "No rules configured.")}`);
+					} else {
+						const actionColor = (a: Rule["action"]) => a === "allow" ? "success" : a === "block" ? "error" : "warning";
+						const actionIcon  = (a: Rule["action"]) => a === "allow" ? "✓" : a === "block" ? "✗" : "?";
+						const truncate = (s: string, max: number) => max <= 1 ? s.slice(0, Math.max(0, max)) : (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+						const wrap = (s: string, max: number) => {
+							if (max <= 1 || s.length <= max) return [s];
+							const parts: string[] = [];
+							for (let i = 0; i < s.length; i += max) parts.push(s.slice(i, i + max));
+							return parts;
+						};
+						const toolW  = Math.min(18, Math.max(4, ...rules.map((r) => r.tool.length)));
+						const matchW = Math.min(48, Math.max(5, ...rules.map((r) => (r.match ? r.match.length + 2 : 1))));
+						const actionW = 10;
+						const extW = 10;
+						const reasonW = 40;
+
+						lines.push(
+							`  ${theme.fg("dim", pad("TOOL", toolW + 2))}` +
+							`${theme.fg("dim", pad("MATCH", matchW + 2))}` +
+							`${theme.fg("dim", pad("ACTION", actionW))}` +
+							`${theme.fg("dim", pad("EXT PATH", extW + 2))}` +
+							`${theme.fg("dim", "REASON")}`,
+						);
+						lines.push(`  ${theme.fg("borderMuted", "─".repeat(toolW + matchW + actionW + extW + reasonW + 10))}`);
+
+						for (const rule of rules) {
+							const toolRaw = truncate(rule.tool, toolW);
+							const matchSource = rule.match ? `/${rule.match}/` : "-";
+							const matchParts = wrap(matchSource, matchW);
+							const actionRaw = truncate(`${actionIcon(rule.action)} ${rule.action}`, actionW - 1);
+							const epa = rule.externalPathAction ?? "inherit";
+							const reasonRaw = truncate(rule.reason ?? "-", reasonW);
+							const tool = theme.fg("text", pad(toolRaw, toolW + 2));
+							const action = theme.fg(actionColor(rule.action), pad(actionRaw, actionW));
+							const epaColor = epa === "allow" ? "success" : epa === "block" ? "error" : epa === "ask" ? "warning" : "dim";
+							const epaStr = theme.fg(epaColor, pad(truncate(epa, extW), extW + 2));
+							const reason = theme.fg("dim", reasonRaw);
+							lines.push(`  ${tool}${theme.fg("muted", pad(matchParts[0], matchW + 2))}${action}${epaStr}${reason}`);
+							for (const continuation of matchParts.slice(1)) {
+								const emptyTool = pad("", toolW + 2);
+								const emptyAction = pad("", actionW);
+								const emptyExt = pad("", extW + 2);
+								lines.push(`  ${theme.fg("dim", emptyTool)}${theme.fg("dim", pad(`↳ ${continuation}`, matchW + 2))}${theme.fg("dim", emptyAction)}${theme.fg("dim", emptyExt)}`);
+							}
+						}
+						lines.push(`  ${theme.fg("dim", "(Long MATCH values wrap to continuation lines)")}`);
+					}
+
+					lines.push("");
+					lines.push(`  ${theme.fg("dim", "Use /permissions for the compact summary")}`);
+					lines.push(`  ${theme.fg("dim", "Press Escape to close")}`);
+					lines.push("");
+				}
 
 				const text = new Text(lines.join("\n"), 0, 0);
 				return {
-					render:      (w: number) => text.render(w),
-					invalidate:  () => text.invalidate(),
+					render: (w: number) => text.render(w),
+					invalidate: () => text.invalidate(),
 					handleInput: (data: string) => { if (matchesKey(data, Key.escape)) done(); },
 				};
 			});
