@@ -580,6 +580,12 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const statusLabel = (s: TodoStatus) => (s === "in-progress" ? "in progress" : s);
+	const allowedTransitionsFrom = (from: TodoStatus): TodoStatus[] =>
+		(["todo", "in-progress", "done"] as const).filter((to) => to !== from && isAllowedTransition(from, to));
+	const invalidTransitionMessage = (from: TodoStatus): string => {
+		const valid = allowedTransitionsFrom(from).map(statusLabel).join(", ");
+		return `Invalid transition. Valid from ${statusLabel(from)}: ${valid}`;
+	};
 	const byId = (a: TodoItem, b: TodoItem) => a.id - b.id;
 	const priorityText = (priority: TodoPriority) => priority;
 	const effortText = (effort: TodoEffort) => effort;
@@ -1065,7 +1071,7 @@ export default function (pi: ExtensionAPI) {
 		const nextStatus = toStatus ?? cycleStatus(prev);
 
 		if (!isAllowedTransition(prev, nextStatus)) {
-			return fail("toggle", `Invalid transition: ${statusLabel(prev)} → ${statusLabel(nextStatus)}`, "invalid transition");
+			return fail("toggle", invalidTransitionMessage(prev), "invalid transition");
 		}
 		if (prev === nextStatus) return ok("toggle", `Todo #${todo.id} already ${statusLabel(nextStatus)}`);
 
