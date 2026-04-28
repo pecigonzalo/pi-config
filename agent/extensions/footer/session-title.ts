@@ -1,9 +1,6 @@
-import {
-  getAgentDir,
-  type ExtensionAPI,
-  type ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
 import { complete, type Message } from "@mariozechner/pi-ai";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { truncateToWidth } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -97,8 +94,7 @@ function parseJsonc(text: string): unknown {
 
     if (ch === "/" && next === "*") {
       i += 2;
-      while (i < text.length - 1 && !(text[i] === "*" && text[i + 1] === "/"))
-        i++;
+      while (i < text.length - 1 && !(text[i] === "*" && text[i + 1] === "/")) i++;
       i++;
       continue;
     }
@@ -137,10 +133,7 @@ function parseJsonc(text: string): unknown {
     if (ch === ",") {
       let j = i + 1;
       while (j < noComments.length && /\s/.test(noComments[j])) j++;
-      if (
-        j < noComments.length &&
-        (noComments[j] === "}" || noComments[j] === "]")
-      ) {
+      if (j < noComments.length && (noComments[j] === "}" || noComments[j] === "]")) {
         continue;
       }
     }
@@ -176,57 +169,33 @@ function parseModelRef(value: unknown): ModelRef | undefined {
       ? (value as { provider: string }).provider.trim()
       : "";
   const id =
-    typeof (value as { id?: unknown }).id === "string"
-      ? (value as { id: string }).id.trim()
-      : "";
+    typeof (value as { id?: unknown }).id === "string" ? (value as { id: string }).id.trim() : "";
 
   if (!provider || !id) return undefined;
   return { provider, id };
 }
 
 function clampPositiveInt(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? Math.floor(value)
-    : fallback;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
 function loadSettings(cwd: string): FooterSettings {
-  const global =
-    (readJsonFile(path.join(getAgentDir(), "footer.jsonc")) ?? {}) as FooterConfigFile;
-  const project =
-    (readJsonFile(path.join(cwd, ".pi", "footer.jsonc")) ?? {}) as FooterConfigFile;
+  const global = (readJsonFile(path.join(getAgentDir(), "footer.jsonc")) ?? {}) as FooterConfigFile;
+  const project = (readJsonFile(path.join(cwd, ".pi", "footer.jsonc")) ?? {}) as FooterConfigFile;
   const merged = { ...global, ...project };
 
   return {
-    enabled:
-      typeof merged.enabled === "boolean" ? merged.enabled : DEFAULTS.enabled,
-    model:
-      parseModelRef(merged.model ?? merged.smallModel ?? merged.small_model) ??
-      DEFAULTS.model,
-    prompt:
-      typeof merged.prompt === "string" && merged.prompt.trim()
-        ? merged.prompt.trim()
-        : DEFAULTS.prompt,
+    enabled: typeof merged.enabled === "boolean" ? merged.enabled : DEFAULTS.enabled,
+    model: parseModelRef(merged.model ?? merged.smallModel ?? merged.small_model) ?? DEFAULTS.model,
+    prompt: typeof merged.prompt === "string" && merged.prompt.trim() ? merged.prompt.trim() : DEFAULTS.prompt,
     fallbackToCurrentModel:
       typeof merged.fallbackToCurrentModel === "boolean"
         ? merged.fallbackToCurrentModel
         : DEFAULTS.fallbackToCurrentModel,
-    maxPromptChars: clampPositiveInt(
-      merged.maxPromptChars,
-      DEFAULTS.maxPromptChars,
-    ),
-    maxTitleChars: clampPositiveInt(
-      merged.maxTitleChars,
-      DEFAULTS.maxTitleChars,
-    ),
-    setSessionName:
-      typeof merged.setSessionName === "boolean"
-        ? merged.setSessionName
-        : DEFAULTS.setSessionName,
-    titlePrefix:
-      typeof merged.titlePrefix === "string"
-        ? merged.titlePrefix
-        : DEFAULTS.titlePrefix,
+    maxPromptChars: clampPositiveInt(merged.maxPromptChars, DEFAULTS.maxPromptChars),
+    maxTitleChars: clampPositiveInt(merged.maxTitleChars, DEFAULTS.maxTitleChars),
+    setSessionName: typeof merged.setSessionName === "boolean" ? merged.setSessionName : DEFAULTS.setSessionName,
+    titlePrefix: typeof merged.titlePrefix === "string" ? merged.titlePrefix : DEFAULTS.titlePrefix,
   };
 }
 
@@ -237,9 +206,7 @@ function getFallbackTitle(prompt: string, maxTitleChars: number): string {
     .find(Boolean);
 
   const title = (firstLine ?? "New task").replace(/\s+/g, " ").trim();
-  return title.length > maxTitleChars
-    ? title.slice(0, maxTitleChars).trim()
-    : title;
+  return title.length > maxTitleChars ? title.slice(0, maxTitleChars).trim() : title;
 }
 
 function normalizeTitle(raw: string, maxTitleChars: number): string {
@@ -271,41 +238,6 @@ function isBadGeneratedTitle(title: string): boolean {
   if (normalized.includes("insufficient information")) return true;
   if (normalized.endsWith("?")) return true;
   return false;
-}
-
-function applyFooter(
-  ctx: ExtensionContext,
-  title: string,
-  settings: FooterSettings,
-) {
-  if (!ctx.hasUI) return;
-
-  const renderLine = (theme: {
-    fg: (name: string, text: string) => string;
-    bold: (text: string) => string;
-  }) => {
-    const prompt = theme.fg("dim", "❯");
-    return ` ${prompt} ${theme.fg("accent", theme.bold(title))}`;
-  };
-
-  ctx.ui.setFooter((_tui, theme) => ({
-    render() {
-      return [renderLine(theme)];
-    },
-    invalidate() { },
-  }));
-
-  ctx.ui.setTitle(`${settings.titlePrefix}${title}`);
-}
-
-function clearFooter(ctx: ExtensionContext) {
-  if (!ctx.hasUI) return;
-  ctx.ui.setFooter(() => ({
-    render() {
-      return [];
-    },
-    invalidate() { },
-  }));
 }
 
 function shouldSkipInput(text: string): boolean {
@@ -349,15 +281,9 @@ async function generateTitle(
   settings: FooterSettings,
   signal: AbortSignal,
 ): Promise<string | undefined> {
-  const configuredModel = settings.model
-    ? ctx.modelRegistry.find(settings.model.provider, settings.model.id)
-    : undefined;
-  const candidates = [
-    configuredModel,
-    settings.fallbackToCurrentModel ? ctx.model : undefined,
-  ].filter(
-    (model, index, all): model is NonNullable<typeof model> =>
-      Boolean(model) && all.indexOf(model) === index,
+  const configuredModel = settings.model ? ctx.modelRegistry.find(settings.model.provider, settings.model.id) : undefined;
+  const candidates = [configuredModel, settings.fallbackToCurrentModel ? ctx.model : undefined].filter(
+    (model, index, all): model is NonNullable<typeof model> => Boolean(model) && all.indexOf(model) === index,
   );
 
   for (const model of candidates) {
@@ -366,9 +292,7 @@ async function generateTitle(
 
     const message: Message = {
       role: "user",
-      content: [
-        { type: "text", text: prompt.slice(0, settings.maxPromptChars) },
-      ],
+      content: [{ type: "text", text: prompt.slice(0, settings.maxPromptChars) }],
       timestamp: Date.now(),
     };
 
@@ -389,10 +313,7 @@ async function generateTitle(
 
     const title = normalizeTitle(
       result.content
-        .filter(
-          (item): item is { type: "text"; text: string } =>
-            item.type === "text",
-        )
+        .filter((item): item is { type: "text"; text: string } => item.type === "text")
         .map((item) => item.text)
         .join("\n"),
       settings.maxTitleChars,
@@ -404,11 +325,52 @@ async function generateTitle(
   return undefined;
 }
 
-export default function footer(pi: ExtensionAPI) {
+function buildTitleLine(
+  theme: {
+    fg: (name: string, text: string) => string;
+    bold: (text: string) => string;
+  },
+  title: string,
+): string {
+  const prompt = theme.fg("dim", "❯");
+  return `${prompt} ${theme.fg("accent", theme.bold(title))}`;
+}
+
+export interface SessionTitlePart {
+  setRequestRender(requestRender: (() => void) | undefined): void;
+  onSessionStart(ctx: ExtensionContext): void;
+  onInput(event: { text?: unknown }, ctx: ExtensionContext): { action: "continue" };
+  onBeforeAgentStart(event: { prompt: string }, ctx: ExtensionContext): void;
+  onAgentEnd(ctx: ExtensionContext): void;
+  onSessionShutdown(ctx: ExtensionContext): void;
+  onRegenerateCommand(args: string, ctx: ExtensionContext): Promise<void>;
+  buildLine(
+    theme: {
+      fg: (name: string, text: string) => string;
+      bold: (text: string) => string;
+    },
+    width: number,
+  ): string;
+}
+
+export function createSessionTitlePart(pi: ExtensionAPI): SessionTitlePart {
   let generation = 0;
   let inFlight: AbortController | undefined;
   let claimedTitle: string | undefined;
   let started = false;
+  let currentTitle: string | undefined;
+  let requestRender: (() => void) | undefined;
+
+  const setTitle = (ctx: ExtensionContext, title: string, settings: FooterSettings): void => {
+    currentTitle = title;
+    if (ctx.hasUI) ctx.ui.setTitle(`${settings.titlePrefix}${title}`);
+    requestRender?.();
+  };
+
+  const clearTitle = (): void => {
+    currentTitle = undefined;
+    requestRender?.();
+  };
 
   const maybeGenerate = (prompt: string, ctx: ExtensionContext) => {
     const settings = loadSettings(ctx.cwd);
@@ -420,7 +382,7 @@ export default function footer(pi: ExtensionAPI) {
     started = true;
     const fallbackTitle = getFallbackTitle(prompt, settings.maxTitleChars);
     claimedTitle = fallbackTitle;
-    applyFooter(ctx, fallbackTitle, settings);
+    setTitle(ctx, fallbackTitle, settings);
     if (settings.setSessionName) pi.setSessionName(fallbackTitle);
 
     inFlight?.abort();
@@ -431,116 +393,117 @@ export default function footer(pi: ExtensionAPI) {
     void generateTitle(ctx, prompt, settings, controller.signal)
       .then((title) => {
         if (!title) return;
-        if (controller.signal.aborted || currentGeneration !== generation)
-          return;
-        const currentName = pi.getSessionName()?.trim();
-        if (currentName && claimedTitle && currentName !== claimedTitle) return;
+        if (controller.signal.aborted || currentGeneration !== generation) return;
+        const existingName = pi.getSessionName()?.trim();
+        if (existingName && claimedTitle && existingName !== claimedTitle) return;
 
-        applyFooter(ctx, title, settings);
+        setTitle(ctx, title, settings);
         if (settings.setSessionName) {
           pi.setSessionName(title);
           claimedTitle = title;
         }
       })
       .catch(() => {
-        // Keep the fallback title when background generation fails.
+        // Keep fallback title.
       });
   };
 
-  pi.on("session_start", async (_event, ctx) => {
-    const settings = loadSettings(ctx.cwd);
-    started = false;
-    claimedTitle = undefined;
-    if (!settings.enabled) {
-      if (ctx.hasUI) ctx.ui.setFooter(undefined);
-      return;
-    }
+  return {
+    setRequestRender(nextRequestRender) {
+      requestRender = nextRequestRender;
+    },
 
-    const existingTitle = pi.getSessionName()?.trim();
-    if (existingTitle) {
+    onSessionStart(ctx) {
+      const settings = loadSettings(ctx.cwd);
+      started = false;
+      claimedTitle = undefined;
+
+      if (!settings.enabled) {
+        clearTitle();
+        return;
+      }
+
+      const existingTitle = pi.getSessionName()?.trim();
+      if (existingTitle) {
+        started = true;
+        claimedTitle = existingTitle;
+        setTitle(ctx, existingTitle, settings);
+        return;
+      }
+
+      clearTitle();
+    },
+
+    onInput(event, ctx) {
+      if (typeof event.text === "string") maybeGenerate(event.text, ctx);
+      return { action: "continue" };
+    },
+
+    onBeforeAgentStart(event, ctx) {
+      maybeGenerate(event.prompt, ctx);
+    },
+
+    onAgentEnd(ctx) {
+      const settings = loadSettings(ctx.cwd);
+      const title = pi.getSessionName()?.trim();
+      if (settings.enabled && title) setTitle(ctx, title, settings);
+    },
+
+    onSessionShutdown(_ctx) {
+      inFlight?.abort();
+      inFlight = undefined;
+      started = false;
+      claimedTitle = undefined;
+      clearTitle();
+      requestRender = undefined;
+    },
+
+    async onRegenerateCommand(args, ctx) {
+      const settings = loadSettings(ctx.cwd);
+      if (!settings.enabled) {
+        if (ctx.hasUI) ctx.ui.notify("footer extension is disabled", "warning");
+        return;
+      }
+
+      const prompt = args.trim() || getLatestUserPrompt(ctx) || (ctx.hasUI ? ctx.ui.getEditorText().trim() : "");
+      if (!prompt) {
+        if (ctx.hasUI) ctx.ui.notify("No prompt available to regenerate footer title", "warning");
+        return;
+      }
+
+      const fallbackTitle = getFallbackTitle(prompt, settings.maxTitleChars);
+      setTitle(ctx, fallbackTitle, settings);
+      if (settings.setSessionName) {
+        pi.setSessionName(fallbackTitle);
+        claimedTitle = fallbackTitle;
+      }
+
+      inFlight?.abort();
+      const controller = new AbortController();
+      inFlight = controller;
+      const currentGeneration = ++generation;
       started = true;
-      claimedTitle = existingTitle;
-      applyFooter(ctx, existingTitle, settings);
-      return;
-    }
 
-    clearFooter(ctx);
-  });
+      const title = await generateTitle(ctx, prompt, settings, controller.signal).catch(() => undefined);
+      if (!title) {
+        if (ctx.hasUI) ctx.ui.notify("Kept fallback footer title", "info");
+        return;
+      }
+      if (controller.signal.aborted || currentGeneration !== generation) return;
 
-  pi.on("input", async (event, ctx) => {
-    if (typeof event.text === "string") maybeGenerate(event.text, ctx);
-    return { action: "continue" as const };
-  });
+      setTitle(ctx, title, settings);
+      if (settings.setSessionName) {
+        pi.setSessionName(title);
+        claimedTitle = title;
+      }
+      if (ctx.hasUI) ctx.ui.notify(`Footer regenerated: ${title}`, "success");
+    },
 
-  pi.on("before_agent_start", (event, ctx) => {
-    maybeGenerate(event.prompt, ctx);
-    return undefined;
-  });
-
-  pi.on("agent_end", async (_event, ctx) => {
-    const settings = loadSettings(ctx.cwd);
-    const currentTitle = pi.getSessionName()?.trim();
-    if (settings.enabled && currentTitle) applyFooter(ctx, currentTitle, settings);
-  });
-
-  const regenerate = async (args: string, ctx: ExtensionContext) => {
-    const settings = loadSettings(ctx.cwd);
-    if (!settings.enabled) {
-      ctx.ui.notify("footer extension is disabled", "warning");
-      return;
-    }
-
-    const prompt =
-      args.trim() || getLatestUserPrompt(ctx) || ctx.ui.getEditorText().trim();
-    if (!prompt) {
-      ctx.ui.notify("No prompt available to regenerate footer title", "warning");
-      return;
-    }
-
-    const fallbackTitle = getFallbackTitle(prompt, settings.maxTitleChars);
-    applyFooter(ctx, fallbackTitle, settings);
-    if (settings.setSessionName) {
-      pi.setSessionName(fallbackTitle);
-      claimedTitle = fallbackTitle;
-    }
-
-    inFlight?.abort();
-    const controller = new AbortController();
-    inFlight = controller;
-    const currentGeneration = ++generation;
-    started = true;
-
-    const title = await generateTitle(
-      ctx,
-      prompt,
-      settings,
-      controller.signal,
-    ).catch(() => undefined);
-    if (!title) {
-      ctx.ui.notify("Kept fallback footer title", "info");
-      return;
-    }
-    if (controller.signal.aborted || currentGeneration !== generation) return;
-
-    applyFooter(ctx, title, settings);
-    if (settings.setSessionName) {
-      pi.setSessionName(title);
-      claimedTitle = title;
-    }
-    ctx.ui.notify(`Footer regenerated: ${title}`, "success");
+    buildLine(theme, width) {
+      if (!currentTitle) return " ".repeat(width);
+      const contentWidth = Math.max(0, width - 2);
+      const content = truncateToWidth(buildTitleLine(theme, currentTitle), contentWidth);
+      return ` ${content} `;
+    },
   };
-
-  pi.registerCommand("footer-regenerate", {
-    description: "Regenerate the current footer title",
-    handler: async (args, ctx) => regenerate(args, ctx),
-  });
-
-
-  pi.on("session_shutdown", async (_event, ctx) => {
-    inFlight?.abort();
-    inFlight = undefined;
-    started = false;
-    claimedTitle = undefined;
-    if (ctx.hasUI) ctx.ui.setFooter(undefined);
-  });
 }
