@@ -129,6 +129,10 @@ export function loadConfig(cwd: string): PermissionsConfig {
 
 	return {
 		default: mergeDefaultConfig(global?.default, project?.default),
+		profiles: {
+			...(global?.profiles ?? {}),
+			...(project?.profiles ?? {}),
+		},
 		agents: {
 			...(global?.agents ?? {}),
 			...(project?.agents ?? {}),
@@ -230,42 +234,38 @@ export function compileModeDefaults(mode: PermissionMode): { rules: Rule[]; exte
 	}
 }
 
-export function activePolicy(config: PermissionsConfig, agentName: string): EffectivePolicy {
+function mergePolicyLayer(
+	base: { mode: PermissionMode; rules: Rule[]; externalPath: ExternalPathPolicy },
+	layer: AgentProfile | undefined,
+): { mode: PermissionMode; rules: Rule[]; externalPath: ExternalPathPolicy } {
+	if (!layer) return base;
+	const mode = layer.mode ?? base.mode;
+	const compiled = compileModeDefaults(mode);
+	const externalPath = layer.externalPath ?? (layer.mode ? compiled.externalPath : base.externalPath);
+	const rules = layer.inherit === false
+		? [...(layer.rules ?? []), ...compiled.rules]
+		: [...(layer.rules ?? []), ...base.rules, ...(layer.mode ? compiled.rules : [])];
+	return { mode, rules, externalPath };
+}
+
+export function activePolicy(config: PermissionsConfig, agentName: string, profileName?: string): EffectivePolicy {
 	const protectedResources = resolveProtectedResources(config);
 	const protectedRules = compileProtectedRules(protectedResources);
 	const defaultMode = config.default?.mode ?? "workspace-write";
 	const defaultCompiled = compileModeDefaults(defaultMode);
-	const defaultRules = [...protectedRules, ...(config.default?.rules ?? []), ...defaultCompiled.rules];
-	const defaultExternalPath = config.default?.externalPath ?? defaultCompiled.externalPath;
+	let effective = {
+		mode: defaultMode,
+		rules: [...protectedRules, ...(config.default?.rules ?? []), ...defaultCompiled.rules],
+		externalPath: config.default?.externalPath ?? defaultCompiled.externalPath,
+	};
 
-	if (agentName === "default" || !config.agents?.[agentName]) {
-		return {
-			mode: defaultMode,
-			rules: defaultRules,
-			externalPath: defaultExternalPath,
-			protectedResources,
-		};
-	}
-
-	const profile = config.agents[agentName];
-	const profileMode = profile.mode ?? defaultMode;
-	const profileCompiled = compileModeDefaults(profileMode);
-	const profileExternalPath = profile.externalPath ?? (profile.mode ? profileCompiled.externalPath : defaultExternalPath);
-	const profileRules = [...(profile.rules ?? [])];
-
-	if (profile.inherit === false) {
-		return {
-			mode: profileMode,
-			rules: [...protectedRules, ...profileRules, ...profileCompiled.rules],
-			externalPath: profileExternalPath,
-			protectedResources,
-		};
-	}
+	effective = mergePolicyLayer(effective, profileName ? config.profiles?.[profileName] : undefined);
+	effective = mergePolicyLayer(effective, agentName === "default" ? undefined : config.agents?.[agentName]);
 
 	return {
-		mode: profileMode,
-		rules: [...protectedRules, ...profileRules, ...(config.default?.rules ?? []), ...(profile.mode ? profileCompiled.rules : defaultCompiled.rules)],
-		externalPath: profileExternalPath,
+		mode: effective.mode,
+		rules: effective.rules,
+		externalPath: effective.externalPath,
 		protectedResources,
 	};
 }

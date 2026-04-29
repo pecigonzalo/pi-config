@@ -222,6 +222,99 @@
   //   "unprotectRead": ["\\.env(\\..+)?$"],
   //   "unprotectWrite": ["(^|[/])\\.git/(hooks/|config$)"]
   // },
+  "profiles": {
+    "read-only": {
+      "inherit": true,
+      "rules": [
+        {
+          "tool": "task",
+          "action": "block",
+          "reason": "read-only workers do not delegate further",
+        },
+        {
+          "tool": "write",
+          "action": "block",
+          "reason": "read-only profile",
+        },
+        {
+          "tool": "edit",
+          "action": "block",
+          "reason": "read-only profile",
+        },
+        {
+          "tool": "bash",
+          "action": "block",
+          "reason": "read-only profile uses structured read tools only",
+        }
+      ]
+    },
+    "isolated": {
+      "inherit": false,
+      "rules": [
+        {
+          "tool": "task",
+          "action": "block",
+          "reason": "isolated workers do not delegate further",
+        },
+        {
+          "tool": "read",
+          "action": "block",
+          "reason": "isolated profile",
+        },
+        {
+          "tool": "write",
+          "action": "block",
+          "reason": "isolated profile",
+        },
+        {
+          "tool": "edit",
+          "action": "block",
+          "reason": "isolated profile",
+        },
+        {
+          "tool": "grep",
+          "action": "block",
+          "reason": "isolated profile",
+        },
+        {
+          "tool": "find",
+          "action": "block",
+          "reason": "isolated profile",
+        },
+        {
+          "tool": "ls",
+          "action": "block",
+          "reason": "isolated profile",
+        },
+        {
+          "tool": "bash",
+          "action": "block",
+          "reason": "isolated profile",
+        }
+      ]
+    }
+  },
+  "agents": {
+    "orchestrator": {
+      "inherit": true,
+      "rules": [
+        {
+          "tool": "task",
+          "action": "allow",
+        },
+        {
+          "tool": "write",
+          "action": "block",
+          "reason": "Orchestrator should delegate file mutation",
+        },
+        {
+          "tool": "edit",
+          "action": "block",
+          "reason": "Orchestrator should delegate file mutation",
+        }
+      ]
+    }
+  },
   // Optional bash sandbox backend. If the sandbox runtime is installed,
   // workspace-write and plan modes enable it automatically unless disabled.
   //

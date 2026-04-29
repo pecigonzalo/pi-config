@@ -144,6 +144,13 @@ function detectAgentName(pi: ExtensionAPI): string {
 	return "default";
 }
 
+function detectProfileName(pi: ExtensionAPI): string | undefined {
+	if (process.env.PI_PROFILE_NAME) return process.env.PI_PROFILE_NAME;
+	const flagValue = pi.getFlag("profile-name");
+	if (typeof flagValue === "string" && flagValue.length > 0) return flagValue;
+	return undefined;
+}
+
 function clampTimeout(value: number | undefined): number {
 	if (typeof value !== "number" || !Number.isFinite(value)) return 30;
 	return Math.max(1, Math.min(120, value));
@@ -833,7 +840,7 @@ export default function (pi: ExtensionAPI) {
 			const profile = (params.profile ?? "analysis") as CodemodeProfileName;
 			const cwd = await resolveExecutionCwd(ctx.cwd, params.cwd);
 			const config = loadConfig(cwd);
-			const policy = activePolicy(config, detectAgentName(pi));
+			const policy = activePolicy(config, detectAgentName(pi), detectProfileName(pi));
 			const tmpBase = getEffectiveSandboxTmpDir(cwd, config.sandbox);
 			await fs.mkdir(tmpBase, { recursive: true });
 			const runtimeDir = await fs.mkdtemp(path.join(tmpBase, "codemode-"));

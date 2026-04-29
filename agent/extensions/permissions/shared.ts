@@ -33,6 +33,7 @@ export interface PermissionsConfig {
 		rules?: Rule[];
 		externalPath?: ExternalPathPolicy;
 	};
+	profiles?: Record<string, AgentProfile>;
 	agents?: Record<string, AgentProfile>;
 	sandbox?: SandboxSettings;
 	approvals?: ApprovalsSettings;

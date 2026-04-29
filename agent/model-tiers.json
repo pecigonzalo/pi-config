@@ -1,0 +1,15 @@
+{
+  "light": {
+    "description": "Lower-cost lightweight reasoning model",
+    "model": "github-copilot/gpt-5-mini"
+  },
+  "balanced": {
+    "description": "Balanced default model for most tasks",
+    "model": "github-copilot/gpt-5.4"
+  },
+  "heavy": {
+    "description": "Heavier model for deep planning and hard tasks",
+    "model": "github-copilot/gpt-5.4",
+    "thinkingLevel": "high"
+  }
+}

@@ -12,7 +12,8 @@
  * Agent name resolution (first match wins):
  *   1. PI_AGENT_NAME environment variable
  *   2. --agent-name CLI flag
- *   3. Falls back to "default" profile
+ *   3. Runtime-selected main-session agent
+ *   4. Falls back to "default" profile
  *
  * To wire up with the task extension, set PI_AGENT_NAME in the spawn env:
  *   proc = spawn(cmd, args, { env: { ...process.env, PI_AGENT_NAME: agent.name } })
@@ -145,6 +146,13 @@ function detectAgentName(pi: ExtensionAPI): string {
 	return "default";
 }
 
+function detectProfileName(pi: ExtensionAPI): string | undefined {
+	if (process.env.PI_PROFILE_NAME) return process.env.PI_PROFILE_NAME;
+	const flagValue = pi.getFlag("profile-name");
+	if (typeof flagValue === "string" && flagValue.length > 0) return flagValue;
+	return undefined;
+}
+
 // ─── Extension ────────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -200,6 +208,7 @@ export default function (pi: ExtensionAPI) {
 
 	let config: PermissionsConfig = {};
 	let agentName = "default";
+	let profileName: string | undefined;
 	let approvalsSettings = getApprovalsSettings(config);
 	let persistentApprovals: ApprovalRecord[] = [];
 
@@ -222,6 +231,7 @@ export default function (pi: ExtensionAPI) {
 	const reload = (cwd: string) => {
 		config = loadConfig(cwd);
 		agentName = detectAgentName(pi);
+		profileName = detectProfileName(pi);
 		approvalsSettings = getApprovalsSettings(config);
 		loadApprovals();
 	};
@@ -233,7 +243,7 @@ export default function (pi: ExtensionAPI) {
 		sandboxConfig = undefined;
 		clearSandboxEnv();
 
-		const policy = activePolicy(config, agentName);
+		const policy = activePolicy(config, agentName, profileName);
 		const tmpDirBase = getEffectiveSandboxTmpDir(ctx.cwd, config.sandbox);
 		const tmpDirMode = getSandboxTmpDirMode(config.sandbox);
 		let effectiveTmpDir = tmpDirBase;
@@ -643,9 +653,11 @@ export default function (pi: ExtensionAPI) {
 	// ── Main gate ─────────────────────────────────────────────────────────────
 
 	pi.on("tool_call", async (event, ctx) => {
+		agentName = detectAgentName(pi);
+		profileName = detectProfileName(pi);
 		const input = asPermissionToolInput(event.input);
 		const toolName = asPermissionToolName(event.toolName);
-		const policy = activePolicy(config, agentName);
+		const policy = activePolicy(config, agentName, profileName);
 		const projectRoot = canonicalizePath(ctx.cwd);
 
 		let bashApprovals: ApprovalRecord[] = [];
@@ -786,12 +798,14 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("permissions", {
 		description: "Show permission summary (/permissions verbose for full details)",
 		handler: async (args, ctx) => {
-			const policy = activePolicy(config, agentName);
+			agentName = detectAgentName(pi);
+			profileName = detectProfileName(pi);
+			const policy = activePolicy(config, agentName, profileName);
 			const rules = policy.rules;
 			const externalPath = policy.externalPath;
 			const mode = policy.mode;
 			const protectedResources = policy.protectedResources;
-			const profileLabel = agentName === "default" ? "default" : agentName;
+			const profileLabel = profileName ? `${agentName} / ${profileName}` : agentName === "default" ? "default" : agentName;
 			const hasAgentOverride = agentName !== "default" && config.agents?.[agentName] !== undefined;
 			const isFullOverride = hasAgentOverride && config.agents![agentName].inherit === false;
 			const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
@@ -1000,6 +1014,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("permissions-approvals", {
 		description: "Show scoped session/saved permission approvals",
 		handler: async (_args, ctx) => {
+			agentName = detectAgentName(pi);
 			const projectRoot = canonicalizePath(ctx.cwd);
 			const scopedSaved = persistentApprovals.filter((a) => {
 				if (approvalsSettings.scopeByProject && a.projectRoot !== projectRoot) return false;
@@ -1052,6 +1067,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("permissions-reset", {
 		description: "Reset permission approvals (session|saved|project|agent|all)",
 		handler: async (args, ctx) => {
+			agentName = detectAgentName(pi);
 			const trimmed = (args || "").trim().toLowerCase();
 			const projectRoot = canonicalizePath(ctx.cwd);
 			const resetSession = trimmed === "" || trimmed === "session" || trimmed === "all";
@@ -1101,7 +1117,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("permissions-mode", {
 		description: "Show the active permission mode",
 		handler: async (_args, ctx) => {
-			const policy = activePolicy(config, agentName);
+			agentName = detectAgentName(pi);
+			profileName = detectProfileName(pi);
+			const policy = activePolicy(config, agentName, profileName);
 			ctx.ui.notify(`Active permission mode: ${policy.mode}`, "info");
 		},
 	});
