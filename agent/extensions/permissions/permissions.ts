@@ -100,9 +100,10 @@ import {
 	canonicalizePath,
 	canonicalizePathToken,
 	getCommandInput,
-	getPathInput,
 	getExternalPaths,
+	getFilesystemApprovalTargets,
 	getMatchTarget,
+	getPathInput,
 	matchRule,
 	isPathOutsideCwd,
 } from "./matching";
@@ -234,6 +235,27 @@ export default function (pi: ExtensionAPI) {
 		profileName = detectProfileName(pi);
 		approvalsSettings = getApprovalsSettings(config);
 		loadApprovals();
+	};
+
+	const createPathApproval = (toolName: PermissionToolName, scopeValue: string, projectRoot: string): ApprovalRecord => ({
+		tool: toolName,
+		scopeType: "path-prefix",
+		scopeValue,
+		projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
+		agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
+		createdAt: Date.now(),
+	});
+
+	const addSessionPathApprovals = (toolName: PermissionToolName, scopeValues: string[], projectRoot: string) => {
+		sessionPathApprovals.push(...dedupeStrings(scopeValues).map((scopeValue) => createPathApproval(toolName, scopeValue, projectRoot)));
+	};
+
+	const savePathApprovals = (toolName: PermissionToolName, scopeValues: string[], projectRoot: string) => {
+		persistentApprovals = dedupeApprovals([
+			...persistentApprovals,
+			...dedupeStrings(scopeValues).map((scopeValue) => createPathApproval(toolName, scopeValue, projectRoot)),
+		]);
+		saveApprovals();
 	};
 
 	async function initializeSandbox(ctx: ExtensionContext) {
@@ -492,25 +514,41 @@ export default function (pi: ExtensionAPI) {
 			return undefined;
 		}
 
-		// Compute folder path for filesystem tools so we can offer a folder-scoped approval
-		let folderPath: string | undefined;
-		if (isFilesystemToolName(toolName)) {
-			const rawPath = getPathInput(input);
-			if (rawPath) {
-				const canonPath = canonicalizePathToken(rawPath, ctx.cwd);
-				folderPath = path.dirname(canonPath);
-			}
-		}
-
-		const allowFolderSessionLabel = folderPath ? `Allow folder for this session (${folderPath})` : undefined;
-		const allowFolderPermanentLabel = folderPath ? `Allow folder permanently (${folderPath})` : undefined;
+		const approvalTargets = isFilesystemToolName(toolName)
+			? (() => {
+				const rawPath = getPathInput(input);
+				return rawPath ? getFilesystemApprovalTargets(rawPath, ctx.cwd) : undefined;
+			})()
+			: undefined;
+		const allowTargetSessionLabel = approvalTargets
+			? `Allow ${approvalTargets.targetKind} for this session (${approvalTargets.targetPath})`
+			: undefined;
+		const allowTargetPermanentLabel = approvalTargets
+			? `Allow ${approvalTargets.targetKind} permanently (${approvalTargets.targetPath})`
+			: undefined;
+		const allowParentFolderSessionLabel = approvalTargets?.parentFolderPath
+			? `Allow parent folder for this session (${approvalTargets.parentFolderPath})`
+			: undefined;
+		const allowParentFolderPermanentLabel = approvalTargets?.parentFolderPath
+			? `Allow parent folder permanently (${approvalTargets.parentFolderPath})`
+			: undefined;
+		const allowGitRepoSessionLabel = approvalTargets?.gitRepoPath
+			? `Allow git repo for this session (${approvalTargets.gitRepoPath})`
+			: undefined;
+		const allowGitRepoPermanentLabel = approvalTargets?.gitRepoPath
+			? `Allow git repo permanently (${approvalTargets.gitRepoPath})`
+			: undefined;
 
 		const options = [
 			"Allow once",
 			"Allow tool for this session",
 			"Allow tool permanently",
-			...(allowFolderSessionLabel ? [allowFolderSessionLabel] : []),
-			...(allowFolderPermanentLabel ? [allowFolderPermanentLabel] : []),
+			...(allowTargetSessionLabel ? [allowTargetSessionLabel] : []),
+			...(allowTargetPermanentLabel ? [allowTargetPermanentLabel] : []),
+			...(allowParentFolderSessionLabel ? [allowParentFolderSessionLabel] : []),
+			...(allowParentFolderPermanentLabel ? [allowParentFolderPermanentLabel] : []),
+			...(allowGitRepoSessionLabel ? [allowGitRepoSessionLabel] : []),
+			...(allowGitRepoPermanentLabel ? [allowGitRepoPermanentLabel] : []),
 			"Block",
 		];
 
@@ -541,32 +579,34 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`✓ ${toolName} allowed permanently`, "info");
 		}
 
-		if (folderPath && choice === allowFolderSessionLabel) {
-			sessionPathApprovals.push({
-				tool: toolName,
-				scopeType: "path-prefix",
-				scopeValue: folderPath,
-				projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
-				agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
-				createdAt: Date.now(),
-			});
-			ctx.ui.notify(`✓ Folder approved for this session: ${folderPath}`, "info");
+		if (approvalTargets && choice === allowTargetSessionLabel) {
+			addSessionPathApprovals(toolName, [approvalTargets.targetPath], projectRoot);
+			ctx.ui.notify(`✓ ${approvalTargets.targetKind === "folder" ? "Folder" : "File"} approved for this session: ${approvalTargets.targetPath}`, "info");
 		}
 
-		if (folderPath && choice === allowFolderPermanentLabel) {
-			persistentApprovals = dedupeApprovals([
-				...persistentApprovals,
-				{
-					tool: toolName,
-					scopeType: "path-prefix",
-					scopeValue: folderPath,
-					projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
-					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
-					createdAt: Date.now(),
-				},
-			]);
-			saveApprovals();
-			ctx.ui.notify(`✓ Folder approved permanently: ${folderPath}`, "info");
+		if (approvalTargets && choice === allowTargetPermanentLabel) {
+			savePathApprovals(toolName, [approvalTargets.targetPath], projectRoot);
+			ctx.ui.notify(`✓ ${approvalTargets.targetKind === "folder" ? "Folder" : "File"} approved permanently: ${approvalTargets.targetPath}`, "info");
+		}
+
+		if (approvalTargets?.parentFolderPath && choice === allowParentFolderSessionLabel) {
+			addSessionPathApprovals(toolName, [approvalTargets.parentFolderPath], projectRoot);
+			ctx.ui.notify(`✓ Parent folder approved for this session: ${approvalTargets.parentFolderPath}`, "info");
+		}
+
+		if (approvalTargets?.parentFolderPath && choice === allowParentFolderPermanentLabel) {
+			savePathApprovals(toolName, [approvalTargets.parentFolderPath], projectRoot);
+			ctx.ui.notify(`✓ Parent folder approved permanently: ${approvalTargets.parentFolderPath}`, "info");
+		}
+
+		if (approvalTargets?.gitRepoPath && choice === allowGitRepoSessionLabel) {
+			addSessionPathApprovals(toolName, [approvalTargets.gitRepoPath], projectRoot);
+			ctx.ui.notify(`✓ Git repo approved for this session: ${approvalTargets.gitRepoPath}`, "info");
+		}
+
+		if (approvalTargets?.gitRepoPath && choice === allowGitRepoPermanentLabel) {
+			savePathApprovals(toolName, [approvalTargets.gitRepoPath], projectRoot);
+			ctx.ui.notify(`✓ Git repo approved permanently: ${approvalTargets.gitRepoPath}`, "info");
 		}
 
 		return undefined;
@@ -606,10 +646,34 @@ export default function (pi: ExtensionAPI) {
 		];
 		if (more) lines.push(more.trimStart());
 
+		const approvalTargets = externalPaths.length === 1 ? getFilesystemApprovalTargets(externalPaths[0], ctx.cwd) : undefined;
+		const allowPathSessionLabel = approvalTargets
+			? `Allow ${approvalTargets.targetKind} for this session (${approvalTargets.targetPath})`
+			: "Allow path for this session";
+		const allowPathPermanentLabel = approvalTargets
+			? `Allow ${approvalTargets.targetKind} permanently (${approvalTargets.targetPath})`
+			: "Allow path permanently";
+		const allowParentFolderSessionLabel = approvalTargets?.parentFolderPath
+			? `Allow parent folder for this session (${approvalTargets.parentFolderPath})`
+			: undefined;
+		const allowParentFolderPermanentLabel = approvalTargets?.parentFolderPath
+			? `Allow parent folder permanently (${approvalTargets.parentFolderPath})`
+			: undefined;
+		const allowGitRepoSessionLabel = approvalTargets?.gitRepoPath
+			? `Allow git repo for this session (${approvalTargets.gitRepoPath})`
+			: undefined;
+		const allowGitRepoPermanentLabel = approvalTargets?.gitRepoPath
+			? `Allow git repo permanently (${approvalTargets.gitRepoPath})`
+			: undefined;
+
 		const choice = await ctx.ui.select(`⚠️  External path permission required\n\n${lines.join("\n")}`, [
 			"Allow once",
-			"Allow path for this session",
-			"Allow path permanently",
+			allowPathSessionLabel,
+			allowPathPermanentLabel,
+			...(allowParentFolderSessionLabel ? [allowParentFolderSessionLabel] : []),
+			...(allowParentFolderPermanentLabel ? [allowParentFolderPermanentLabel] : []),
+			...(allowGitRepoSessionLabel ? [allowGitRepoSessionLabel] : []),
+			...(allowGitRepoPermanentLabel ? [allowGitRepoPermanentLabel] : []),
 			"Block",
 		]);
 
@@ -617,34 +681,44 @@ export default function (pi: ExtensionAPI) {
 			return { block: true, reason: "Blocked by user" };
 		}
 
-		if (choice === "Allow path for this session") {
-			sessionPathApprovals.push(
-				...externalPaths.map((p) => ({
-					tool: toolName,
-					scopeType: "path-prefix" as const,
-					scopeValue: p,
-					projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
-					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
-					createdAt: Date.now(),
-				})),
+		if (choice === allowPathSessionLabel) {
+			addSessionPathApprovals(toolName, approvalTargets ? [approvalTargets.targetPath] : externalPaths, projectRoot);
+			ctx.ui.notify(
+				approvalTargets
+					? `✓ ${approvalTargets.targetKind === "folder" ? "Folder" : "File"} approved for this session: ${approvalTargets.targetPath}`
+					: `✓ Approved ${externalPaths.length} external path(s) for this session`,
+				"info",
 			);
-			ctx.ui.notify(`✓ Approved ${externalPaths.length} external path(s) for this session`, "info");
 		}
 
-		if (choice === "Allow path permanently") {
-			persistentApprovals = dedupeApprovals([
-				...persistentApprovals,
-				...externalPaths.map((p) => ({
-					tool: toolName,
-					scopeType: "path-prefix" as const,
-					scopeValue: p,
-					projectRoot: approvalsSettings.scopeByProject ? projectRoot : undefined,
-					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
-					createdAt: Date.now(),
-				})),
-			]);
-			saveApprovals();
-			ctx.ui.notify(`✓ Saved ${externalPaths.length} external path approval(s)`, "info");
+		if (choice === allowPathPermanentLabel) {
+			savePathApprovals(toolName, approvalTargets ? [approvalTargets.targetPath] : externalPaths, projectRoot);
+			ctx.ui.notify(
+				approvalTargets
+					? `✓ ${approvalTargets.targetKind === "folder" ? "Folder" : "File"} approved permanently: ${approvalTargets.targetPath}`
+					: `✓ Saved ${externalPaths.length} external path approval(s)`,
+				"info",
+			);
+		}
+
+		if (approvalTargets?.parentFolderPath && choice === allowParentFolderSessionLabel) {
+			addSessionPathApprovals(toolName, [approvalTargets.parentFolderPath], projectRoot);
+			ctx.ui.notify(`✓ Parent folder approved for this session: ${approvalTargets.parentFolderPath}`, "info");
+		}
+
+		if (approvalTargets?.parentFolderPath && choice === allowParentFolderPermanentLabel) {
+			savePathApprovals(toolName, [approvalTargets.parentFolderPath], projectRoot);
+			ctx.ui.notify(`✓ Parent folder approved permanently: ${approvalTargets.parentFolderPath}`, "info");
+		}
+
+		if (approvalTargets?.gitRepoPath && choice === allowGitRepoSessionLabel) {
+			addSessionPathApprovals(toolName, [approvalTargets.gitRepoPath], projectRoot);
+			ctx.ui.notify(`✓ Git repo approved for this session: ${approvalTargets.gitRepoPath}`, "info");
+		}
+
+		if (approvalTargets?.gitRepoPath && choice === allowGitRepoPermanentLabel) {
+			savePathApprovals(toolName, [approvalTargets.gitRepoPath], projectRoot);
+			ctx.ui.notify(`✓ Git repo approved permanently: ${approvalTargets.gitRepoPath}`, "info");
 		}
 
 		return undefined;

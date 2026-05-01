@@ -130,6 +130,47 @@ export function canonicalizePathToken(token: string, cwd: string): string {
 	}
 }
 
+export interface FilesystemApprovalTargets {
+	targetPath: string;
+	targetKind: "file" | "folder";
+	parentFolderPath?: string;
+	gitRepoPath?: string;
+}
+
+function isDirectoryTarget(rawPath: string, canonicalPath: string): boolean {
+	if (/[\\/]$/.test(rawPath)) return true;
+	try {
+		return fs.statSync(canonicalPath).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+export function findGitRepoRoot(startPath: string): string | undefined {
+	let current = canonicalizePath(startPath);
+	while (true) {
+		const gitMarker = path.join(current, ".git");
+		if (fs.existsSync(gitMarker)) return current;
+		const parent = path.dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
+}
+
+export function getFilesystemApprovalTargets(rawPath: string, cwd: string): FilesystemApprovalTargets {
+	const targetPath = canonicalizePathToken(rawPath, cwd);
+	const targetKind = isDirectoryTarget(rawPath, targetPath) ? "folder" : "file";
+	const parentFolderPath = path.dirname(targetPath);
+	const gitSearchRoot = targetKind === "folder" ? targetPath : parentFolderPath;
+	const gitRepoPath = findGitRepoRoot(gitSearchRoot);
+	return {
+		targetPath,
+		targetKind,
+		parentFolderPath: parentFolderPath !== targetPath ? parentFolderPath : undefined,
+		gitRepoPath,
+	};
+}
+
 export function isPathOutsideCwd(rawPath: string, cwd: string): boolean {
 	const target = canonicalizePathToken(rawPath, cwd);
 	const root = canonicalizePath(cwd);

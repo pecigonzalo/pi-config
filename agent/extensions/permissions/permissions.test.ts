@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { approvalsCoverBash, approvalsCoverPaths, getApprovalsSettings } from "./approvals";
 import { resolveCodemodePolicy } from "./codemode";
-import { isPathOutsideCwd, ruleMatch } from "./matching";
+import { findGitRepoRoot, getFilesystemApprovalTargets, isPathOutsideCwd, ruleMatch } from "./matching";
 import {
 	detectDangerousBashPattern,
 	getFirstUnapprovedParsedCommand,
@@ -78,6 +78,49 @@ describe("external path canonicalization", () => {
 		await fs.writeFile(path.join(cwd, "a.txt"), "ok", "utf8");
 
 		expect(isPathOutsideCwd("a.txt", cwd)).toBe(false);
+		await fs.rm(tmp, { recursive: true, force: true });
+	});
+});
+
+describe("filesystem approval targets", () => {
+	it("returns file, parent folder, and git repo targets for files inside a repo", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-test-"));
+		const repoRoot = path.join(tmp, "repo");
+		const parentFolder = path.join(repoRoot, "src", "feature");
+		const filePath = path.join(parentFolder, "example.ts");
+		await fs.mkdir(path.join(repoRoot, ".git"), { recursive: true });
+		await fs.mkdir(parentFolder, { recursive: true });
+		await fs.writeFile(filePath, "ok", "utf8");
+
+		const expectedRepoRoot = await fs.realpath(repoRoot);
+		const expectedParentFolder = await fs.realpath(parentFolder);
+		const expectedFilePath = await fs.realpath(filePath);
+		const targets = getFilesystemApprovalTargets(filePath, tmp);
+		expect(targets).toEqual({
+			targetPath: expectedFilePath,
+			targetKind: "file",
+			parentFolderPath: expectedParentFolder,
+			gitRepoPath: expectedRepoRoot,
+		});
+		expect(findGitRepoRoot(parentFolder)).toBe(expectedRepoRoot);
+
+		await fs.rm(tmp, { recursive: true, force: true });
+	});
+
+	it("omits the git repo target when the path is not in a repo", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-test-"));
+		const folder = path.join(tmp, "plain");
+		const filePath = path.join(folder, "example.ts");
+		await fs.mkdir(folder, { recursive: true });
+		await fs.writeFile(filePath, "ok", "utf8");
+
+		const expectedFolder = await fs.realpath(folder);
+		const expectedFilePath = await fs.realpath(filePath);
+		const targets = getFilesystemApprovalTargets(filePath, tmp);
+		expect(targets.targetPath).toBe(expectedFilePath);
+		expect(targets.parentFolderPath).toBe(expectedFolder);
+		expect(targets.gitRepoPath).toBeUndefined();
+
 		await fs.rm(tmp, { recursive: true, force: true });
 	});
 });
