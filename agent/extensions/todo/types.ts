@@ -29,11 +29,17 @@ export type TodoEventType =
 	| "read"
 	| "cleared";
 
+export type TodoEventMetaValue = string | number | boolean | null | TodoEventMeta | TodoEventMetaValue[];
+
+export interface TodoEventMeta {
+	[key: string]: TodoEventMetaValue | undefined;
+}
+
 export interface TodoEvent {
 	timestamp: string;
 	type: TodoEventType;
 	todoId: number;
-	meta?: Record<string, unknown>;
+	meta?: TodoEventMeta;
 }
 
 export interface TodoItem {
