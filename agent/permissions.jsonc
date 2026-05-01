@@ -204,6 +204,8 @@
       "confirmSwitchSession": true,
       "confirmFork": false,
       "dirtyRepo": "warn",
+      "restoreCodeOnFork": "ask",
+      "restoreCodeOnTree": "ask",
     },
   },
   // Scoped approval settings.
