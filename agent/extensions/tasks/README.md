@@ -1,441 +1,103 @@
-# Task Architecture: agents, profiles, and model-tiers
+# Tasks extension: persisted child-session behavior
 
-Status: draft
+This README documents the **implemented runtime behavior** for task delegation and task-session persistence.
 
-## Goals
+## 1) Tasks config files (separate, merged)
 
-- Separate three concerns that were previously conflated under "agent":
-  - **agent** = role, prompt, behavior
-  - **profile** = tools, permissions, isolation/capability envelope
-  - **model-tier** = named model strength/cost preset
-- Support both:
-  - predefined role-based workers such as `orchestrator` and `thinker`
-  - fully composed workers where behavior is mostly defined at call time
-- Allow agents to be restricted to `main`, `task`, or `both`.
-- Keep runtime composition first-class for both `pi` and `task()`.
-- Preserve explicit skill loading and strict failure on missing required skills.
+The extension reads defaults from two files:
 
----
+- Global: `~/.pi/agent/tasks.json`
+- Project: nearest `.pi/tasks.json` (searched upward from the current working directory)
 
-## Core concepts
+Both files are independent. When both exist, defaults are merged field-wise with project values taking precedence.
 
-### 1. Agent
+## 2) Unified context model + persist
 
-An **agent** describes role and behavior.
+Defaults are represented as:
 
-It answers:
-- how should this worker behave?
-- what is its default role prompt?
-- can the user select it directly, or only workflows?
-
-Examples:
-- `orchestrator`
-- `thinker`
-- `implementer`
-- `reviewer`
-
-An agent may define:
-- prompt/body
-- `availability: main | task | both`
-- default profile
-- default model-tier
-- exact default model override
-- default skills
-- optional tighter overrides on tools/permissions inherited from the profile
-
-### 2. Profile
-
-A **profile** describes the capability envelope.
-
-It answers:
-- what tools are visible?
-- what permissions policy applies?
-- does it inherit project context?
-- does it inherit normal skill discovery?
-- how isolated is this worker?
-
-Examples:
-- `read-only`
-- `read-write`
-- `isolated`
-
-A profile may define:
-- visible tools
-- permissions identity / permissions baseline
-- `inheritProjectContext`
-- `inheritSkills`
-- optional prompt/body with operational constraints
-
-Profile prompts should stay short and constraint-oriented.
-
-Good examples:
-- "Do not modify files."
-- "Do not use bash."
-- "Do not rely on project context unless explicitly provided."
-
-### 3. Model-tier
-
-A **model-tier** is a named model preset.
-
-It answers:
-- how strong should the model be?
-- how expensive / slow is it expected to be?
-- what default thinking level should it use?
-
-Examples:
-- `light`
-- `balanced`
-- `heavy`
-
-A model-tier may define:
-- model id or selector
-- optional provider preference
-- optional thinking level
-- optional fallback list
-
-Model-tiers do not define behavior or permissions.
-
----
-
-## Discovery and precedence
-
-### Agents
-
-Discovered from markdown files in:
-- project: `.pi/agents/*.md`
-- global: `~/.pi/agent/agents/*.md`
-
-### Profiles
-
-Discovered from markdown files in:
-- project: `.pi/profiles/*.md`
-- global: `~/.pi/agent/profiles/*.md`
-
-### Model-tiers
-
-Discovered from config files in:
-- project: `.pi/model-tiers.json`
-- global: `~/.pi/agent/model-tiers.json`
-
-Project definitions override global definitions with the same name.
-
----
-
-## Composition model
-
-A worker invocation is composed from up to six pieces:
-
-1. base pi system prompt
-2. selected profile
-3. selected agent
-4. selected model-tier
-5. runtime skills
-6. runtime prompt
-
-Not all pieces are required.
-
-Examples:
-- role-first worker: agent + agent defaults
-- constrained role worker: agent + profile
-- generic worker: profile + model-tier + skills + runtime prompt
-
----
-
-## Prompt merge order
-
-Prompt stacking order is:
-
-1. base pi system prompt
-2. profile prompt
-3. agent prompt
-4. runtime `prompt`
-
-Rationale:
-- the profile establishes operational constraints
-- the agent establishes role and behavior
-- the runtime prompt specializes the current invocation
-
-Profile prompts should not replace agent prompts.
-Agent prompts remain the primary behavioral layer.
-
----
-
-## Runtime precedence
-
-### Profile resolution
-
-Resolution order:
-1. runtime `profile`
-2. agent default profile
-3. no profile
-
-### Model resolution
-
-Resolution order:
-1. runtime `model`
-2. runtime `modelTier`
-3. agent default `model`
-4. agent default `modelTier`
-5. pi default model selection
-
-Profiles should generally not own model selection.
-Profiles are about capabilities, not model strength.
-
-### Skills resolution
-
-Resolution order:
-1. runtime `skills`
-2. agent default skills
-3. inherited skill discovery, only if allowed by the selected profile
-
-If runtime `skills` are provided:
-- resolve only those skills
-- disable normal inherited skill discovery for that invocation
-- fail hard if any explicit skill cannot be resolved
-
-### Tools and permissions resolution
-
-Resolution model:
-1. selected profile defines the baseline tools/permissions envelope
-2. selected agent may tighten or selectively override that baseline
-3. runtime calls do not directly override permissions
-
-This keeps safety and behavior clearly separated.
-
----
-
-## Availability
-
-Availability belongs to **agents**, not profiles.
-
-Values:
-- `main` — selectable only by the user in the main session
-- `task` — selectable only via `task()`
-- `both` — available in both places
-
-Profiles do not have availability.
-Profiles are envelopes, not personas.
-
----
-
-## Main session UX
-
-The user may compose the main session with:
-
-```bash
-pi --agent orchestrator --profile read-only --model-tier heavy
-```
-
-Supported selectors:
-- `--agent <name>`
-- `--profile <name>`
-- `--model-tier <name>`
-- `--model <provider/model>`
-
-`--model` is the exact override.
-`--model-tier` is the named strength preset.
-
-Live session switching should support the same composition model conceptually, for example through commands such as:
-- `/agent ...`
-- `/profile ...`
-- `/model-tier ...`
-
-Exact live-session UX is implementation detail, but the composition semantics should match startup behavior.
-
----
-
-## Task tool schema
-
-The `task` tool should support three modes:
-- single
-- parallel
-- chain
-
-The single-step shape becomes:
-
-```ts
-interface TaskStep {
-  task: string;
-  agent?: string;
-  profile?: string;
-  modelTier?: string;
-  model?: string;
-  skills?: string[];
-  prompt?: string;
-  cwd?: string;
-}
-```
-
-Top-level single mode:
-
-```ts
+```json
 {
-  task: string;
-  agent?: string;
-  profile?: string;
-  modelTier?: string;
-  model?: string;
-  skills?: string[];
-  prompt?: string;
-  cwd?: string;
-  agentScope?: "user" | "project" | "both";
-  confirmProjectAgents?: boolean;
+  "context": {
+    "mode": "fresh | fork",
+    "project": true,
+    "skills": true
+  },
+  "persist": true
 }
 ```
 
-Parallel and chain steps use the same step shape.
+Resolution uses the same model across agent/profile/tasks defaults:
 
-### Minimum valid composition
+- `context.mode`
+- `context.project`
+- `context.skills`
+- `persist`
 
-A task invocation must provide enough information to define behavior.
+## 3) Runtime `task()` overrides
 
-Valid examples:
-- `agent + task`
-- `agent + profile + task`
-- `profile + prompt + task`
-- `prompt + skills + task`
+At runtime, `task()` only exposes **context mode shorthand**:
 
-Invalid example:
-- profile/model-tier only, with no agent and no behavioral prompt
+- `context: "fresh" | "fork"`
 
-The system should fail clearly when the role/behavior layer is missing.
+`persist` is config-driven (agent/profile/tasks defaults) and is **not** a supported runtime override.
 
----
+## 4) `fresh` vs `fork`
 
-## Example task calls
+- `fresh`: create a new child session file with a fresh session header.
+- `fork`: create a persisted child session forked from the parent session snapshot.
 
-### Predefined role with defaults
+`fork` requires a valid parent session and effective `persist=true`.
 
-```ts
-task({
-  agent: "thinker",
-  task: "Break down the work into phases.",
-})
-```
+## 5) Persisted child sessions per step
 
-### Override profile
+When effective `persist=true`, each step gets its own child session file under:
 
-```ts
-task({
-  agent: "thinker",
-  profile: "read-only",
-  task: "Investigate the code path and summarize findings.",
-})
-```
+- `~/.pi/agent/extensions/tasks/sessions/<runId>/steps/<step-label>/child-session.jsonl`
 
-### Override profile and model-tier
+Behavior by mode:
 
-```ts
-task({
-  agent: "thinker",
-  profile: "read-only",
-  modelTier: "heavy",
-  task: "Plan a safe migration strategy.",
-})
-```
+- **single**: one child session.
+- **parallel**: each step gets an independent child session.
+- **chain**: each step also gets an independent child session (step output chaining via `{previous}` is separate from session forking).
 
-### Exact model override
+For `fork`, each step is forked from the parent snapshot (not from sibling child sessions).
 
-```ts
-task({
-  agent: "thinker",
-  profile: "read-only",
-  model: "openai/gpt-5.4",
-  task: "Evaluate trade-offs and recommend an approach.",
-})
-```
+If `persist=false`, step execution uses non-persisted sessions and cannot be reopened later.
 
-### Role + profile + model-tier + explicit skills
+## 6) Metadata model and visibility
 
-```ts
-task({
-  agent: "thinker",
-  profile: "read-only",
-  modelTier: "heavy",
-  skills: ["pattern-task-breakdown", "standards-go"],
-  task: "Produce a Go-specific implementation plan.",
-})
-```
+For persisted steps, the parent session appends hidden custom metadata entries of type:
 
-### Generic composed worker with no predefined agent
+- `tasks.child-session` (created + terminal status)
 
-```ts
-task({
-  profile: "read-only",
-  modelTier: "heavy",
-  skills: ["standards-code", "standards-go"],
-  prompt: "Act as a release-risk analyst. Focus on migration hazards and verification.",
-  task: "Review this planned refactor and identify major risks.",
-})
-```
+User-visible task results include compact child-session summaries (session id/status, and expanded path in detailed views).
 
----
+## 7) `/tasks` command surface
 
-## Permissions integration
+Supported commands:
 
-The runtime should expose both concepts to permissions-aware extensions:
+- `/tasks` or `/tasks list` (current scope)
+- `/tasks recent`
+- `/tasks show <selector>`
+- `/tasks open <selector>`
+- `/tasks recent show <selector>`
+- `/tasks recent open <selector>`
 
-```ts
-env: {
-  ...process.env,
-  PI_AGENT_NAME: selectedAgentName,
-  PI_PROFILE_NAME: selectedProfileName,
-}
-```
+Semantics:
 
-Intended resolution model:
-- profile provides the baseline permissions identity
-- agent may apply tighter overrides
-- exact merge rules are implementation-defined, but agents should not casually widen a restrictive profile
+- **current scope**: reconstruct task runs from metadata in the current parent session.
+- **recent scope**: reconstruct persisted task runs from recent session files.
+- `show`: inspect run/step metadata and warnings.
+- `open`: open selected persisted child session (or provide manual open path/instructions if auto-open is unavailable).
 
----
+Selector resolution order:
 
-## Initial recommended sets
+1. numeric list index (index-first behavior)
+2. run id prefix
+3. child session id prefix
+4. exact child session file basename
 
-### Agents
-- `orchestrator`
-- `thinker`
-- `implementer`
-- `reviewer`
+High-level stale/missing handling:
 
-### Profiles
-- `read-only`
-- `read-write`
-- `isolated`
-
-### Model-tiers
-- `light`
-- `balanced`
-- `heavy`
-
----
-
-## Migration direction
-
-Move from the current flat "all are agents" model to:
-- role agents
-- capability profiles
-- model-tiers
-
-Expected migration steps:
-1. revise spec and terminology
-2. add profile discovery
-3. add model-tier discovery/resolution
-4. update task schema to accept `profile` and `modelTier`
-5. update main-session selection to accept `--profile` and `--model-tier`
-6. update prompt merging to `profile -> agent -> runtime prompt`
-7. update permissions integration to include profile identity
-8. migrate existing flat agents into the new buckets
-9. validate end-to-end behavior
-
----
-
-## Decision summary
-
-- `agent` means role/behavior
-- `profile` means tools/permissions/isolation envelope
-- `model-tier` means named model strength preset
-- availability is an agent concern
-- explicit model beats model-tier
-- explicit skills fail hard if unresolved
-- generic workers without a predefined agent are supported
+- missing child-session path/file is treated as stale metadata and surfaced as warning/error.
+- created-without-terminal metadata is treated as running if live, otherwise interrupted.
