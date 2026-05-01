@@ -5,441 +5,37 @@
  * branch-aware reconstruction from session history.
  */
 
-import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@mariozechner/pi-coding-agent";
-import { matchesKey, Text, truncateToWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
-
-type TodoStatus = "todo" | "in-progress" | "done";
-type TodoPriority = "low" | "med" | "high";
-type TodoEffort = "S" | "M" | "L";
-
-type TodoAction =
-	| "list"
-	| "add"
-	| "update"
-	| "toggle"
-	| "read"
-	| "archive"
-	| "link"
-	| "unlink"
-	| "history"
-	| "clear"
-	| "set_wip_limit";
-
-type TodoEventType =
-	| "created"
-	| "updated"
-	| "status_changed"
-	| "archived"
-	| "unarchived"
-	| "linked"
-	| "unlinked"
-	| "read"
-	| "cleared";
-
-interface TodoEvent {
-	timestamp: string;
-	type: TodoEventType;
-	todoId: number;
-	meta?: Record<string, unknown>;
-}
-
-interface TodoItem {
-	id: number;
-	title: string;
-	description?: string;
-	status: TodoStatus;
-	tags: string[];
-	priority: TodoPriority;
-	effort: TodoEffort;
-	parentId?: number;
-	blockerIds: number[];
-	archived: boolean;
-	history: TodoEvent[];
-	createdAt: string;
-	updatedAt: string;
-}
-
-interface TodoDetails {
-	action: TodoAction;
-	todos: TodoItem[];
-	nextId: number;
-	wipLimit: number;
-	error?: string;
-}
-
-type TodoResult = {
-	content: [{ type: "text"; text: string }];
-	details: TodoDetails;
-};
-
-const TodoParams = Type.Object({
-	action: StringEnum(
-		["list", "add", "update", "toggle", "read", "archive", "link", "unlink", "history", "clear", "set_wip_limit"] as const,
-	),
-	id: Type.Optional(Type.Number({ description: "Todo ID" })),
-	title: Type.Optional(Type.String({ description: "Short title" })),
-	description: Type.Optional(Type.String({ description: "Long description" })),
-	tags: Type.Optional(Type.Array(Type.String(), { description: "Tags" })),
-	priority: Type.Optional(StringEnum(["low", "med", "high"] as const)),
-	effort: Type.Optional(StringEnum(["S", "M", "L"] as const)),
-	parentId: Type.Optional(Type.Number({ description: "Parent todo ID" })),
-	blockerIds: Type.Optional(Type.Array(Type.Number(), { description: "Blocking todo IDs (replace set)" })),
-	addBlockerIds: Type.Optional(Type.Array(Type.Number(), { description: "Blocking todo IDs to add" })),
-	removeBlockerIds: Type.Optional(Type.Array(Type.Number(), { description: "Blocking todo IDs to remove" })),
-	clearParent: Type.Optional(Type.Boolean({ description: "Clear parent relationship" })),
-	toStatus: Type.Optional(StringEnum(["todo", "in-progress", "done"] as const, { description: "Target status for toggle action" })),
-	view: Type.Optional(StringEnum(["default", "tree", "ready"] as const)),
-	includeArchived: Type.Optional(Type.Boolean()),
-	status: Type.Optional(StringEnum(["todo", "in-progress", "done"] as const)),
-	tag: Type.Optional(Type.String()),
-	archived: Type.Optional(Type.Boolean({ description: "Archive (true) or unarchive (false)" })),
-	limit: Type.Optional(Type.Number({ description: "WIP limit for in-progress todos" })),
-	historyLimit: Type.Optional(Type.Number({ description: "Max history entries" })),
-});
-
-class TodoListComponent {
-	private lines: string[];
-	private title: string;
-	private theme: Theme;
-	private onClose: () => void;
-	private cachedWidth?: number;
-	private cachedLines?: string[];
-
-	constructor(lines: string[], title: string, theme: Theme, onClose: () => void) {
-		this.lines = lines;
-		this.title = title;
-		this.theme = theme;
-		this.onClose = onClose;
-	}
-
-	handleInput(data: string): void {
-		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) this.onClose();
-	}
-
-	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
-
-		const th = this.theme;
-		const out: string[] = [];
-		out.push("");
-		const title = th.fg("accent", ` ${this.title} `);
-		const header = th.fg("borderMuted", "─".repeat(3)) + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - this.title.length - 8)));
-		out.push(truncateToWidth(header, width));
-		out.push("");
-
-		if (this.lines.length === 0) {
-			out.push(truncateToWidth(`  ${th.fg("dim", "No todos")}`, width));
-		} else {
-			for (const line of this.lines) out.push(truncateToWidth(`  ${line}`, width));
-		}
-
-		out.push("");
-		out.push(truncateToWidth(`  ${th.fg("dim", "Press Escape to close")}`, width));
-		out.push("");
-
-		this.cachedWidth = width;
-		this.cachedLines = out;
-		return out;
-	}
-
-	invalidate(): void {
-		this.cachedWidth = undefined;
-		this.cachedLines = undefined;
-	}
-}
-
-interface TodoBrowserRow {
-	todo: TodoItem;
-	summary: string;
-	details: string[];
-	selectedLabel: string;
-}
-
-type TodoBrowserAction =
-	| { type: "close" }
-	| { type: "read"; id: number }
-	| { type: "toggle"; id: number }
-	| { type: "archive"; id: number };
-
-type TodoDetailField = "title" | "description" | "status" | "priority" | "effort" | "tags";
-
-type TodoDetailAction =
-	| { type: "back"; selectedField: TodoDetailField }
-	| { type: "edit"; id: number; field: TodoDetailField; selectedField: TodoDetailField }
-	| { type: "toggle"; id: number; selectedField: TodoDetailField }
-	| { type: "archive"; id: number; selectedField: TodoDetailField };
-
-class TodoBrowserComponent {
-	private rows: TodoBrowserRow[];
-	private title: string;
-	private theme: Theme;
-	private onAction: (action: TodoBrowserAction) => void;
-	private selectedIndex = 0;
-	private cachedWidth?: number;
-	private cachedLines?: string[];
-
-	constructor(rows: TodoBrowserRow[], title: string, theme: Theme, onAction: (action: TodoBrowserAction) => void) {
-		this.rows = rows;
-		this.title = title;
-		this.theme = theme;
-		this.onAction = onAction;
-	}
-
-	private getSelected(): TodoBrowserRow | undefined {
-		return this.rows[this.selectedIndex];
-	}
-
-	handleInput(data: string): void {
-		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
-			this.onAction({ type: "close" });
-			return;
-		}
-
-		if (this.rows.length === 0) return;
-
-		if (matchesKey(data, "up") && this.selectedIndex > 0) {
-			this.selectedIndex--;
-			this.invalidate();
-			return;
-		}
-		if (matchesKey(data, "down") && this.selectedIndex < this.rows.length - 1) {
-			this.selectedIndex++;
-			this.invalidate();
-			return;
-		}
-
-		const selected = this.getSelected();
-		if (!selected) return;
-
-		if (matchesKey(data, "enter")) {
-			this.onAction({ type: "read", id: selected.todo.id });
-			return;
-		}
-		if (data === "t") {
-			this.onAction({ type: "toggle", id: selected.todo.id });
-			return;
-		}
-		if (data === "a") {
-			this.onAction({ type: "archive", id: selected.todo.id });
-		}
-	}
-
-	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
-
-		const th = this.theme;
-		const out: string[] = [];
-		out.push("");
-		const title = th.fg("accent", ` ${this.title} `);
-		const header = th.fg("borderMuted", "─".repeat(3)) + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - this.title.length - 8)));
-		out.push(truncateToWidth(header, width));
-		out.push("");
-
-		if (this.rows.length === 0) {
-			out.push(truncateToWidth(`  ${th.fg("dim", "No todos")}`, width));
-		} else {
-			out.push(truncateToWidth(`  ${th.fg("dim", "↑↓ select · enter view · t status · a archive · esc close")}`, width));
-			out.push("");
-			this.rows.forEach((row, index) => {
-				const selected = index === this.selectedIndex;
-				const prefix = selected ? th.fg("accent", "› ") : "  ";
-				const summary = truncateToWidth(`${prefix}${row.summary}`, width);
-				out.push(selected ? th.bg("selectedBg", summary) : summary);
-
-				for (const line of row.details) {
-					out.push(truncateToWidth(`    ${line}`, width));
-				}
-			});
-		}
-
-		out.push("");
-		const selected = this.getSelected();
-		if (selected) {
-			out.push(truncateToWidth(`  ${selected.selectedLabel}`, width));
-		}
-		out.push("");
-
-		this.cachedWidth = width;
-		this.cachedLines = out;
-		return out;
-	}
-
-	invalidate(): void {
-		this.cachedWidth = undefined;
-		this.cachedLines = undefined;
-	}
-}
-
-class TodoDetailComponent {
-	private static readonly fields: TodoDetailField[] = ["title", "description", "status", "priority", "effort", "tags"];
-
-	private todo: TodoItem;
-	private theme: Theme;
-	private onAction: (action: TodoDetailAction) => void;
-	private selectedIndex: number;
-	private cachedWidth?: number;
-	private cachedLines?: string[];
-
-	constructor(todo: TodoItem, theme: Theme, selectedField: TodoDetailField, onAction: (action: TodoDetailAction) => void) {
-		this.todo = todo;
-		this.theme = theme;
-		this.onAction = onAction;
-		const index = TodoDetailComponent.fields.indexOf(selectedField);
-		this.selectedIndex = index >= 0 ? index : 0;
-	}
-
-	private get selectedField(): TodoDetailField {
-		return TodoDetailComponent.fields[this.selectedIndex] ?? "title";
-	}
-
-	private statusLabel(status: TodoStatus): string {
-		return status === "in-progress" ? "in progress" : status;
-	}
-
-	private colorStatusIcon(status: TodoStatus): string {
-		const icon = status === "done" ? "✓" : status === "in-progress" ? "▶" : "○";
-		if (status === "done") return this.theme.fg("success", icon);
-		if (status === "in-progress") return this.theme.fg("accent", icon);
-		return this.theme.fg("muted", icon);
-	}
-
-	private colorPriority(priority: TodoPriority): string {
-		if (priority === "high") return this.theme.fg("error", priority);
-		if (priority === "med") return this.theme.fg("warning", priority);
-		return this.theme.fg("success", priority);
-	}
-
-	private colorEffort(effort: TodoEffort): string {
-		if (effort === "L") return this.theme.fg("warning", effort);
-		if (effort === "M") return this.theme.fg("accent", effort);
-		return this.theme.fg("muted", effort);
-	}
-
-	private styleTitle(title: string, status: TodoStatus): string {
-		if (status === "in-progress") return this.theme.fg("accent", this.theme.bold(title));
-		if (status === "done") return this.theme.fg("success", title);
-		return title;
-	}
-
-	private selectPrev(): void {
-		if (this.selectedIndex > 0) {
-			this.selectedIndex--;
-			this.invalidate();
-		}
-	}
-
-	private selectNext(): void {
-		if (this.selectedIndex < TodoDetailComponent.fields.length - 1) {
-			this.selectedIndex++;
-			this.invalidate();
-		}
-	}
-
-	private renderField(width: number, label: string, value: string, selected: boolean): string[] {
-		const th = this.theme;
-		const prefix = selected ? th.fg("accent", "› ") : "  ";
-		const header = truncateToWidth(`${prefix}${th.fg("muted", `${label}`)} ${th.fg("dim", "[editable]")}`, width);
-		const valueIndent = "    ";
-		const wrappedValue = wrapTextWithAnsi(value, Math.max(10, width - valueIndent.length));
-		const valueLines = wrappedValue.length > 0 ? wrappedValue : [th.fg("dim", "(empty)")];
-		return [
-			selected ? th.bg("selectedBg", header) : header,
-			...valueLines.map((line) => {
-				const rendered = truncateToWidth(`${valueIndent}${line}`, width);
-				return selected ? th.bg("selectedBg", rendered) : rendered;
-			}),
-		];
-	}
-
-	handleInput(data: string): void {
-		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
-			this.onAction({ type: "back", selectedField: this.selectedField });
-			return;
-		}
-		if (matchesKey(data, "up")) {
-			this.selectPrev();
-			return;
-		}
-		if (matchesKey(data, "down")) {
-			this.selectNext();
-			return;
-		}
-		if (matchesKey(data, "enter") || data === "e") {
-			this.onAction({ type: "edit", id: this.todo.id, field: this.selectedField, selectedField: this.selectedField });
-			return;
-		}
-		if (data === "t") {
-			this.onAction({ type: "toggle", id: this.todo.id, selectedField: this.selectedField });
-			return;
-		}
-		if (data === "a") {
-			this.onAction({ type: "archive", id: this.todo.id, selectedField: this.selectedField });
-		}
-	}
-
-	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
-
-		const th = this.theme;
-		const out: string[] = [];
-		out.push("");
-		const title = th.fg("accent", ` Todo #${this.todo.id} `);
-		const header = th.fg("borderMuted", "─".repeat(3)) + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 17)));
-		out.push(truncateToWidth(header, width));
-		out.push("");
-		out.push(truncateToWidth(`  ${th.fg("dim", "↑↓ select field · enter/e edit field · t cycle status · a archive · esc back")}`, width));
-		out.push("");
-
-		const rows: Array<{ field: TodoDetailField; label: string; value: string }> = [
-			{ field: "title", label: "Title", value: this.styleTitle(this.todo.title, this.todo.status) },
-			{
-				field: "description",
-				label: "Description",
-				value: this.todo.description?.trim() ? this.todo.description : th.fg("dim", "(empty)"),
-			},
-			{ field: "status", label: "Status", value: this.colorStatusIcon(this.todo.status) + ` ${this.statusLabel(this.todo.status)}` },
-			{ field: "priority", label: "Priority", value: this.colorPriority(this.todo.priority) },
-			{ field: "effort", label: "Effort", value: this.colorEffort(this.todo.effort) },
-			{
-				field: "tags",
-				label: "Tags",
-				value: this.todo.tags.length ? th.fg("dim", `[${this.todo.tags.join(", ")}]`) : th.fg("dim", "(none)"),
-			},
-		];
-
-		rows.forEach((row, index) => {
-			out.push(...this.renderField(width, row.label, row.value, index === this.selectedIndex));
-			out.push("");
-		});
-
-		out.push(truncateToWidth(`  ${th.fg("dim", "Readonly")}`, width));
-		out.push(truncateToWidth(`  ${th.fg("muted", "Parent:")} ${this.todo.parentId !== undefined ? th.fg("accent", `#${this.todo.parentId}`) : th.fg("dim", "(none)")}`, width));
-		out.push(
-			truncateToWidth(
-				`  ${th.fg("muted", "Blockers:")} ${this.todo.blockerIds.length ? this.todo.blockerIds.map((id) => th.fg("accent", `#${id}`)).join(", ") : th.fg("dim", "(none)")}`,
-				width,
-			),
-		);
-		out.push(truncateToWidth(`  ${th.fg("muted", "Archived:")} ${this.todo.archived ? th.fg("dim", "yes") : "no"}`, width));
-		out.push("");
-
-		this.cachedWidth = width;
-		this.cachedLines = out;
-		return out;
-	}
-
-	invalidate(): void {
-		this.cachedWidth = undefined;
-		this.cachedLines = undefined;
-	}
-}
+import { Text } from "@mariozechner/pi-tui";
+import {
+	TodoBrowserComponent,
+	type TodoBrowserAction,
+	type TodoBrowserRow,
+	TodoDetailComponent,
+	type TodoDetailAction,
+	TodoPanelWidgetComponent,
+} from "./components";
+import { parseTodoWidgetMode, parseTodosCommandArgs, parseTodosCommandRoute } from "./commands";
+import {
+	type TodoAction,
+	type TodoDetailField,
+	type TodoDetails,
+	type TodoEffort,
+	type TodoEventType,
+	type TodoItem,
+	type TodoPriority,
+	TodoParams,
+	type TodoResult,
+	type TodoStatus,
+	type TodoView,
+} from "./types";
 
 export default function (pi: ExtensionAPI) {
 	let todos: TodoItem[] = [];
 	let nextId = 1;
 	let wipLimit = 2;
+	let widgetVisible = false;
+	let requestTodoWidgetRender: (() => void) | undefined;
 
 	const now = () => new Date().toISOString();
 
@@ -511,6 +107,7 @@ export default function (pi: ExtensionAPI) {
 		todos = [];
 		nextId = 1;
 		wipLimit = 2;
+		widgetVisible = false;
 
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type === "message") {
@@ -522,6 +119,12 @@ export default function (pi: ExtensionAPI) {
 
 			if (entry.type === "custom" && entry.customType === "todo-state") {
 				applyPersistedDetails(entry.data as Partial<TodoDetails> | undefined);
+				continue;
+			}
+
+			if (entry.type === "custom" && entry.customType === "todo-widget-state") {
+				const data = entry.data as { visible?: unknown } | undefined;
+				widgetVisible = Boolean(data?.visible);
 			}
 		}
 	};
@@ -680,7 +283,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const listText = (
-		view: "default" | "tree" | "ready",
+		view: TodoView,
 		includeArchived: boolean,
 		status?: TodoStatus,
 		tag?: string,
@@ -701,14 +304,14 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const buildCommandTitle = (
-		view: "default" | "tree" | "ready",
+		view: TodoView,
 		includeArchived: boolean,
 		status?: TodoStatus,
 		tag?: string,
 	) => `Todos${includeArchived ? " • all" : ""}${status ? ` • ${statusLabel(status)}` : ""}${tag ? ` • tag:${tag}` : ""}${view === "ready" ? " • ready" : ""}`;
 
 	const filteredTodoPool = (
-		view: "default" | "tree" | "ready",
+		view: TodoView,
 		includeArchived: boolean,
 		status?: TodoStatus,
 		tag?: string,
@@ -722,7 +325,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const buildTodoBrowserRows = (
-		view: "default" | "tree" | "ready",
+		view: TodoView,
 		includeArchived: boolean,
 		status?: TodoStatus,
 		tag?: string,
@@ -766,6 +369,69 @@ export default function (pi: ExtensionAPI) {
 		};
 		for (const root of roots) walk(root, "", "  ", root.parentId !== undefined && !idSet.has(root.parentId));
 		return rows;
+	};
+
+	const buildTodoPanelRows = (theme?: Theme) =>
+		buildTodoBrowserRows("default", false, undefined, undefined, theme).map((row) => ({
+			summary: row.summary,
+			details: row.details,
+		}));
+
+	const installTodoWidget = (ctx: ExtensionContext) => {
+		if (!ctx.hasUI) return;
+		if (!widgetVisible) {
+			requestTodoWidgetRender = undefined;
+			ctx.ui.setWidget("todo-panel", undefined);
+			return;
+		}
+
+		ctx.ui.setWidget(
+			"todo-panel",
+			(tui) => {
+				requestTodoWidgetRender = () => tui.requestRender();
+				return new TodoPanelWidgetComponent(
+					ctx.ui.theme,
+					"Todos",
+					() => buildTodoPanelRows(ctx.ui.theme),
+					"/todos widget off to hide · /todos to browse",
+				);
+			},
+			{ placement: "belowEditor" },
+		);
+		requestTodoWidgetRender?.();
+	};
+
+	const refreshTodoWidget = () => {
+		requestTodoWidgetRender?.();
+	};
+
+	const handleTodoWidgetCommand = async (args: string, ctx: ExtensionContext) => {
+		if (!ctx.hasUI) {
+			ctx.ui.notify("/todos widget requires interactive mode", "error");
+			return;
+		}
+
+		const parsed = parseTodoWidgetMode(args);
+		if (parsed.error) {
+			ctx.ui.notify(parsed.error, "error");
+			return;
+		}
+
+		if (parsed.mode === "status") {
+			ctx.ui.notify(`Todo widget: ${widgetVisible ? "on" : "off"}`, "info");
+			return;
+		}
+
+		const nextVisible = parsed.mode === "toggle" ? !widgetVisible : parsed.mode === "on";
+		if (nextVisible === widgetVisible) {
+			ctx.ui.notify(`Todo widget already ${widgetVisible ? "on" : "off"}`, "info");
+			return;
+		}
+
+		widgetVisible = nextVisible;
+		pi.appendEntry("todo-widget-state", { visible: widgetVisible });
+		installTodoWidget(ctx);
+		ctx.ui.notify(`Todo widget ${widgetVisible ? "enabled" : "disabled"}`, "info");
 	};
 
 	const editTodoFieldFromCommand = async (todo: TodoItem, field: TodoDetailField, ctx: ExtensionContext) => {
@@ -861,32 +527,18 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const tokens = args
-			.trim()
-			.split(/\s+/)
-			.filter(Boolean)
-			.map((t) => t.toLowerCase());
-
-		let view: "default" | "tree" | "ready" = "default";
-		let includeArchived = false;
-		let status: TodoStatus | undefined;
-		let tag: string | undefined;
-		const invalidTokens: string[] = [];
-
-		for (const token of tokens) {
-			if (token === "default" || token === "tree") view = token;
-			else if (token === "ready") view = token;
-			else if (token === "all") includeArchived = true;
-			else if (token === "todo" || token === "done") status = token;
-			else if (token === "in-progress" || token === "in_progress") status = "in-progress";
-			else if (token.startsWith("tag:")) tag = token.slice(4);
-			else invalidTokens.push(token);
+		const route = parseTodosCommandRoute(args);
+		if (route.kind === "widget") {
+			await handleTodoWidgetCommand(route.widgetArgs, ctx);
+			return;
 		}
+
+		const { view, includeArchived, status, tag, invalidTokens } = parseTodosCommandArgs(route.listArgs);
 
 		if (invalidTokens.length > 0) {
 			const label = invalidTokens.length === 1 ? "token" : "tokens";
 			ctx.ui.notify(
-				`Unsupported /todos ${label}: ${invalidTokens.join(", ")}. Usage: /todos [ready] [all] [todo|in-progress|done] [tag:<name>]`,
+				`Unsupported /todos ${label}: ${invalidTokens.join(", ")}. Usage: /todos [ready] [all] [todo|in-progress|done] [tag:<name>] | /todos widget [on|off|toggle|status]`,
 				"error",
 			);
 			return;
@@ -1007,6 +659,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		pi.appendEntry("todo-state", result.details);
+		refreshTodoWidget();
 		ctx.ui.notify(resultText(result), "info");
 	};
 
@@ -1127,8 +780,25 @@ export default function (pi: ExtensionAPI) {
 		return ok("archive", `${nextArchived ? "Archived" : "Unarchived"} todo #${todo.id}`);
 	};
 
-	pi.on("session_start", async (_event, ctx) => reconstructState(ctx));
-	pi.on("session_tree", async (_event, ctx) => reconstructState(ctx));
+	pi.on("session_start", async (_event, ctx) => {
+		reconstructState(ctx);
+		installTodoWidget(ctx);
+	});
+	pi.on("session_tree", async (_event, ctx) => {
+		reconstructState(ctx);
+		installTodoWidget(ctx);
+	});
+	pi.on("tool_result", async (event, _ctx) => {
+		const result = event as { toolName?: string; details?: unknown };
+		if (result.toolName !== "todo") return;
+		applyPersistedDetails(result.details as Partial<TodoDetails> | undefined);
+		refreshTodoWidget();
+	});
+	pi.on("session_shutdown", async (_event, ctx) => {
+		requestTodoWidgetRender = undefined;
+		if (!ctx.hasUI) return;
+		ctx.ui.setWidget("todo-panel", undefined);
+	});
 
 	pi.registerTool({
 		name: "todo",
@@ -1309,7 +979,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("todos", {
-		description: "Show todos. Usage: /todos [ready] [all] [todo|in-progress|done] [tag:<name>]",
+		description: "Show todos or manage widget. Usage: /todos [ready] [all] [todo|in-progress|done] [tag:<name>] | /todos widget [on|off|toggle|status]",
 		handler: handleTodosCommand,
 	});
 }
