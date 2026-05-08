@@ -1,0 +1,1 @@
+/Users/pecigonzalo/.config/opencode/AGENTS.md
