@@ -21,7 +21,7 @@ import * as readline from "node:readline";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Message } from "@mariozechner/pi-ai";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { type ExtensionAPI, type SessionEntry, getMarkdownTheme, withFileMutationQueue } from "@mariozechner/pi-coding-agent";
+import { type ExtensionAPI, type SessionEntry, getAgentDir, getMarkdownTheme, withFileMutationQueue } from "@mariozechner/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { MAIN_SESSION_AGENT_CUSTOM_TYPE } from "../agent-state";
@@ -39,15 +39,17 @@ import {
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
-const TASK_SESSION_ROOT = path.join(os.homedir(), ".pi", "agent", "extensions", "tasks", "sessions");
 const TASK_SESSION_VERSION_FALLBACK = 3;
 const TASK_CHILD_SESSION_CUSTOM_TYPE = "tasks.child-session";
 const TASK_CHILD_SESSION_METADATA_VERSION = 1;
-const TASKS_PARENT_SESSION_ROOT = path.join(os.homedir(), ".pi", "agent", "sessions");
+const TASKS_PARENT_SESSION_ROOT = path.join(getAgentDir(), "sessions");
+const TASKS_CHILD_SESSION_RUNS_DIR = "task-runs";
+const TASKS_CHILD_SESSION_FALLBACK_PARENT = "detached";
 const TASKS_NO_CURRENT_RUNS_MESSAGE = "No task runs in current session. Try /tasks recent.";
 const TASKS_COMMAND_USAGE = [
 	"/tasks",
 	"/tasks list",
+	"/tasks parent",
 	"/tasks recent",
 	"/tasks show <selector>",
 	"/tasks open <selector>",
@@ -59,7 +61,7 @@ const TASK_SELECTOR_CANDIDATE_LIMIT = 8;
 type TaskExecutionMode = "single" | "parallel" | "chain";
 type ChildSessionStatus = "created" | "succeeded" | "failed" | "aborted";
 type TasksScope = "current" | "recent";
-type TasksAction = "list" | "show" | "open";
+type TasksAction = "list" | "show" | "open" | "parent";
 type TaskRunStepStatus = ChildSessionStatus | "running" | "interrupted" | "not-persisted";
 type TaskRunStatus = "running" | "interrupted" | "failed" | "aborted" | "succeeded" | "not-persisted";
 
@@ -1046,6 +1048,194 @@ function createTaskRunId(): string {
 	return `${timestamp}_${randomUUID().slice(0, 8)}`;
 }
 
+function sanitizePathSegment(value: string | undefined, fallback: string): string {
+	const sanitized = (value ?? "")
+		.trim()
+		.replace(/[^a-zA-Z0-9._-]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.slice(0, 80);
+	return sanitized || fallback;
+}
+
+function getSessionFileStem(sessionFile: string | undefined): string | undefined {
+	if (!sessionFile) return undefined;
+	const parsed = path.parse(sessionFile);
+	return parsed.name || undefined;
+}
+
+function resolveParentSessionBaseDir(parentSessionFile: string | undefined): string {
+	if (!parentSessionFile) return TASKS_PARENT_SESSION_ROOT;
+	const resolvedRoot = path.resolve(TASKS_PARENT_SESSION_ROOT);
+	const resolvedParentDir = path.resolve(path.dirname(parentSessionFile));
+	const relative = path.relative(resolvedRoot, resolvedParentDir);
+	if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+		return path.join(resolvedRoot, relative);
+	}
+	return TASKS_PARENT_SESSION_ROOT;
+}
+
+function buildParentSessionFolderName(parentSessionFile: string | undefined, parentSessionId: string | undefined): string {
+	const fileStem = getSessionFileStem(parentSessionFile);
+	const stableId = sanitizePathSegment(parentSessionId ?? fileStem, TASKS_CHILD_SESSION_FALLBACK_PARENT);
+	if (!fileStem) return stableId;
+	const readableStem = sanitizePathSegment(fileStem, "");
+	if (!readableStem || readableStem === stableId) return stableId;
+	return `${stableId}--${readableStem}`;
+}
+
+function resolvePersistedTaskSessionRoot(parentSessionFile: string | undefined, parentSessionId: string | undefined): string {
+	const parentBaseDir = resolveParentSessionBaseDir(parentSessionFile);
+	const parentFolder = buildParentSessionFolderName(parentSessionFile, parentSessionId);
+	return path.join(parentBaseDir, TASKS_CHILD_SESSION_RUNS_DIR, parentFolder);
+}
+
+function readSessionHeaderStringField(entries: readonly SessionEntry[], field: "id" | "parentSession"): string | undefined {
+	const header = entries.find((entry) => entry.type === "session") as (SessionEntry & { id?: unknown; parentSession?: unknown }) | undefined;
+	if (!header) return undefined;
+	const value = header[field];
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readSessionHeaderId(entries: SessionEntry[]): string | undefined {
+	return readSessionHeaderStringField(entries, "id");
+}
+
+function readSessionHeaderParentSession(entries: SessionEntry[]): string | undefined {
+	return readSessionHeaderStringField(entries, "parentSession");
+}
+
+function resolveSessionReferencePath(referencePath: string, baseFilePath: string): string {
+	const trimmedReference = referencePath.trim();
+	if (path.isAbsolute(trimmedReference)) return path.resolve(trimmedReference);
+	return path.resolve(path.dirname(baseFilePath), trimmedReference);
+}
+
+function isLikelyTaskChildSessionFile(sessionFile: string): boolean {
+	if (path.basename(sessionFile) !== "child-session.jsonl") return false;
+	const normalized = path.normalize(sessionFile);
+	const marker = `${path.sep}${TASKS_CHILD_SESSION_RUNS_DIR}${path.sep}`;
+	return normalized.includes(marker);
+}
+
+async function findTaskRunMetadataFileForChildSession(sessionFile: string): Promise<string | undefined> {
+	if (!isLikelyTaskChildSessionFile(sessionFile)) return undefined;
+	let currentDir = path.dirname(sessionFile);
+	const resolvedTasksRoot = path.resolve(TASKS_PARENT_SESSION_ROOT);
+
+	while (true) {
+		const candidate = path.join(currentDir, "run.json");
+		if (fs.existsSync(candidate)) return candidate;
+		if (path.resolve(currentDir) === resolvedTasksRoot) break;
+		const parentDir = path.dirname(currentDir);
+		if (parentDir === currentDir) break;
+		currentDir = parentDir;
+	}
+
+	return undefined;
+}
+
+interface TaskRunParentInfo {
+	parentSessionFile?: string;
+	parentSessionId?: string;
+}
+
+async function readTaskRunParentInfo(runJsonPath: string): Promise<{ info?: TaskRunParentInfo; error?: string }> {
+	let rawJson: string;
+	try {
+		rawJson = await fs.promises.readFile(runJsonPath, "utf-8");
+	} catch (error) {
+		return {
+			error: `Failed to read task run metadata ${shortenHomePath(runJsonPath)}: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(rawJson);
+	} catch (error) {
+		return {
+			error: `Task run metadata is invalid JSON at ${shortenHomePath(runJsonPath)}: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	if (!isRecord(parsed)) {
+		return { error: `Task run metadata has unexpected shape at ${shortenHomePath(runJsonPath)}.` };
+	}
+
+	const parentSessionFile = typeof parsed.parentSessionFile === "string" && parsed.parentSessionFile.trim().length > 0
+		? parsed.parentSessionFile.trim()
+		: undefined;
+	const parentSessionId = typeof parsed.parentSessionId === "string" && parsed.parentSessionId.trim().length > 0
+		? parsed.parentSessionId.trim()
+		: undefined;
+
+	return {
+		info: {
+			parentSessionFile,
+			parentSessionId,
+		},
+	};
+}
+
+interface ResolvedParentSession {
+	parentSessionPath: string;
+	parentSessionId?: string;
+	source: "header" | "run-json";
+	runJsonPath?: string;
+}
+
+async function resolveParentSessionForCurrentSession(
+	currentSessionFile: string,
+	entries: SessionEntry[],
+): Promise<{ resolved?: ResolvedParentSession; error?: string; noParent?: boolean }> {
+	const headerParentSession = readSessionHeaderParentSession(entries);
+	if (headerParentSession) {
+		return {
+			resolved: {
+				parentSessionPath: resolveSessionReferencePath(headerParentSession, currentSessionFile),
+				source: "header",
+			},
+		};
+	}
+
+	if (!isLikelyTaskChildSessionFile(currentSessionFile)) {
+		return {
+			noParent: true,
+			error: "Current session has no parentSession header and is not a persisted task child session.",
+		};
+	}
+
+	const runJsonPath = await findTaskRunMetadataFileForChildSession(currentSessionFile);
+	if (!runJsonPath) {
+		return {
+			noParent: true,
+			error: "Current task child session has no run.json metadata nearby, so a parent session cannot be resolved.",
+		};
+	}
+
+	const parentInfo = await readTaskRunParentInfo(runJsonPath);
+	if (parentInfo.error || !parentInfo.info) {
+		return { error: parentInfo.error ?? `Failed to read parent session metadata from ${shortenHomePath(runJsonPath)}.` };
+	}
+
+	if (!parentInfo.info.parentSessionFile) {
+		return {
+			noParent: true,
+			error: `Task run metadata at ${shortenHomePath(runJsonPath)} has no parentSessionFile. This session has no persisted parent to open.`,
+		};
+	}
+
+	return {
+		resolved: {
+			parentSessionPath: resolveSessionReferencePath(parentInfo.info.parentSessionFile, runJsonPath),
+			parentSessionId: parentInfo.info.parentSessionId,
+			source: "run-json",
+			runJsonPath,
+		},
+	};
+}
+
 function cloneSessionEntries(entries: SessionEntry[]): SessionEntry[] {
 	return entries.map((entry) => JSON.parse(JSON.stringify(entry)) as SessionEntry);
 }
@@ -1147,17 +1337,22 @@ async function preflightTaskRun(
 	const needsFork = preparedSteps.some((step) => step.session.mode === "fork");
 
 	let parentSessionFile: string | undefined;
+	let parentSessionId: string | undefined;
 	let parentSnapshot: SessionEntry[] = [];
-	if (needsFork) {
+	let parentBranch: SessionEntry[] | undefined;
+	if (needsPersistedSessions || needsFork) {
 		parentSessionFile = sessionManager.getSessionFile?.();
+		parentBranch = sessionManager.getBranch();
+		parentSessionId = readSessionHeaderId(parentBranch);
+	}
+	if (needsFork) {
 		if (!parentSessionFile) {
 			return { error: "context.mode=\"fork\" requires a parent session file, but the current session is unavailable." };
 		}
-		const branch = sessionManager.getBranch();
-		if (!branch.some((entry) => entry.type === "session")) {
+		if (!parentBranch || !parentBranch.some((entry) => entry.type === "session")) {
 			return { error: "context.mode=\"fork\" requires a valid parent session snapshot, but none was found." };
 		}
-		parentSnapshot = cloneSessionEntries(branch);
+		parentSnapshot = cloneSessionEntries(parentBranch);
 	}
 
 	let sessionRunId: string | undefined;
@@ -1166,7 +1361,8 @@ async function preflightTaskRun(
 
 	if (needsPersistedSessions) {
 		sessionRunId = createTaskRunId();
-		sessionRunRoot = path.join(TASK_SESSION_ROOT, sessionRunId);
+		const persistedSessionRoot = resolvePersistedTaskSessionRoot(parentSessionFile, parentSessionId);
+		sessionRunRoot = path.join(persistedSessionRoot, sessionRunId);
 		sessionStepsRoot = path.join(sessionRunRoot, "steps");
 		try {
 			await fs.promises.mkdir(sessionStepsRoot, { recursive: true });
@@ -1177,6 +1373,8 @@ async function preflightTaskRun(
 				stepCount: preparedSteps.length,
 				persistedStepCount: preparedSteps.filter((step) => step.session.persist).length,
 				parentSessionFile: parentSessionFile ?? null,
+				parentSessionId: parentSessionId ?? null,
+				sessionStorageRoot: persistedSessionRoot,
 			});
 		} catch (error) {
 			return {
@@ -1769,6 +1967,11 @@ function parseTasksCommand(args: string): ParsedTasksCommand {
 		return { scope: "recent", action: "list", error: `Unsupported /tasks arguments: ${args}` };
 	}
 
+	if (lower[0] === "parent") {
+		if (tokens.length === 1) return { scope: "current", action: "parent" };
+		return { scope: "current", action: "parent", error: `Unsupported /tasks arguments: ${args}` };
+	}
+
 	if ((lower[0] === "show" || lower[0] === "open") && tokens.length >= 2) {
 		return {
 			scope: "current",
@@ -2184,6 +2387,13 @@ function manualTaskSessionOpenInstruction(sessionPath: string): string {
 	].join("\n");
 }
 
+function manualParentSessionOpenInstruction(sessionPath: string): string {
+	return [
+		`Parent session path: ${shortenHomePath(sessionPath)}`,
+		`Open manually via /resume, or run: pi --session "${sessionPath}"`,
+	].join("\n");
+}
+
 type TaskSessionWithSessionCallback = (ctx: unknown) => Promise<void> | void;
 
 interface TryOpenTaskSessionOptions {
@@ -2345,7 +2555,7 @@ async function tryOpenTaskSession(
 			try {
 				const result = await Promise.resolve((fn as (...fnArgs: unknown[]) => unknown).call(descriptor.owner, ...args));
 				if (openedWithVerifiedReplacementCtx || isExplicitSessionOpenSuccess(result)) {
-					return { opened: true, message: `Opened child session via ${descriptor.key}.` };
+					return { opened: true, message: `Opened target session via ${descriptor.key}.` };
 				}
 				if (isRecord(result) && (result.cancelled === true || result.canceled === true)) {
 					return { opened: false, message: "Session open canceled." };
@@ -2353,7 +2563,7 @@ async function tryOpenTaskSession(
 				if (result === false) continue;
 			} catch (error) {
 				if (openedWithVerifiedReplacementCtx) {
-					return { opened: true, message: `Opened child session via ${descriptor.key}.` };
+					return { opened: true, message: `Opened target session via ${descriptor.key}.` };
 				}
 				lastError = error instanceof Error ? error.message : String(error);
 			}
@@ -2365,7 +2575,7 @@ async function tryOpenTaskSession(
 	}
 	return {
 		opened: false,
-		message: lastError ? `Failed to open child session automatically: ${lastError}` : "Failed to open child session automatically.",
+		message: lastError ? `Failed to open target session automatically: ${lastError}` : "Failed to open target session automatically.",
 	};
 }
 
@@ -2593,6 +2803,59 @@ export default function (pi: ExtensionAPI) {
 			const parsed = parseTasksCommand(args);
 			if (parsed.error) {
 				ctx.ui.notify(`${parsed.error}. Usage: ${TASKS_COMMAND_USAGE}`, "error");
+				return;
+			}
+
+			if (parsed.action === "parent") {
+				const currentSessionFile = ctx.sessionManager.getSessionFile?.();
+				if (!currentSessionFile) {
+					ctx.ui.notify(
+						"Current session is not persisted. No parent session can be resolved automatically (detached or non-persisted session).",
+						"error",
+					);
+					return;
+				}
+
+				const parentResolution = await resolveParentSessionForCurrentSession(currentSessionFile, ctx.sessionManager.getBranch());
+				if (!parentResolution.resolved) {
+					const baseMessage = parentResolution.error ?? "Failed to resolve parent session.";
+					const guidance = parentResolution.noParent
+						? ""
+						: "\nIf you know the parent session file, open it via /resume or run: pi --session \"<parent-session-file>\"";
+					ctx.ui.notify(`${baseMessage}${guidance}`, "error");
+					return;
+				}
+
+				const parentSessionPath = parentResolution.resolved.parentSessionPath;
+				const normalizedCurrentSessionPath = normalizeSessionPathForComparison(currentSessionFile);
+				const normalizedParentSessionPath = normalizeSessionPathForComparison(parentSessionPath);
+
+				if (normalizedParentSessionPath === normalizedCurrentSessionPath) {
+					ctx.ui.notify("Resolved parent session points to the current session. Refusing to open the same session file.", "error");
+					return;
+				}
+				if (!fs.existsSync(parentSessionPath)) {
+					ctx.ui.notify(
+						`Resolved parent session is missing: ${shortenHomePath(parentSessionPath)}.\n${manualParentSessionOpenInstruction(parentSessionPath)}`,
+						"error",
+					);
+					return;
+				}
+
+				const openedMessage =
+					parentResolution.resolved.source === "header"
+						? "Opened parent session (from child session header)."
+						: "Opened parent session (from task run metadata).";
+
+				const openResult = await tryOpenTaskSession(ctx as unknown, parentSessionPath, {
+					targetSessionId: parentResolution.resolved.parentSessionId,
+					withSession: async (replacementCtx) => {
+						await notifyTaskSessionOpened(replacementCtx, openedMessage);
+					},
+				});
+				if (openResult.opened) return;
+
+				ctx.ui.notify(`${openResult.message}\n${manualParentSessionOpenInstruction(parentSessionPath)}`, "warning");
 				return;
 			}
 
@@ -3285,3 +3548,10 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 }
+
+export const __test__ = {
+	hasRuntimePersistOverride,
+	preflightTaskRun,
+	resolvePersistedTaskSessionRoot,
+	resolveTaskSelector,
+};

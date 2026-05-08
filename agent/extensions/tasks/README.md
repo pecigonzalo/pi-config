@@ -50,9 +50,12 @@ At runtime, `task()` only exposes **context mode shorthand**:
 
 ## 5) Persisted child sessions per step
 
-When effective `persist=true`, each step gets its own child session file under:
+When effective `persist=true`, each step gets its own child session file under Pi's normal session hierarchy (`~/.pi/agent/sessions`).
 
-- `~/.pi/agent/extensions/tasks/sessions/<runId>/steps/<step-label>/child-session.jsonl`
+Path shape:
+
+- parent-derived: `~/.pi/agent/sessions/.../task-runs/<parent-id-or-stem>/<runId>/steps/<step-label>/child-session.jsonl`
+- fallback (no parent session file): `~/.pi/agent/sessions/task-runs/<parent-id-or-detached>/<runId>/steps/<step-label>/child-session.jsonl`
 
 Behavior by mode:
 
@@ -77,6 +80,7 @@ User-visible task results include compact child-session summaries (session id/st
 Supported commands:
 
 - `/tasks` or `/tasks list` (current scope)
+- `/tasks parent`
 - `/tasks recent`
 - `/tasks show <selector>`
 - `/tasks open <selector>`
@@ -87,6 +91,7 @@ Semantics:
 
 - **current scope**: reconstruct task runs from metadata in the current parent session.
 - **recent scope**: reconstruct persisted task runs from recent session files.
+- `parent`: from the current session, open its parent session (via `parentSession` in the child header, or `run.json` fallback for persisted fresh child sessions).
 - `show`: inspect run/step metadata and warnings.
 - `open`: open selected persisted child session (or provide manual open path/instructions if auto-open is unavailable).
 
