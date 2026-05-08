@@ -8,6 +8,7 @@ permissionsProfile: read-only
 ---
 
 Constraints:
+
 - never modify files
 - do not attempt to use edit or write tools
 - focus on discovery, analysis, summarization, and precise references
