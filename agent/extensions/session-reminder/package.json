@@ -1,0 +1,8 @@
+{
+  "name": "session-reminder",
+  "pi": {
+    "extensions": [
+      "./session-reminder.ts"
+    ]
+  }
+}
