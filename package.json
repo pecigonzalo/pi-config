@@ -1,0 +1,6 @@
+{
+  "dependencies": {},
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "v0.73.1"
+  }
+}
