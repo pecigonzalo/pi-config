@@ -155,7 +155,7 @@
           "maximum": 9007199254740991,
           "description": "Row render order; lower numbers render first."
         },
-        "componentSeparator": {
+        "itemSeparator": {
           "type": "string",
           "description": "Separator used between items inside the same section."
         },

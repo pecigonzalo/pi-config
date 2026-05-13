@@ -8,7 +8,7 @@ const layoutsByName: Record<FooterLayoutName, FooterLayoutDefinition> = {
       {
         id: "context",
         order: 10,
-        componentSeparator: " ❯ ",
+        itemSeparator: " ❯ ",
         sectionSeparator: " ❯ ",
       },
     ],
@@ -19,7 +19,7 @@ const layoutsByName: Record<FooterLayoutName, FooterLayoutDefinition> = {
       {
         id: "context",
         order: 10,
-        componentSeparator: " · ",
+        itemSeparator: " · ",
         sectionSeparator: " · ",
       },
     ],
@@ -30,7 +30,7 @@ const layoutsByName: Record<FooterLayoutName, FooterLayoutDefinition> = {
       {
         id: "context",
         order: 10,
-        componentSeparator: " ❯ ",
+        itemSeparator: " ❯ ",
         sectionSeparator: " ❯ ",
       },
     ],
@@ -41,7 +41,7 @@ const layoutsByName: Record<FooterLayoutName, FooterLayoutDefinition> = {
       {
         id: "context",
         order: 10,
-        componentSeparator: " ❯ ",
+        itemSeparator: " ❯ ",
         sectionSeparator: " ❯ ",
       },
     ],

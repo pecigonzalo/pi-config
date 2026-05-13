@@ -18,7 +18,7 @@ export interface FooterPlacement {
 export interface FooterRowDefinition {
   id: string;
   order?: number;
-  componentSeparator: string;
+  itemSeparator: string;
   sectionSeparator: string;
   rightSectionSeparator?: string;
 }

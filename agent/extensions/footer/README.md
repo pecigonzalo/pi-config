@@ -9,7 +9,7 @@ other extensions, and can use the Starship CLI for the left side.
 - Rows are split into sections: `a`, `b`, `c`, `x`, `y`, `z`
 - Built-in layouts: `default`, `minimal`, `compact`, `full`
 - Built-in items: `starship`, `path`, `git`, `agent`, `model`, `thinking`,
-  `context`, `tokens`, `token_in`, `token_out`, `cost`, `time_spent`
+  `context`, `tokens`, `cost`, `time_spent`
 - Shipped defaults live in `agent/extensions/footer/footer.jsonc`
 - User overrides live in `~/.pi/agent/footer.jsonc`
 - Project-local overrides live in `<project>/.pi/footer.jsonc`
@@ -70,6 +70,11 @@ The footer config is resolved in this order:
 1. `~/.pi/agent/footer.jsonc`
 1. `<project>/.pi/footer.jsonc`
 
+The shipped `footer.jsonc` intentionally spells out the shipped `default`
+and `minimal` layouts, including row separators and item placements.
+`compact` and `full` still exist as built-in layouts and fall back to the
+code defaults unless you override them.
+
 Use `agent/extensions/footer/footer.schema.json` for editor completion and
 validation. `agent/footer.jsonc` already includes a relative `$schema`
 reference. For project-local `.pi/footer.jsonc`, point `$schema` at the same
@@ -101,35 +106,35 @@ Example:
     "enabled": true,
     "command": "starship",
     "timeoutMs": 3000,
-    "shell": "bash"
+    "shell": "bash",
   },
   "layouts": {
     "default": {
       "rows": {
         "context": {
-          "rightSectionSeparator": " ❮ "
-        }
-      }
+          "rightSectionSeparator": " ❮ ",
+        },
+      },
     },
     "minimal": {
       "items": {
         "tokens": { "enabled": false },
-        "cost": { "enabled": false }
-      }
+        "cost": { "enabled": false },
+      },
     },
     "full": {
       "rows": {
         "context": {
-          "componentSeparator": " · ",
+          "itemSeparator": " · ",
           "sectionSeparator": " ❯ ",
-          "rightSectionSeparator": " ❮ "
-        }
+          "rightSectionSeparator": " ❮ ",
+        },
       },
       "items": {
-        "time_spent": { "section": "y", "order": 30 }
-      }
-    }
-  }
+        "time_spent": { "section": "y", "order": 30 },
+      },
+    },
+  },
 }
 ```
 
@@ -140,7 +145,7 @@ Example:
 - `starship.command`: command to execute
 - `starship.timeoutMs`: subprocess timeout
 - `starship.shell`: value passed as `STARSHIP_SHELL`
-- `layouts.<name>.rows.<rowId>`: override row separators (`componentSeparator`,
+- `layouts.<name>.rows.<rowId>`: override row separators (`itemSeparator`,
   `sectionSeparator`, optional `rightSectionSeparator`) and order, or add a
   new custom row
 - `layouts.<name>.items.<itemId>`: override `enabled`, `row`, `section`,
@@ -160,13 +165,13 @@ Example:
       "rows": {
         "extra": {
           "order": 20,
-          "componentSeparator": " · ",
+          "itemSeparator": " · ",
           "sectionSeparator": " · ",
-          "rightSectionSeparator": " · "
-        }
-      }
-    }
-  }
+          "rightSectionSeparator": " · ",
+        },
+      },
+    },
+  },
 }
 ```
 
@@ -174,7 +179,7 @@ Then place a custom item on `row: "extra"`.
 
 ## Commands
 
-- `/widgets`: print or change the active layout for the current session
+- `/footer`: print or change the active layout for the current session
 
 ## Starship behavior
 
@@ -195,8 +200,6 @@ If Starship is missing or fails, the footer falls back to the built-in
 - `thinking`
 - `context`
 - `tokens`
-- `token_in`
-- `token_out`
 - `cost`
 - `time_spent`
 

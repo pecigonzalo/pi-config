@@ -47,12 +47,7 @@ const defaultPlacements: Record<SegmentId, Partial<Record<FooterLayoutName, Foot
   },
   tokens: {
     default: { row: "context", section: "y", order: 10 },
-  },
-  token_in: {
     full: { row: "context", section: "y", order: 10 },
-  },
-  token_out: {
-    full: { row: "context", section: "y", order: 20 },
   },
   cost: {
     default: { row: "context", section: "z", order: 10 },
@@ -130,8 +125,6 @@ export function createSessionContextItems(
     createSegmentItem("thinking", controller, config, starship),
     createSegmentItem("context", controller, config, starship),
     createSegmentItem("tokens", controller, config, starship),
-    createSegmentItem("token_in", controller, config, starship),
-    createSegmentItem("token_out", controller, config, starship),
     createSegmentItem("cost", controller, config, starship),
     createSegmentItem("time_spent", controller, config, starship),
   ];

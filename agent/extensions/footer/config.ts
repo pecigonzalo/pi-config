@@ -144,7 +144,7 @@ function mergeRowOverride(
 
   return {
     order: override?.order ?? base?.order,
-    componentSeparator: override?.componentSeparator ?? base?.componentSeparator,
+    itemSeparator: override?.itemSeparator ?? base?.itemSeparator,
     sectionSeparator: override?.sectionSeparator ?? base?.sectionSeparator,
     rightSectionSeparator: override?.rightSectionSeparator ?? base?.rightSectionSeparator,
   };
@@ -247,7 +247,7 @@ export class FooterConfigController {
         rowsById.set(row.id, {
           id: row.id,
           order: rowOverride?.order ?? row.order,
-          componentSeparator: rowOverride?.componentSeparator ?? row.componentSeparator,
+          itemSeparator: rowOverride?.itemSeparator ?? row.itemSeparator,
           sectionSeparator: rowOverride?.sectionSeparator ?? row.sectionSeparator,
           rightSectionSeparator: rowOverride?.rightSectionSeparator ?? row.rightSectionSeparator,
         });
@@ -258,7 +258,7 @@ export class FooterConfigController {
         rowsById.set(rowId, {
           id: rowId,
           order: rowOverride.order,
-          componentSeparator: rowOverride.componentSeparator ?? " ",
+          itemSeparator: rowOverride.itemSeparator ?? " ",
           sectionSeparator: rowOverride.sectionSeparator ?? " ",
           rightSectionSeparator: rowOverride.rightSectionSeparator,
         });

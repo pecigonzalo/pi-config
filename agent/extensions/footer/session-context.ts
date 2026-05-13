@@ -201,8 +201,6 @@ export type SegmentId =
   | "thinking"
   | "context"
   | "tokens"
-  | "token_in"
-  | "token_out"
   | "cost"
   | "time_spent";
 
@@ -324,16 +322,17 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
             xhigh: "xhi",
           };
           const value = `think:${label[thinkingLevel] ?? thinkingLevel}`;
-          const colors: Record<string, string> = {
+          const colors = {
             minimal: "thinkingMinimal",
             low: "thinkingLow",
             medium: "thinkingMedium",
             high: "thinkingHigh",
             xhigh: "thinkingXhigh",
-          };
+          } as const;
+          const color = colors[thinkingLevel as keyof typeof colors] ?? "muted";
           return thinkingLevel === "high" || thinkingLevel === "xhigh"
             ? rainbow(value)
-            : theme.fg(colors[thinkingLevel] ?? "muted", value);
+            : theme.fg(color, value);
         }
 
         case "context": {
@@ -345,12 +344,6 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
 
         case "tokens":
           return tokIn || tokOut ? theme.fg("muted", `${icons.tokIn} ${fmtNum(tokIn)} ${icons.tokOut} ${fmtNum(tokOut)}`) : null;
-
-        case "token_in":
-          return tokIn ? theme.fg("muted", `${icons.tokIn} ${fmtNum(tokIn)}`) : null;
-
-        case "token_out":
-          return tokOut ? theme.fg("muted", `${icons.tokOut} ${fmtNum(tokOut)}`) : null;
 
         case "cost":
           return cost ? theme.fg("text", `${icons.cost}${cost.toFixed(3)}`) : null;

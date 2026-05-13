@@ -42,7 +42,7 @@ export const footerItemOverrideSchema = z.object({
 
 export const footerRowOverrideSchema = z.object({
   order: z.number().int().describe("Row render order; lower numbers render first.").catch(undefined).optional(),
-  componentSeparator: z
+  itemSeparator: z
     .string()
     .describe("Separator used between items inside the same section.")
     .catch(undefined)

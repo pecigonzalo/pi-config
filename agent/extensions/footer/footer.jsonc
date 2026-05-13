@@ -1,32 +1,129 @@
 {
   "$schema": "./footer.schema.json",
-
   // Shipped defaults for the `footer` extension.
   // User overrides live in: ~/.pi/agent/footer.jsonc
   // Project-local overrides live in: <project>/.pi/footer.jsonc
-
+  // This file intentionally spells out the shipped default/minimal layouts.
+  // compact/full continue to use the built-in code defaults unless overridden.
   "layout": "default",
-
   "starship": {
     "enabled": true,
     "command": "starship",
     "timeoutMs": 3000,
-    "shell": "bash"
+    "shell": "bash",
   },
-
+  // Built-in item ids: starship, path, git, agent, model, thinking,
+  // context, tokens, cost, time_spent
   "layouts": {
     "default": {
       "rows": {
         "context": {
-          "rightSectionSeparator": " ❮ "
-        }
-      }
+          "order": 10,
+          "itemSeparator": " ❯ ",
+          "sectionSeparator": " ❯ ",
+          "rightSectionSeparator": " ❮ ",
+        },
+      },
+      "items": {
+        "starship": {
+          "row": "context",
+          "section": "a",
+          "order": 5,
+        },
+        "path": {
+          "row": "context",
+          "section": "a",
+          "order": 10,
+        },
+        "git": {
+          "row": "context",
+          "section": "b",
+          "order": 10,
+        },
+        "agent": {
+          "row": "context",
+          "section": "c",
+          "order": 10,
+        },
+        "model": {
+          "row": "context",
+          "section": "c",
+          "order": 20,
+        },
+        "thinking": {
+          "row": "context",
+          "section": "c",
+          "order": 30,
+        },
+        "context": {
+          "row": "context",
+          "section": "x",
+          "order": 10,
+        },
+        "tokens": {
+          "row": "context",
+          "section": "y",
+          "order": 10,
+        },
+        "cost": {
+          "row": "context",
+          "section": "z",
+          "order": 10,
+        },
+        "time_spent": {
+          "enabled": false,
+        },
+      },
     },
     "minimal": {
+      "rows": {
+        "context": {
+          "order": 10,
+          "itemSeparator": " · ",
+          "sectionSeparator": " · ",
+          "rightSectionSeparator": " · ",
+        },
+      },
       "items": {
-        "tokens": { "enabled": false },
-        "cost": { "enabled": false }
-      }
-    }
-  }
+        "starship": {
+          "row": "context",
+          "section": "a",
+          "order": 5,
+        },
+        "path": {
+          "row": "context",
+          "section": "a",
+          "order": 10,
+        },
+        "git": {
+          "row": "context",
+          "section": "b",
+          "order": 10,
+        },
+        "agent": {
+          "enabled": false,
+        },
+        "model": {
+          "enabled": false,
+        },
+        "thinking": {
+          "enabled": false,
+        },
+        "context": {
+          "row": "context",
+          "section": "z",
+          "order": 10,
+        },
+        "tokens": {
+          "enabled": false,
+        },
+        "cost": {
+          "enabled": false,
+        },
+        "time_spent": {
+          "enabled": false,
+        },
+      },
+    },
+  },
 }

@@ -34,7 +34,7 @@ function renderSection(
     .map(({ item }) => item.render(renderContext))
     .filter((part): part is string => Boolean(part));
 
-  return parts.join(row.componentSeparator);
+  return parts.join(row.itemSeparator);
 }
 
 function collectRowItems(
