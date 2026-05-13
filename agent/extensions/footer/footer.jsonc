@@ -1,0 +1,32 @@
+{
+  "$schema": "./footer.schema.json",
+
+  // Shipped defaults for the `footer` extension.
+  // User overrides live in: ~/.pi/agent/footer.jsonc
+  // Project-local overrides live in: <project>/.pi/footer.jsonc
+
+  "layout": "default",
+
+  "starship": {
+    "enabled": true,
+    "command": "starship",
+    "timeoutMs": 3000,
+    "shell": "bash"
+  },
+
+  "layouts": {
+    "default": {
+      "rows": {
+        "context": {
+          "rightSectionSeparator": " ❮ "
+        }
+      }
+    },
+    "minimal": {
+      "items": {
+        "tokens": { "enabled": false },
+        "cost": { "enabled": false }
+      }
+    }
+  }
+}

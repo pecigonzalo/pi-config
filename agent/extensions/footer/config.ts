@@ -1,90 +1,29 @@
 import { getAgentDir, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type {
-  FooterLayoutDefinition,
-  FooterLayoutName,
-  FooterPlacement,
-  FooterRowDefinition,
-  FooterSection,
-} from "./core/types";
+import { FOOTER_LAYOUT_NAMES } from "./constants";
+import type { FooterLayoutDefinition, FooterLayoutName, FooterPlacement, FooterRowDefinition } from "./core/types";
+import {
+  DEFAULT_FOOTER_CONFIG,
+  footerConfigFileSchema,
+  footerConfigSchema,
+  type FooterConfig,
+  type FooterConfigFile,
+  type FooterItemOverride,
+  type FooterLayoutOverride,
+  type FooterLayoutOverrideFile,
+  type FooterRowOverride,
+  type FooterStarshipSettings,
+} from "./schema";
 
-interface FooterStarshipConfigFile {
-  enabled?: boolean;
-  command?: string;
-  timeoutMs?: number;
-  shell?: string;
-}
-
-interface FooterItemOverrideFile {
-  enabled?: boolean;
-  row?: string;
-  section?: FooterSection;
-  order?: number;
-}
-
-interface FooterRowOverrideFile {
-  order?: number;
-  componentSeparator?: string;
-  sectionSeparator?: string;
-}
-
-interface FooterLayoutOverrideFile {
-  items?: Record<string, FooterItemOverrideFile>;
-  rows?: Record<string, FooterRowOverrideFile>;
-}
-
-interface FooterConfigFile {
-  layout?: FooterLayoutName;
-  starship?: FooterStarshipConfigFile;
-  layouts?: Partial<Record<FooterLayoutName, FooterLayoutOverrideFile>>;
-}
-
-export interface FooterStarshipSettings {
-  enabled: boolean;
-  command: string;
-  timeoutMs: number;
-  shell: string;
-}
-
-export interface FooterItemOverride {
-  enabled?: boolean;
-  row?: string;
-  section?: FooterSection;
-  order?: number;
-}
-
-export interface FooterRowOverride {
-  order?: number;
-  componentSeparator?: string;
-  sectionSeparator?: string;
-}
-
-export interface FooterLayoutOverride {
-  items: Record<string, FooterItemOverride>;
-  rows: Record<string, FooterRowOverride>;
-}
-
-export interface FooterConfig {
-  layout: FooterLayoutName;
-  starship: FooterStarshipSettings;
-  layouts: Partial<Record<FooterLayoutName, FooterLayoutOverride>>;
-}
-
-const defaultFooterConfig: FooterConfig = {
-  layout: "default",
-  starship: {
-    enabled: true,
-    command: "starship",
-    timeoutMs: 3_000,
-    shell: "bash",
-  },
-  layouts: {},
-};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+export type {
+  FooterConfig,
+  FooterConfigFile,
+  FooterItemOverride,
+  FooterLayoutOverride,
+  FooterRowOverride,
+  FooterStarshipSettings,
+} from "./schema";
 
 function parseJsonc(text: string): unknown {
   let noComments = "";
@@ -177,108 +116,97 @@ function parseJsonc(text: string): unknown {
 function readJsonFile(filePath: string): FooterConfigFile {
   try {
     const parsed = parseJsonc(fs.readFileSync(filePath, "utf-8"));
-    return isRecord(parsed) ? (parsed as FooterConfigFile) : {};
+    return footerConfigFileSchema.parse(parsed);
   } catch {
     return {};
   }
 }
 
-function clampPositiveInt(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
-}
-
-function parseLayoutName(value: unknown, fallback: FooterLayoutName): FooterLayoutName {
-  return value === "default" || value === "minimal" || value === "compact" || value === "full" ? value : fallback;
-}
-
-function parseFooterSection(value: unknown, fallback?: FooterSection): FooterSection | undefined {
-  return value === "a" || value === "b" || value === "c" || value === "x" || value === "y" || value === "z"
-    ? value
-    : fallback;
-}
-
-function parseRowOverride(value: unknown, fallback: FooterRowOverride = {}): FooterRowOverride {
-  if (!isRecord(value)) return fallback;
+function mergeItemOverride(
+  base: FooterItemOverride | undefined,
+  override: FooterItemOverride | undefined,
+): FooterItemOverride | undefined {
+  if (!base && !override) return undefined;
 
   return {
-    order: typeof value.order === "number" ? value.order : fallback.order,
-    componentSeparator:
-      typeof value.componentSeparator === "string" ? value.componentSeparator : fallback.componentSeparator,
-    sectionSeparator: typeof value.sectionSeparator === "string" ? value.sectionSeparator : fallback.sectionSeparator,
+    enabled: override?.enabled ?? base?.enabled,
+    row: override?.row ?? base?.row,
+    section: override?.section ?? base?.section,
+    order: override?.order ?? base?.order,
   };
 }
 
-function parseItemOverride(value: unknown, fallback: FooterItemOverride = {}): FooterItemOverride {
-  if (!isRecord(value)) return fallback;
+function mergeRowOverride(
+  base: FooterRowOverride | undefined,
+  override: FooterRowOverride | undefined,
+): FooterRowOverride | undefined {
+  if (!base && !override) return undefined;
 
   return {
-    enabled: typeof value.enabled === "boolean" ? value.enabled : fallback.enabled,
-    row: typeof value.row === "string" ? value.row : fallback.row,
-    section: parseFooterSection(value.section, fallback.section),
-    order: typeof value.order === "number" ? value.order : fallback.order,
+    order: override?.order ?? base?.order,
+    componentSeparator: override?.componentSeparator ?? base?.componentSeparator,
+    sectionSeparator: override?.sectionSeparator ?? base?.sectionSeparator,
+    rightSectionSeparator: override?.rightSectionSeparator ?? base?.rightSectionSeparator,
   };
 }
 
-function parseLayoutOverrides(
-  value: unknown,
-  fallback: Partial<Record<FooterLayoutName, FooterLayoutOverride>> = {},
-): Partial<Record<FooterLayoutName, FooterLayoutOverride>> {
-  const result: Partial<Record<FooterLayoutName, FooterLayoutOverride>> = { ...fallback };
-  if (!isRecord(value)) return result;
+function mergeLayoutOverride(
+  base: FooterLayoutOverride | undefined,
+  override: FooterLayoutOverrideFile | undefined,
+): FooterLayoutOverride | undefined {
+  if (!base && !override) return undefined;
 
-  for (const layoutName of ["default", "minimal", "compact", "full"] as const) {
-    const override = value[layoutName];
-    if (!isRecord(override)) continue;
-
-    const nextRows: Record<string, FooterRowOverride> = { ...(fallback[layoutName]?.rows ?? {}) };
-    if (isRecord(override.rows)) {
-      for (const [rowId, rowValue] of Object.entries(override.rows)) {
-        nextRows[rowId] = parseRowOverride(rowValue, nextRows[rowId]);
-      }
-    }
-
-    const nextItems: Record<string, FooterItemOverride> = { ...(fallback[layoutName]?.items ?? {}) };
-    if (isRecord(override.items)) {
-      for (const [itemId, itemValue] of Object.entries(override.items)) {
-        nextItems[itemId] = parseItemOverride(itemValue, nextItems[itemId]);
-      }
-    }
-
-    result[layoutName] = {
-      rows: nextRows,
-      items: nextItems,
-    };
+  const items: Record<string, FooterItemOverride> = { ...(base?.items ?? {}) };
+  for (const [itemId, itemOverride] of Object.entries(override?.items ?? {})) {
+    items[itemId] = mergeItemOverride(items[itemId], itemOverride) ?? {};
   }
 
-  return result;
-}
-
-function parseFooterConfig(raw: FooterConfigFile, fallback: FooterConfig = defaultFooterConfig): FooterConfig {
-  const starship = isRecord(raw.starship) ? raw.starship : {};
+  const rows: Record<string, FooterRowOverride> = { ...(base?.rows ?? {}) };
+  for (const [rowId, rowOverride] of Object.entries(override?.rows ?? {})) {
+    rows[rowId] = mergeRowOverride(rows[rowId], rowOverride) ?? {};
+  }
 
   return {
-    layout: parseLayoutName(raw.layout, fallback.layout),
-    starship: {
-      enabled: typeof starship.enabled === "boolean" ? starship.enabled : fallback.starship.enabled,
-      command:
-        typeof starship.command === "string" && starship.command.trim()
-          ? starship.command.trim()
-          : fallback.starship.command,
-      timeoutMs: clampPositiveInt(starship.timeoutMs, fallback.starship.timeoutMs),
-      shell:
-        typeof starship.shell === "string" && starship.shell.trim() ? starship.shell.trim() : fallback.starship.shell,
-    },
-    layouts: parseLayoutOverrides(raw.layouts, fallback.layouts),
+    items,
+    rows,
   };
+}
+
+function mergeLayouts(base: FooterConfig["layouts"], override: FooterConfigFile["layouts"] | undefined): FooterConfig["layouts"] {
+  const layouts: FooterConfig["layouts"] = {};
+
+  for (const layoutName of FOOTER_LAYOUT_NAMES) {
+    const nextLayout = mergeLayoutOverride(base[layoutName], override?.[layoutName]);
+    if (nextLayout) layouts[layoutName] = nextLayout;
+  }
+
+  return layouts;
+}
+
+function mergeFooterConfig(base: FooterConfig, override: FooterConfigFile): FooterConfig {
+  return footerConfigSchema.parse({
+    layout: override.layout ?? base.layout,
+    starship: {
+      enabled: override.starship?.enabled ?? base.starship.enabled,
+      command: override.starship?.command ?? base.starship.command,
+      timeoutMs: override.starship?.timeoutMs ?? base.starship.timeoutMs,
+      shell: override.starship?.shell ?? base.starship.shell,
+    },
+    layouts: mergeLayouts(base.layouts, override.layouts),
+  });
 }
 
 export function loadFooterConfig(cwd: string): FooterConfig {
-  const globalConfig = parseFooterConfig(readJsonFile(path.join(getAgentDir(), "footer.jsonc")), defaultFooterConfig);
-  return parseFooterConfig(readJsonFile(path.join(cwd, ".pi", "footer.jsonc")), globalConfig);
+  const extensionConfig = mergeFooterConfig(
+    DEFAULT_FOOTER_CONFIG,
+    readJsonFile(path.join(getAgentDir(), "extensions", "footer", "footer.jsonc")),
+  );
+  const globalConfig = mergeFooterConfig(extensionConfig, readJsonFile(path.join(getAgentDir(), "footer.jsonc")));
+  return mergeFooterConfig(globalConfig, readJsonFile(path.join(cwd, ".pi", "footer.jsonc")));
 }
 
 export class FooterConfigController {
-  private config: FooterConfig = defaultFooterConfig;
+  private config: FooterConfig = DEFAULT_FOOTER_CONFIG;
 
   onSessionStart(ctx: ExtensionContext): void {
     this.config = loadFooterConfig(ctx.cwd);
@@ -321,6 +249,7 @@ export class FooterConfigController {
           order: rowOverride?.order ?? row.order,
           componentSeparator: rowOverride?.componentSeparator ?? row.componentSeparator,
           sectionSeparator: rowOverride?.sectionSeparator ?? row.sectionSeparator,
+          rightSectionSeparator: rowOverride?.rightSectionSeparator ?? row.rightSectionSeparator,
         });
       }
 
@@ -331,6 +260,7 @@ export class FooterConfigController {
           order: rowOverride.order,
           componentSeparator: rowOverride.componentSeparator ?? " ",
           sectionSeparator: rowOverride.sectionSeparator ?? " ",
+          rightSectionSeparator: rowOverride.rightSectionSeparator,
         });
       }
 

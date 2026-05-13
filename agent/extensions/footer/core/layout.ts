@@ -71,7 +71,7 @@ function buildRowContent(
     .join(row.sectionSeparator);
   const right = RIGHT_SECTIONS.map((section) => renderSection(sections.get(section) ?? [], row, renderContext))
     .filter(Boolean)
-    .join(row.sectionSeparator);
+    .join(row.rightSectionSeparator ?? row.sectionSeparator);
 
   if (left && right) return `${left}\u0000${right}`;
   return left || right;

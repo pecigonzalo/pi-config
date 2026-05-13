@@ -1,3 +1,4 @@
+import { FOOTER_LAYOUT_NAMES } from "./constants";
 import type { FooterLayoutDefinition, FooterLayoutName } from "./core/types";
 
 const layoutsByName: Record<FooterLayoutName, FooterLayoutDefinition> = {
@@ -47,5 +48,5 @@ const layoutsByName: Record<FooterLayoutName, FooterLayoutDefinition> = {
   },
 };
 
-export const footerLayoutNames: FooterLayoutName[] = ["default", "minimal", "compact", "full"];
+export const footerLayoutNames: FooterLayoutName[] = [...FOOTER_LAYOUT_NAMES];
 export const footerLayouts: FooterLayoutDefinition[] = footerLayoutNames.map((name) => layoutsByName[name]);

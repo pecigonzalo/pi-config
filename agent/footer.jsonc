@@ -1,28 +1,7 @@
 {
-  // Global defaults for the `footer` extension.
+  "$schema": "./extensions/footer/footer.schema.json",
+
+  // Global overrides for the `footer` extension.
+  // Shipped defaults live in: ./extensions/footer/footer.jsonc
   // Project-local overrides can live in: <project>/.pi/footer.jsonc
-
-  // Active layout when a session starts.
-  "layout": "default",
-
-  // Use Starship for the left side when available.
-  // If Starship fails, built-in path/git stay visible.
-  "starship": {
-    "enabled": true,
-    "command": "starship",
-    "timeoutMs": 3000,
-    "shell": "bash"
-  },
-
-  // Per-layout row and item overrides.
-  // Built-in item ids: starship, path, git, agent, model, thinking,
-  // context, tokens, token_in, token_out, cost, time_spent
-  "layouts": {
-    "minimal": {
-      "items": {
-        "tokens": { "enabled": false },
-        "cost": { "enabled": false }
-      }
-    }
-  }
 }

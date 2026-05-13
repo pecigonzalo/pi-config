@@ -1,7 +1,8 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { FOOTER_LAYOUT_NAMES, FOOTER_SECTIONS } from "../constants";
 
-export type FooterSection = "a" | "b" | "c" | "x" | "y" | "z";
-export type FooterLayoutName = "default" | "minimal" | "compact" | "full";
+export type FooterSection = (typeof FOOTER_SECTIONS)[number];
+export type FooterLayoutName = (typeof FOOTER_LAYOUT_NAMES)[number];
 
 export interface FooterTheme {
   fg(name: string, text: string): string;
@@ -19,6 +20,7 @@ export interface FooterRowDefinition {
   order?: number;
   componentSeparator: string;
   sectionSeparator: string;
+  rightSectionSeparator?: string;
 }
 
 export interface FooterLayoutDefinition {

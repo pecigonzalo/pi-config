@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional JSON Schema reference used by editors."
+    },
+    "layout": {
+      "type": "string",
+      "enum": [
+        "default",
+        "minimal",
+        "compact",
+        "full"
+      ],
+      "description": "Active layout when a session starts."
+    },
+    "starship": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "$ref": "#/$defs/__schema0"
+        },
+        "command": {
+          "$ref": "#/$defs/__schema1"
+        },
+        "timeoutMs": {
+          "$ref": "#/$defs/__schema2"
+        },
+        "shell": {
+          "$ref": "#/$defs/__schema3"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Starship command settings."
+    },
+    "layouts": {
+      "type": "object",
+      "properties": {
+        "default": {
+          "$ref": "#/$defs/__schema4"
+        },
+        "minimal": {
+          "$ref": "#/$defs/__schema10"
+        },
+        "compact": {
+          "$ref": "#/$defs/__schema11"
+        },
+        "full": {
+          "$ref": "#/$defs/__schema12"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Per-layout row and item overrides."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "__schema0": {
+      "type": "boolean",
+      "description": "Enable or disable the Starship item."
+    },
+    "__schema1": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Command used to invoke Starship."
+    },
+    "__schema2": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991,
+      "description": "Maximum time to wait for the Starship process in milliseconds."
+    },
+    "__schema3": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Value passed as STARSHIP_SHELL."
+    },
+    "__schema4": {
+      "$ref": "#/$defs/__schema5"
+    },
+    "__schema5": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/__schema6"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema7"
+          },
+          "description": "Per-item overrides keyed by item id."
+        },
+        "rows": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/__schema8"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema9"
+          },
+          "description": "Per-row overrides keyed by row id."
+        }
+      },
+      "additionalProperties": false
+    },
+    "__schema6": {
+      "type": "string"
+    },
+    "__schema7": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable or disable the item for this layout."
+        },
+        "row": {
+          "type": "string",
+          "description": "Row id where the item should render."
+        },
+        "section": {
+          "type": "string",
+          "enum": [
+            "a",
+            "b",
+            "c",
+            "x",
+            "y",
+            "z"
+          ],
+          "description": "Footer section for this item."
+        },
+        "order": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991,
+          "description": "Sort order within the row section."
+        }
+      },
+      "additionalProperties": false
+    },
+    "__schema8": {
+      "type": "string"
+    },
+    "__schema9": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "order": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991,
+          "description": "Row render order; lower numbers render first."
+        },
+        "componentSeparator": {
+          "type": "string",
+          "description": "Separator used between items inside the same section."
+        },
+        "sectionSeparator": {
+          "type": "string",
+          "description": "Separator used between left-side sections and, by default, right-side sections."
+        },
+        "rightSectionSeparator": {
+          "type": "string",
+          "description": "Optional separator used only between right-side sections (`x`, `y`, `z`)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "__schema10": {
+      "$ref": "#/$defs/__schema5"
+    },
+    "__schema11": {
+      "$ref": "#/$defs/__schema5"
+    },
+    "__schema12": {
+      "$ref": "#/$defs/__schema5"
+    }
+  },
+  "$id": "https://pi.local/schemas/footer.schema.json",
+  "title": "Pi footer configuration",
+  "description": "Configuration for the footer extension."
+}

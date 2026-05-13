@@ -1,0 +1,12 @@
+{
+  "name": "footer",
+  "scripts": {
+    "generate:footer-schema": "bun run ./generate-schema.ts"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

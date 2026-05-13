@@ -10,7 +10,11 @@ other extensions, and can use the Starship CLI for the left side.
 - Built-in layouts: `default`, `minimal`, `compact`, `full`
 - Built-in items: `starship`, `path`, `git`, `agent`, `model`, `thinking`,
   `context`, `tokens`, `token_in`, `token_out`, `cost`, `time_spent`
-- Config lives in `~/.pi/agent/footer.jsonc` or `<project>/.pi/footer.jsonc`
+- Shipped defaults live in `agent/extensions/footer/footer.jsonc`
+- User overrides live in `~/.pi/agent/footer.jsonc`
+- Project-local overrides live in `<project>/.pi/footer.jsonc`
+- JSON Schema lives in `agent/extensions/footer/footer.schema.json`
+- Zod source of truth lives in `agent/extensions/footer/schema.ts`
 
 ## Registering a custom footer item
 
@@ -58,6 +62,34 @@ The public helper API is:
 - `invalidateFooterItem(...)`
 - `activateFooterLayout(...)`
 
+## Defaults and schema
+
+The footer config is resolved in this order:
+
+1. `agent/extensions/footer/footer.jsonc`
+1. `~/.pi/agent/footer.jsonc`
+1. `<project>/.pi/footer.jsonc`
+
+Use `agent/extensions/footer/footer.schema.json` for editor completion and
+validation. `agent/footer.jsonc` already includes a relative `$schema`
+reference. For project-local `.pi/footer.jsonc`, point `$schema` at the same
+schema file or configure your editor to associate `.pi/footer.jsonc` with it.
+
+`agent/extensions/footer/schema.ts` is the source of truth for both runtime
+validation and the generated JSON Schema. The footer extension keeps its own
+`package.json` and `bun.lock` so the schema tooling stays self-contained.
+Regenerate the schema after changing it:
+
+```bash
+cd agent/extensions/footer && bun run generate:footer-schema
+```
+
+From the repo root, you can use the convenience pointer:
+
+```bash
+bun run generate:footer-schema
+```
+
 ## Configuration
 
 Example:
@@ -72,6 +104,13 @@ Example:
     "shell": "bash"
   },
   "layouts": {
+    "default": {
+      "rows": {
+        "context": {
+          "rightSectionSeparator": " ❮ "
+        }
+      }
+    },
     "minimal": {
       "items": {
         "tokens": { "enabled": false },
@@ -82,7 +121,8 @@ Example:
       "rows": {
         "context": {
           "componentSeparator": " · ",
-          "sectionSeparator": " ❯ "
+          "sectionSeparator": " ❯ ",
+          "rightSectionSeparator": " ❮ "
         }
       },
       "items": {
@@ -100,7 +140,8 @@ Example:
 - `starship.command`: command to execute
 - `starship.timeoutMs`: subprocess timeout
 - `starship.shell`: value passed as `STARSHIP_SHELL`
-- `layouts.<name>.rows.<rowId>`: override row separators and order, or add a
+- `layouts.<name>.rows.<rowId>`: override row separators (`componentSeparator`,
+  `sectionSeparator`, optional `rightSectionSeparator`) and order, or add a
   new custom row
 - `layouts.<name>.items.<itemId>`: override `enabled`, `row`, `section`,
   `order`
@@ -120,7 +161,8 @@ Example:
         "extra": {
           "order": 20,
           "componentSeparator": " · ",
-          "sectionSeparator": " · "
+          "sectionSeparator": " · ",
+          "rightSectionSeparator": " · "
         }
       }
     }
@@ -162,4 +204,8 @@ If Starship is missing or fails, the footer falls back to the built-in
 
 - `agent/extensions/footer/core/api.ts`
 - `agent/extensions/footer/config.ts`
+- `agent/extensions/footer/schema.ts`
+- `agent/extensions/footer/generate-schema.ts`
+- `agent/extensions/footer/footer.jsonc`
+- `agent/extensions/footer/footer.schema.json`
 - `agent/footer.jsonc`
