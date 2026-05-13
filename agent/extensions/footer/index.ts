@@ -49,17 +49,6 @@ export default function footer(pi: ExtensionAPI) {
     footerManager.onThinkingLevelSelect(event as { level: string; previousLevel?: string });
   });
 
-  pi.on("input", async (event, ctx) => footerManager.onInput(event as { text?: unknown }, ctx));
-
-  pi.on("before_agent_start", (event, ctx) => {
-    footerManager.onBeforeAgentStart(event as { prompt: string }, ctx);
-    return undefined;
-  });
-
-  pi.on("agent_end", async (_event, ctx) => {
-    footerManager.onAgentEnd(ctx);
-  });
-
   pi.registerCommand("widgets", {
     description: "Switch footer layout preset: default / minimal / compact / full",
     getArgumentCompletions: () => footerLayoutNames.map((preset) => ({ value: preset, label: preset })),

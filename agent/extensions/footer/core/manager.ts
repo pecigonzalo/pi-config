@@ -183,23 +183,6 @@ export class FooterManager {
     this.requestRender?.();
   }
 
-  onInput(event: { text?: unknown }, ctx: ExtensionContext): { action: "continue" } {
-    for (const item of this.items.values()) {
-      item.onInput?.(event, ctx);
-    }
-    return { action: "continue" };
-  }
-
-  onBeforeAgentStart(event: { prompt: string }, ctx: ExtensionContext): void {
-    for (const item of this.items.values()) item.onBeforeAgentStart?.(event, ctx);
-  }
-
-  onAgentEnd(ctx: ExtensionContext): void {
-    this.chrome.refresh(ctx);
-    for (const item of this.items.values()) item.onAgentEnd?.(ctx);
-    this.requestRender?.();
-  }
-
   onSessionShutdown(ctx: ExtensionContext): void {
     for (const item of this.items.values()) item.onSessionShutdown?.(ctx);
     this.unmount(ctx);

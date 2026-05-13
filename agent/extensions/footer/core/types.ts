@@ -34,14 +34,6 @@ export interface FooterItemRenderContext {
   width: number;
 }
 
-export interface FooterInputEvent {
-  text?: unknown;
-}
-
-export interface FooterBeforeAgentStartEvent {
-  prompt: string;
-}
-
 export interface FooterToolResultEvent {
   toolName: string;
   input?: unknown;
@@ -64,9 +56,6 @@ export interface FooterItem {
   onModelSelect?(): void;
   onThinkingLevelSelect?(event: FooterThinkingLevelEvent): void;
   onToolResult?(event: FooterToolResultEvent): void;
-  onInput?(event: FooterInputEvent, ctx: ExtensionContext): { action: "continue" } | undefined;
-  onBeforeAgentStart?(event: FooterBeforeAgentStartEvent, ctx: ExtensionContext): void;
-  onAgentEnd?(ctx: ExtensionContext): void;
   onSessionShutdown?(ctx: ExtensionContext): void;
 }
 
