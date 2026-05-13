@@ -2,30 +2,27 @@
   // Global defaults for the `footer` extension.
   // Project-local overrides can live in: <project>/.pi/footer.jsonc
 
-  // Set false to disable background title generation.
-  "enabled": true,
+  // Active layout when a session starts.
+  "layout": "default",
 
-  // Model used for the small background title-generation call.
-  // You can use either "provider/model-id" or { provider, id }.
-  // Aliases also supported: "smallModel", "small_model"
-  "model": "github-copilot/claude-haiku-4.5",
+  // Use Starship for the left side when available.
+  // If Starship fails, built-in path/git stay visible.
+  "starship": {
+    "enabled": true,
+    "command": "starship",
+    "timeoutMs": 3000,
+    "shell": "bash"
+  },
 
-  // If the configured model is unavailable or lacks credentials,
-  // fall back to the currently selected session model.
-  "fallbackToCurrentModel": true,
-
-  // System prompt sent to the title model.
-  "prompt": "Generate a concise title for this coding task.\n\nRules:\n- 3 to 7 words\n- no quotes\n- no markdown\n- no ending punctuation\n- specific to the user request\n- if the request is short or ambiguous, still produce the best useful title you can\n- never ask for more information\n- output the title only",
-
-  // How much of the user prompt to send to the title model.
-  "maxPromptChars": 4000,
-
-  // Maximum length for the generated title after normalization.
-  "maxTitleChars": 80,
-
-  // Also persist the generated title as the session name.
-  "setSessionName": true,
-
-  // Prefix used for the terminal/tab title.
-  "titlePrefix": "pi - "
+  // Per-layout row and item overrides.
+  // Built-in item ids: starship, path, git, agent, model, thinking,
+  // context, tokens, token_in, token_out, cost, time_spent
+  "layouts": {
+    "minimal": {
+      "items": {
+        "tokens": { "enabled": false },
+        "cost": { "enabled": false }
+      }
+    }
+  }
 }
