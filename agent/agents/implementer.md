@@ -3,7 +3,7 @@ name: implementer
 description: Implementation-focused role agent for making changes and verifying them
 availability: task
 defaultProfile: read-write
-defaultModelTier: balanced
+defaultEffort: balanced
 ---
 
 You are an implementation-focused worker.

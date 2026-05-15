@@ -1,5 +1,5 @@
 /**
- * Agent/profile/model-tier discovery and configuration
+ * Agent/profile/effort discovery and configuration
  */
 
 import * as fs from "node:fs";
@@ -36,7 +36,7 @@ export interface AgentConfig {
 	enabled: boolean;
 	availability: AgentAvailability;
 	defaultProfile?: string;
-	defaultModelTier?: string;
+	defaultEffort?: string;
 	defaultSkills?: string[];
 	tools?: string[];
 	model?: string;
@@ -67,7 +67,7 @@ export interface ProfileConfig {
 	filePath: string;
 }
 
-export interface ModelTierConfig {
+export interface EffortConfig {
 	name: string;
 	description?: string;
 	model: string;
@@ -87,14 +87,15 @@ export interface ProfileDiscoveryResult {
 	projectProfilesDir: string | null;
 }
 
-export interface ModelTierDiscoveryResult {
-	modelTiers: ModelTierConfig[];
-	projectModelTiersFile: string | null;
+export interface EffortDiscoveryResult {
+	efforts: EffortConfig[];
+	projectTasksFile: string | null;
 }
 
 export interface TasksConfigDefaults {
 	context?: ContextDefaults;
 	persist?: boolean;
+	efforts?: EffortConfig[];
 	source: ConfigSource;
 	filePath: string;
 }
@@ -102,14 +103,13 @@ export interface TasksConfigDefaults {
 export interface ResourceDiscoveryResult {
 	agents: AgentConfig[];
 	profiles: ProfileConfig[];
-	modelTiers: ModelTierConfig[];
+	efforts: EffortConfig[];
 	globalTasksConfig: TasksConfigDefaults | null;
 	projectTasksConfig: TasksConfigDefaults | null;
 	globalTasksFile: string;
 	projectTasksFile: string | null;
 	projectAgentsDir: string | null;
 	projectProfilesDir: string | null;
-	projectModelTiersFile: string | null;
 }
 
 function parseBoolean(value: unknown, fallback: boolean): boolean {
@@ -217,11 +217,6 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 function findNearestProjectProfilesDir(cwd: string): string | null {
 	const result = findNearestProjectDir(cwd, [".pi", "profiles"]);
 	return result && isDirectory(result) ? result : null;
-}
-
-function findNearestProjectModelTiersFile(cwd: string): string | null {
-	const result = findNearestProjectDir(cwd, [".pi", "model-tiers.json"]);
-	return result && isFile(result) ? result : null;
 }
 
 function findNearestProjectTasksFile(cwd: string): string | null {
@@ -379,7 +374,7 @@ function parseAgentConfig(
 		enabled: parseBoolean(frontmatter.enabled, true),
 		availability,
 		defaultProfile: parseString(frontmatter.defaultProfile ?? frontmatter.profile),
-		defaultModelTier: parseString(frontmatter.defaultModelTier ?? frontmatter.modelTier),
+		defaultEffort: parseString(frontmatter.defaultEffort ?? frontmatter.effort),
 		defaultSkills: parseCsvList(frontmatter.defaultSkills ?? frontmatter.skills),
 		tools: parseCsvList(frontmatter.tools),
 		model: parseString(frontmatter.model),
@@ -439,9 +434,9 @@ function readJsonFile(filePath: string): unknown | undefined {
 	}
 }
 
-function parseModelTierEntries(raw: unknown, filePath: string, source: ConfigSource): ModelTierConfig[] {
+function parseEffortEntries(raw: unknown, filePath: string, source: ConfigSource): EffortConfig[] {
 	const entries = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-	const results: ModelTierConfig[] = [];
+	const results: EffortConfig[] = [];
 	for (const [name, value] of Object.entries(entries as Record<string, unknown>)) {
 		if (!value || typeof value !== "object") continue;
 		const record = value as Record<string, unknown>;
@@ -452,18 +447,12 @@ function parseModelTierEntries(raw: unknown, filePath: string, source: ConfigSou
 			description: parseString(record.description),
 			model,
 			provider: parseString(record.provider),
-			thinkingLevel: record.thinkingLevel as ModelTierConfig["thinkingLevel"],
+			thinkingLevel: record.thinkingLevel as EffortConfig["thinkingLevel"],
 			source,
 			filePath,
 		});
 	}
 	return results;
-}
-
-function loadModelTiersFromFile(filePath: string, source: ConfigSource): ModelTierConfig[] {
-	if (!isFile(filePath)) return [];
-	const raw = readJsonFile(filePath);
-	return parseModelTierEntries(raw, filePath, source);
 }
 
 function parseTasksConfig(raw: unknown, filePath: string, source: ConfigSource): TasksConfigDefaults | null {
@@ -478,6 +467,7 @@ function parseTasksConfig(raw: unknown, filePath: string, source: ConfigSource):
 	const invalidShapeValue = parsedContext?.invalidShapeValue;
 	const project = parsedContext?.project ?? legacyProjectContext;
 	const skills = parsedContext?.skills ?? legacySkills;
+	const efforts = parseEffortEntries(record.efforts, filePath, source);
 	const context =
 		mode === undefined && project === undefined && skills === undefined && invalidModeValue === undefined && invalidShapeValue === undefined
 			? undefined
@@ -492,6 +482,7 @@ function parseTasksConfig(raw: unknown, filePath: string, source: ConfigSource):
 	return {
 		...(context ? { context } : {}),
 		...(persist !== undefined ? { persist } : {}),
+		...(efforts.length > 0 ? { efforts } : {}),
 		source,
 		filePath,
 	};
@@ -503,7 +494,7 @@ function loadTasksConfigFromFile(filePath: string, source: ConfigSource): TasksC
 	return parseTasksConfig(raw, filePath, source);
 }
 
-function mergeByName<T extends { name: string }>(items: T[], scope: AgentScope): T[] {
+function mergeByName<T extends { name: string }>(items: T[]): T[] {
 	const map = new Map<string, T>();
 	for (const item of items) map.set(item.name, item);
 	return Array.from(map.values());
@@ -539,8 +530,6 @@ export function discoverResources(cwd: string, scope: AgentScope): ResourceDisco
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 	const userProfilesDir = path.join(getAgentDir(), "profiles");
 	const projectProfilesDir = findNearestProjectProfilesDir(cwd);
-	const userModelTiersFile = path.join(getAgentDir(), "model-tiers.json");
-	const projectModelTiersFile = findNearestProjectModelTiersFile(cwd);
 	const globalTasksFile = path.join(getAgentDir(), "tasks.json");
 	const projectTasksFile = findNearestProjectTasksFile(cwd);
 
@@ -551,26 +540,23 @@ export function discoverResources(cwd: string, scope: AgentScope): ResourceDisco
 	const projectAgents = includeProject && projectAgentsDir ? loadAgentsFromDir(projectAgentsDir, "project") : [];
 	const userProfiles = includeUser ? loadProfilesFromDir(userProfilesDir, "user") : [];
 	const projectProfiles = includeProject && projectProfilesDir ? loadProfilesFromDir(projectProfilesDir, "project") : [];
-	const userModelTiers = includeUser ? loadModelTiersFromFile(userModelTiersFile, "user") : [];
-	const projectModelTiers = includeProject && projectModelTiersFile ? loadModelTiersFromFile(projectModelTiersFile, "project") : [];
 	const globalTasksConfig = loadTasksConfigFromFile(globalTasksFile, "user");
 	const projectTasksConfig = projectTasksFile ? loadTasksConfigFromFile(projectTasksFile, "project") : null;
 
-	const agents = scope === "both" ? mergeByName([...userAgents, ...projectAgents], scope) : mergeByName([...(scope === "user" ? userAgents : projectAgents)], scope);
-	const profiles = scope === "both" ? mergeByName([...userProfiles, ...projectProfiles], scope) : mergeByName([...(scope === "user" ? userProfiles : projectProfiles)], scope);
-	const modelTiers = scope === "both" ? mergeByName([...userModelTiers, ...projectModelTiers], scope) : mergeByName([...(scope === "user" ? userModelTiers : projectModelTiers)], scope);
+	const agents = scope === "both" ? mergeByName([...userAgents, ...projectAgents]) : mergeByName([...(scope === "user" ? userAgents : projectAgents)]);
+	const profiles = scope === "both" ? mergeByName([...userProfiles, ...projectProfiles]) : mergeByName([...(scope === "user" ? userProfiles : projectProfiles)]);
+	const efforts = mergeByName([...(globalTasksConfig?.efforts ?? []), ...(projectTasksConfig?.efforts ?? [])]);
 
 	return {
 		agents,
 		profiles,
-		modelTiers,
+		efforts,
 		globalTasksConfig,
 		projectTasksConfig,
 		globalTasksFile,
 		projectTasksFile,
 		projectAgentsDir,
 		projectProfilesDir,
-		projectModelTiersFile,
 	};
 }
 
@@ -584,9 +570,9 @@ export function discoverProfiles(cwd: string, scope: AgentScope): ProfileDiscove
 	return { profiles: resources.profiles, projectProfilesDir: resources.projectProfilesDir };
 }
 
-export function discoverModelTiers(cwd: string, scope: AgentScope): ModelTierDiscoveryResult {
+export function discoverEfforts(cwd: string, scope: AgentScope): EffortDiscoveryResult {
 	const resources = discoverResources(cwd, scope);
-	return { modelTiers: resources.modelTiers, projectModelTiersFile: resources.projectModelTiersFile };
+	return { efforts: resources.efforts, projectTasksFile: resources.projectTasksFile };
 }
 
 export function formatAgentList(agents: AgentConfig[], maxItems: number): { text: string; remaining: number } {

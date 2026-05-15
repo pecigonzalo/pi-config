@@ -11,9 +11,7 @@ The extension reads defaults from two files:
 
 Both files are independent. When both exist, defaults are merged field-wise with project values taking precedence.
 
-## 2) Unified context model + persist
-
-Defaults are represented as:
+`tasks.json` can also define named effort presets:
 
 ```json
 {
@@ -22,9 +20,24 @@ Defaults are represented as:
     "project": true,
     "skills": true
   },
-  "persist": true
+  "persist": true,
+  "efforts": {
+    "balanced": {
+      "provider": "github-copilot",
+      "model": "gpt-5.3-codex"
+    },
+    "smart": {
+      "provider": "github-copilot",
+      "model": "gpt-5.4",
+      "thinkingLevel": "high"
+    }
+  }
 }
 ```
+
+Efforts are merged by name with project values overriding global ones.
+
+## 2) Unified context model + persist
 
 Resolution uses the same model across agent/profile/tasks defaults:
 
@@ -35,9 +48,13 @@ Resolution uses the same model across agent/profile/tasks defaults:
 
 ## 3) Runtime `task()` overrides
 
-At runtime, `task()` only exposes **context mode shorthand**:
+At runtime, `task()` supports a named `effort` preset plus **context mode shorthand**:
+
+- `effort: "balanced" | "smart" | ...`
 
 - `context: "fresh" | "fork"`
+
+Each effort resolves to a concrete model and may also set `thinkingLevel`.
 
 `persist` is config-driven (agent/profile/tasks defaults) and is **not** a supported runtime override.
 
@@ -50,12 +67,7 @@ At runtime, `task()` only exposes **context mode shorthand**:
 
 ## 5) Persisted child sessions per step
 
-When effective `persist=true`, each step gets its own child session file under Pi's normal session hierarchy (`~/.pi/agent/sessions`).
-
-Path shape:
-
-- parent-derived: `~/.pi/agent/sessions/.../task-runs/<parent-id-or-stem>/<runId>/steps/<step-label>/child-session.jsonl`
-- fallback (no parent session file): `~/.pi/agent/sessions/task-runs/<parent-id-or-detached>/<runId>/steps/<step-label>/child-session.jsonl`
+When effective `persist=true`, each step gets its own child session file under Pi's **normal** session hierarchy (`~/.pi/agent/sessions`). Child transcript files are no longer stored under the extension's `task-runs/.../steps/...` directory layout.
 
 Behavior by mode:
 
@@ -65,13 +77,23 @@ Behavior by mode:
 
 For `fork`, each step is forked from the parent snapshot (not from sibling child sessions).
 
+Persisted child sessions are seeded with:
+
+- a task-oriented session name (`task: ...`) for easier discovery in `/resume`
+- a `parentSession` header pointing back to the originating parent session
+- a hidden `tasks.parent-link` custom entry with parent/task linkage metadata
+
 If `persist=false`, step execution uses non-persisted sessions and cannot be reopened later.
 
 ## 6) Metadata model and visibility
 
 For persisted steps, the parent session appends hidden custom metadata entries of type:
 
-- `tasks.child-session` (created + terminal status)
+- `tasks.child-session` (created + terminal status, child session identity, parent link, origin preview, optional terminal-backend metadata; current backend implementation: WezTerm)
+
+Each child session also gets a hidden custom metadata entry of type:
+
+- `tasks.parent-link` (parent session path/id + task linkage)
 
 User-visible task results include compact child-session summaries (session id/status, and expanded path in detailed views).
 
@@ -79,21 +101,39 @@ User-visible task results include compact child-session summaries (session id/st
 
 Supported commands:
 
-- `/tasks` or `/tasks list` (current scope)
+- `/tasks` or `/tasks list` (current session)
 - `/tasks parent`
-- `/tasks recent`
+- `/tasks toggle`
 - `/tasks show <selector>`
 - `/tasks open <selector>`
-- `/tasks recent show <selector>`
-- `/tasks recent open <selector>`
+- `/tasks attach <selector>`
+- `/tasks view <selector>`
+- `/tasks origin <selector>`
+- `/tasks steer <selector> <message>`
 
 Semantics:
 
-- **current scope**: reconstruct task runs from metadata in the current parent session.
-- **recent scope**: reconstruct persisted task runs from recent session files.
+- `/tasks` commands operate on task runs reconstructed from metadata in the current parent session.
 - `parent`: from the current session, open its parent session (via `parentSession` in the child header, or `run.json` fallback for persisted fresh child sessions).
-- `show`: inspect run/step metadata and warnings.
-- `open`: open selected persisted child session (or provide manual open path/instructions if auto-open is unavailable).
+- `show`: inspect run/step metadata, origin preview, actions, and warnings.
+- `open`: open selected persisted child session inside the current Pi UI when auto-open is available.
+- `attach`: for completed tasks, open the persisted child session in a new terminal window using the configured terminal backend. For already-running externally hosted tasks, open/switch to the terminal workspace first and then focus the existing terminal target.
+- `view`: open an in-TUI overlay viewer for a task run. The viewer shows metadata plus a recent transcript preview and supports steering shortcuts for live RPC-backed tasks. When no live controller is available, the viewer becomes read-only.
+- `origin`: reveal the recorded parent-session origin for the task. In the current parent session this navigates to the recorded source entry; otherwise it shows the source session path and origin preview.
+- `steer`: if the child task is currently running under a live RPC controller in this session, queue a steering message without opening the child session.
+- `toggle`: toggle a persistent below-editor task widget for the current session. When enabled, the widget stays visible even with no task runs and continues to update as runs change.
+
+Interactive runtime behavior:
+
+- when the parent session has UI, persisted child sessions are launched under a live RPC controller so `/tasks steer ...` and richer inspection can talk to the running task process
+- `/tasks` in the TUI opens an interactive task browser; `Ctrl+Shift+T` opens the current-session task browser directly
+- `/tasks toggle` enables or hides the below-editor task widget for the current session
+- textual `/tasks list` output includes attach guidance and per-run `/tasks attach <selector>` hints for attachable runs so it is clear how to open a child session in a terminal window
+- the viewer overlay keeps the parent session active while inspecting child state. Shortcut hints in the overlay: `Ctrl+O` open, `Ctrl+A` attach, `Ctrl+G` origin, `Enter`/`Ctrl+S` steer when live control is available, `Esc` close
+- in non-interactive contexts, task execution falls back to the legacy JSON-stream capture mode and live steering is unavailable
+- `/tasks attach ...` uses a terminal-backend interface. Select it with `PI_TASKS_TERMINAL_BACKEND=auto|wezterm|disabled`. Today `wezterm` is implemented; the abstraction keeps room for alternatives such as tmux later.
+- with WezTerm, task attach uses a fixed domain plus a workspace per parent session. Completed tasks open with `wezterm start --domain <domain> --workspace <session-workspace> --new-tab -- ...`; running externally hosted tasks open/attach that workspace first and then focus the existing pane when possible. You can override the domain with `PI_TASKS_WEZTERM_DOMAIN` (default: `pi`).
+- `/tasks attach ...` avoids dual writers: completed tasks open in a new terminal window, but a running child can only be focused if it already has recorded external-terminal metadata; otherwise the command refuses and points you at `/tasks steer ...`
 
 Selector resolution order:
 

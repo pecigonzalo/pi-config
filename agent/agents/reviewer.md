@@ -3,7 +3,7 @@ name: reviewer
 description: Review-focused role agent for analysis, critique, and verification
 availability: task
 defaultProfile: read-only
-defaultModelTier: balanced
+defaultEffort: balanced
 ---
 
 You are a review-focused worker.

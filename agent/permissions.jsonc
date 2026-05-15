@@ -94,7 +94,8 @@
       {
         "tool": "bash",
         "match": "cp *",
-        "action": "allow",
+        "action": "ask",
+        "reason": "Copies files and may overwrite existing content",
       },
       // ── Bash: git — ask before history-rewriting or remote-pushing ops ──────
       {
@@ -105,35 +106,61 @@
       },
       {
         "tool": "bash",
-        "match": "\\bgit\\s+reset\\s+--hard\\b",
+        "match": "\\bgit\\s+reset\\s+--hard\\b|\\bgit\\s+(clean|restore|rebase)\\b",
         "action": "ask",
-        "reason": "Destructive history reset",
+        "reason": "Mutates repo state or rewrites history",
       },
       {
         "tool": "bash",
         "match": "git *",
         "action": "allow",
       },
-      // ── Bash: common build / test / package-manager commands → allow ─────────
+      // ── Bash: low-risk build / inspection commands → allow ──────────────────
       {
         "tool": "bash",
-        "match": "^(go|gofmt|golangci-lint|govulncheck)\\b",
+        "match": "^(gofmt|golangci-lint|govulncheck)\\b",
+        "action": "allow",
+      },
+      // ── Bash: ask for direct code execution / ephemeral executors ────────────
+      {
+        "tool": "bash",
+        "match": "^go\\s+(run|generate)\\b",
+        "action": "ask",
+        "reason": "Executes Go code or project-defined commands",
+      },
+      {
+        "tool": "bash",
+        "match": "^(python3?)\\b",
+        "action": "ask",
+        "reason": "Executes Python code",
+      },
+      {
+        "tool": "bash",
+        "match": "^(npx|bunx|uvx|npm\\s+exec|pnpm\\s+dlx|yarn\\s+dlx)\\b",
+        "action": "ask",
+        "reason": "Can download and run arbitrary package code",
+      },
+      // ── Bash: common build / package-manager commands → allow ────────────────
+      {
+        "tool": "bash",
+        "match": "^go\\b",
         "action": "allow",
       },
       {
         "tool": "bash",
-        "match": "^(node|npm|npx|bun|bunx|yarn|pnpm|corepack)\\b",
+        "match": "^(node|npm|bun|yarn|pnpm|corepack)\\b",
         "action": "allow",
       },
       {
         "tool": "bash",
-        "match": "^(python3?|pip3?|uv|ruff|mypy|pytest|poetry)\\b",
+        "match": "^(pip3?|uv|ruff|mypy|pytest|poetry)\\b",
         "action": "allow",
       },
       {
         "tool": "bash",
         "match": "^(cargo|rustc|rustfmt|clippy)\\b",
-        "action": "allow",
+        "action": "ask",
+        "reason": "Rust tooling can build, run code, or rewrite files",
       },
       {
         "tool": "bash",
@@ -143,7 +170,8 @@
       {
         "tool": "bash",
         "match": "^(terraform|tofu)\\s+(init|plan|validate|fmt|show|output|state\\s+list)\\b",
-        "action": "allow",
+        "action": "ask",
+        "reason": "Infrastructure tooling may access the network, local state, or rewrite files",
       },
       {
         "tool": "bash",

@@ -1,11 +1,14 @@
-import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as syncFs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 let taskExtension: Awaited<ReturnType<typeof import("./task")>>["default"];
 let __test__: Awaited<ReturnType<typeof import("./task")>>["__test"];
 let testAgentDir: string;
+let sessionCounter = 0;
+let mockResources: any;
 
 beforeAll(async () => {
 	testAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tasks-ext-test-"));
@@ -25,6 +28,7 @@ beforeAll(async () => {
 	}));
 
 	mock.module("@mariozechner/pi-tui", () => ({
+		CURSOR_MARKER: "",
 		Container: class {
 			addChild(_child: unknown) {}
 		},
@@ -37,27 +41,58 @@ beforeAll(async () => {
 		Text: class {
 			constructor(_text: string) {}
 		},
+		matchesKey: () => false,
+		truncateToWidth: (text: string, width: number) => text.slice(0, width),
+		visibleWidth: (text: string) => text.length,
+		wrapTextWithAnsi: (text: string, _width: number) => [text],
 	}));
 
 	mock.module("@mariozechner/pi-coding-agent", () => ({
 		getAgentDir: () => testAgentDir,
 		getMarkdownTheme: () => ({}),
 		withFileMutationQueue: async (_filePath: string, mutation: () => Promise<void>) => mutation(),
+		SessionManager: {
+			create: (cwd: string) => {
+				sessionCounter += 1;
+				const sessionId = `fresh-session-${sessionCounter}`;
+				const sessionDir = path.join(testAgentDir, "sessions", cwd.replace(/[^a-zA-Z0-9._-]+/g, "-"));
+				const sessionFile = path.join(sessionDir, `${sessionId}.jsonl`);
+				syncFs.mkdirSync(sessionDir, { recursive: true });
+				return {
+					getSessionFile: () => sessionFile,
+					getSessionId: () => sessionId,
+					getSessionDir: () => sessionDir,
+				};
+			},
+			forkFrom: (sourcePath: string, targetCwd: string) => {
+				sessionCounter += 1;
+				const sessionId = `fork-session-${sessionCounter}`;
+				const sessionDir = path.join(testAgentDir, "sessions", targetCwd.replace(/[^a-zA-Z0-9._-]+/g, "-"));
+				const sessionFile = path.join(sessionDir, `${sessionId}.jsonl`);
+				syncFs.mkdirSync(sessionDir, { recursive: true });
+				const sourceLines = syncFs.readFileSync(sourcePath, "utf-8").trim().split("\n").filter(Boolean);
+				const [sourceHeader, ...rest] = sourceLines.map((line) => JSON.parse(line));
+				const header = {
+					type: "session",
+					version: sourceHeader.version ?? 3,
+					id: sessionId,
+					timestamp: new Date().toISOString(),
+					cwd: targetCwd,
+					parentSession: sourcePath,
+				};
+				syncFs.writeFileSync(sessionFile, `${[header, ...rest].map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf-8");
+				const lastEntry = rest[rest.length - 1] as { id?: string } | undefined;
+				return {
+					getSessionFile: () => sessionFile,
+					getSessionId: () => sessionId,
+					getLeafId: () => (typeof lastEntry?.id === "string" ? lastEntry.id : null),
+				};
+			},
+		},
 	}));
 
 	mock.module("./agents.js", () => ({
-		discoverResources: () => ({
-			agents: [],
-			profiles: [],
-			modelTiers: [],
-			globalTasksConfig: null,
-			projectTasksConfig: null,
-			globalTasksFile: path.join(testAgentDir, "tasks.json"),
-			projectTasksFile: null,
-			projectAgentsDir: null,
-			projectProfilesDir: null,
-			projectModelTiersFile: null,
-		}),
+		discoverResources: () => mockResources ?? createResources(),
 		resolveSkillPaths: () => ({ paths: [], missing: [] }),
 	}));
 
@@ -74,35 +109,47 @@ function createResources(overrides: Record<string, unknown> = {}) {
 	return {
 		agents: [],
 		profiles: [],
-		modelTiers: [],
+		efforts: [],
 		globalTasksConfig: null,
 		projectTasksConfig: null,
 		globalTasksFile: path.join(testAgentDir, "tasks.json"),
 		projectTasksFile: null,
 		projectAgentsDir: null,
 		projectProfilesDir: null,
-		projectModelTiersFile: null,
 		...overrides,
 	};
 }
 
-function createTaskTool() {
+function createExtensionHarness() {
 	let tool: any;
+	const eventHandlers: Record<string, (...args: any[]) => any> = {};
+	const commandHandlers: Record<string, any> = {};
 	const pi = {
 		registerFlag: () => {},
-		on: () => {},
-		registerCommand: () => {},
+		on: (eventName: string, handler: (...args: any[]) => any) => {
+			eventHandlers[eventName] = handler;
+		},
+		registerCommand: (name: string, definition: any) => {
+			commandHandlers[name] = definition;
+		},
+		registerShortcut: () => {},
 		registerTool: (definition: any) => {
 			tool = definition;
 		},
 		getFlag: () => undefined,
 		getAllTools: () => [],
 		getActiveTools: () => [],
+		getThinkingLevel: () => "off",
 		setActiveTools: () => {},
 		setModel: async () => true,
+		setThinkingLevel: () => {},
 	};
 	taskExtension(pi as any);
-	return tool;
+	return { tool, eventHandlers, commandHandlers, pi };
+}
+
+function createTaskTool() {
+	return createExtensionHarness().tool;
 }
 
 function makeRun(runId: string, childSessionId: string): any {
@@ -146,7 +193,91 @@ function makeRun(runId: string, childSessionId: string): any {
 	};
 }
 
+describe("tasks extension UI chrome", () => {
+	it("clears task widget and status on session lifecycle events", async () => {
+		const { eventHandlers } = createExtensionHarness();
+		const widgetCalls: any[][] = [];
+		const statusCalls: any[][] = [];
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: true,
+			ui: {
+				setWidget: (...args: any[]) => {
+					widgetCalls.push(args);
+				},
+				setStatus: (...args: any[]) => {
+					statusCalls.push(args);
+				},
+				notify: () => {},
+			},
+			sessionManager: {
+				getSessionId: () => "session-1",
+				getSessionFile: () => undefined,
+				getBranch: () => [],
+				appendCustomEntry: () => "entry-id",
+			},
+			modelRegistry: {
+				find: () => undefined,
+			},
+		};
+
+		await eventHandlers.session_start?.({}, ctx);
+		expect(widgetCalls).toEqual([["tasks.runs", undefined]]);
+		expect(statusCalls).toEqual([["tasks.runs", undefined]]);
+
+		await eventHandlers.session_shutdown?.({}, ctx);
+		expect(widgetCalls).toEqual([["tasks.runs", undefined], ["tasks.runs", undefined]]);
+		expect(statusCalls).toEqual([["tasks.runs", undefined], ["tasks.runs", undefined]]);
+	});
+
+	it("toggles the task widget for the current session", async () => {
+		const { commandHandlers } = createExtensionHarness();
+		const widgetCalls: any[][] = [];
+		const statusCalls: any[][] = [];
+		const notifications: Array<{ message: string; level?: string }> = [];
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: true,
+			ui: {
+				setWidget: (...args: any[]) => {
+					widgetCalls.push(args);
+				},
+				setStatus: (...args: any[]) => {
+					statusCalls.push(args);
+				},
+				notify: (message: string, level?: string) => {
+					notifications.push({ message, level });
+				},
+			},
+			sessionManager: {
+				getSessionId: () => "session-1",
+				getSessionFile: () => undefined,
+				getBranch: () => [],
+			},
+			waitForIdle: async () => {},
+		};
+
+		await commandHandlers.tasks.handler("toggle", ctx);
+		expect(widgetCalls[0]).toEqual([
+			"tasks.runs",
+			["Tasks widget active · no task runs · Ctrl+Shift+T browse · /tasks toggle hide"],
+			{ placement: "belowEditor" },
+		]);
+		expect(statusCalls[0]).toEqual(["tasks.runs", undefined]);
+		expect(notifications[0]).toEqual({ message: "Tasks widget enabled for this session.", level: "info" });
+
+		await commandHandlers.tasks.handler("toggle", ctx);
+		expect(widgetCalls[1]).toEqual(["tasks.runs", undefined]);
+		expect(statusCalls[1]).toEqual(["tasks.runs", undefined]);
+		expect(notifications[1]).toEqual({ message: "Tasks widget hidden for this session.", level: "info" });
+	});
+});
+
 describe("tasks extension persisted-session guardrails", () => {
+	beforeEach(() => {
+		mockResources = undefined;
+	});
+
 	it("rejects runtime persist override in task execution", async () => {
 		const tool = createTaskTool();
 
@@ -220,10 +351,10 @@ describe("tasks extension persisted-session guardrails", () => {
 		expect(preflight.error).toContain('context.mode="fork" requires a parent session file');
 	});
 
-	it("stores persisted child sessions under the parent session hierarchy", async () => {
+	it("stores persisted child sessions as normal Pi sessions and seeds parent linkage metadata", async () => {
 		const parentSessionId = "parent-session-id";
 		const parentSessionFile = path.join(testAgentDir, "sessions", "workspace", "main", "parent-session.jsonl");
-		const expectedRoot = path.join(
+		const expectedRunRoot = path.join(
 			testAgentDir,
 			"sessions",
 			"workspace",
@@ -232,7 +363,7 @@ describe("tasks extension persisted-session guardrails", () => {
 			"parent-session-id--parent-session",
 		);
 
-		expect(__test__.resolvePersistedTaskSessionRoot(parentSessionFile, parentSessionId)).toBe(expectedRoot);
+		expect(__test__.resolvePersistedTaskSessionRoot(parentSessionFile, parentSessionId)).toBe(expectedRunRoot);
 
 		const preflight = await __test__.preflightTaskRun(
 			"single",
@@ -246,10 +377,325 @@ describe("tasks extension persisted-session guardrails", () => {
 		);
 
 		expect(preflight.error).toBeUndefined();
-		expect(preflight.prepared?.sessionRunRoot).toStartWith(`${expectedRoot}${path.sep}`);
-		expect(path.dirname(preflight.prepared?.sessionRunRoot ?? "")).toBe(expectedRoot);
-		expect(preflight.prepared?.sessionRunRoot).not.toContain(path.join("agent", "extensions", "tasks", "sessions"));
-		expect(preflight.prepared?.steps[0]?.session.sessionFile).toStartWith(preflight.prepared?.sessionRunRoot ?? "");
+		expect(preflight.prepared?.sessionRunRoot).toStartWith(`${expectedRunRoot}${path.sep}`);
+		const childSessionFile = preflight.prepared?.steps[0]?.session.sessionFile;
+		expect(childSessionFile).toBeTruthy();
+		expect(childSessionFile).not.toStartWith(preflight.prepared?.sessionRunRoot ?? "");
+		expect(childSessionFile).toContain(`${path.sep}sessions${path.sep}`);
+
+		const raw = await fs.readFile(childSessionFile!, "utf-8");
+		const entries = raw.trim().split("\n").map((line) => JSON.parse(line));
+		expect(entries[0]).toMatchObject({
+			type: "session",
+			id: preflight.prepared?.steps[0]?.session.sessionId,
+			parentSession: parentSessionFile,
+		});
+		expect(entries[1]).toMatchObject({
+			type: "session_info",
+			name: preflight.prepared?.steps[0]?.session.sessionName,
+		});
+		expect(entries[2]).toMatchObject({
+			type: "custom",
+			customType: "tasks.parent-link",
+			data: {
+				parentSessionFile,
+				parentSessionId,
+			},
+		});
+	});
+
+	it("resolves parent session from fresh child headers without run.json fallback", async () => {
+		const parentSessionFile = path.join(testAgentDir, "sessions", "workspace", "main", "parent.jsonl");
+		const childSessionFile = path.join(testAgentDir, "sessions", "workspace", "child", "task-child.jsonl");
+		await fs.mkdir(path.dirname(childSessionFile), { recursive: true });
+		await fs.writeFile(
+			childSessionFile,
+			[
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "child-session-id",
+					timestamp: new Date().toISOString(),
+					cwd: process.cwd(),
+					parentSession: parentSessionFile,
+				}),
+				JSON.stringify({
+					type: "session_info",
+					id: "info-1",
+					parentId: null,
+					timestamp: new Date().toISOString(),
+					name: "task: child",
+				}),
+			].join("\n") + "\n",
+			"utf-8",
+		);
+
+		const resolved = await __test__.resolveParentSessionForCurrentSession(childSessionFile, [
+			{ type: "session", id: "child-session-id", parentSession: parentSessionFile } as any,
+		]);
+
+		expect(resolved.error).toBeUndefined();
+		expect(resolved.resolved).toMatchObject({
+			parentSessionPath: parentSessionFile,
+			source: "header",
+		});
+	});
+});
+
+describe("effort resolution", () => {
+	beforeEach(() => {
+		mockResources = undefined;
+	});
+
+	it("uses provider to qualify bare effort models", () => {
+		const resolved = __test__.resolveModelFromEffort(undefined, "smart", createResources({
+			efforts: [{
+				name: "smart",
+				description: "smart effort",
+				provider: "github-copilot",
+				model: "gpt-5.4",
+				thinkingLevel: "high",
+				source: "user",
+				filePath: "/tmp/tasks.json",
+			}],
+		}) as any);
+
+		expect(resolved.error).toBeUndefined();
+		expect(resolved.model).toBe("github-copilot/gpt-5.4");
+		expect(resolved.effort?.name).toBe("smart");
+	});
+
+	it("rejects mismatched provider and fully qualified effort model", () => {
+		const resolved = __test__.resolveModelFromEffort(undefined, "smart", createResources({
+			efforts: [{
+				name: "smart",
+				description: "smart effort",
+				provider: "openrouter",
+				model: "github-copilot/gpt-5.4",
+				thinkingLevel: "high",
+				source: "user",
+				filePath: "/tmp/tasks.json",
+			}],
+		}) as any);
+
+		expect(resolved.model).toBeUndefined();
+		expect(resolved.error).toContain('provider "openrouter"');
+	});
+});
+
+describe("main-session effort command", () => {
+	beforeEach(() => {
+		mockResources = undefined;
+	});
+
+	it("applies effort thinking level when switching the main session", async () => {
+		mockResources = createResources({
+			efforts: [{
+				name: "smart",
+				description: "smart effort",
+				provider: "github-copilot",
+				model: "gpt-5.4",
+				thinkingLevel: "high",
+				source: "user",
+				filePath: "/tmp/tasks.json",
+			}],
+		});
+		const { commandHandlers, pi } = createExtensionHarness();
+		const thinkingLevels: string[] = [];
+		const models: Array<{ provider: string; id: string }> = [];
+		pi.setThinkingLevel = (level: string) => {
+			thinkingLevels.push(level);
+		};
+		pi.setModel = async (model: { provider: string; id: string }) => {
+			models.push(model);
+			return true;
+		};
+
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: true,
+			waitForIdle: async () => {},
+			ui: {
+				confirm: async () => true,
+				notify: () => {},
+			},
+			model: { provider: "github-copilot", id: "gpt-5-mini" },
+			modelRegistry: {
+				find: (provider: string, modelId: string) => ({ provider, id: modelId }),
+			},
+			sessionManager: {
+				getSessionId: () => "session-effort",
+				getBranch: () => [],
+				appendCustomEntry: () => "entry-id",
+			},
+		};
+
+		await commandHandlers.effort.handler("smart", ctx);
+
+		expect(models).toEqual([{ provider: "github-copilot", id: "gpt-5.4" }]);
+		expect(thinkingLevels).toContain("high");
+	});
+});
+
+describe("/tasks command parsing", () => {
+	it("parses steer commands with selector and message", () => {
+		const parsed = __test__.parseTasksCommand("steer task-1 focus only on auth");
+		expect(parsed.error).toBeUndefined();
+		expect(parsed.action).toBe("steer");
+		expect(parsed.selector).toBe("task-1");
+		expect(parsed.message).toBe("focus only on auth");
+	});
+
+	it("parses attach, origin, and view commands for the current scope", () => {
+		const attach = __test__.parseTasksCommand("attach task-1");
+		expect(attach.error).toBeUndefined();
+		expect(attach.scope).toBe("current");
+		expect(attach.action).toBe("attach");
+		expect(attach.selector).toBe("task-1");
+
+		const origin = __test__.parseTasksCommand("origin task-1");
+		expect(origin.error).toBeUndefined();
+		expect(origin.scope).toBe("current");
+		expect(origin.action).toBe("origin");
+		expect(origin.selector).toBe("task-1");
+
+		const view = __test__.parseTasksCommand("view task-1");
+		expect(view.error).toBeUndefined();
+		expect(view.scope).toBe("current");
+		expect(view.action).toBe("view");
+		expect(view.selector).toBe("task-1");
+	});
+
+	it("rejects removed recent commands", () => {
+		const parsed = __test__.parseTasksCommand("recent attach task-2");
+		expect(parsed.scope).toBe("current");
+		expect(parsed.action).toBe("list");
+		expect(parsed.error).toContain("Unsupported /tasks arguments");
+	});
+
+	it("parses toggle commands for the current scope", () => {
+		const parsed = __test__.parseTasksCommand("toggle");
+		expect(parsed.error).toBeUndefined();
+		expect(parsed.scope).toBe("current");
+		expect(parsed.action).toBe("toggle");
+	});
+});
+
+describe("task origin resolution", () => {
+	it("captures the nearest user message preview and origin ids", () => {
+		const origin = __test__.resolveTaskOriginForBranch(
+			[
+				{ type: "message", id: "user-1", message: { role: "user", content: "Initial request" } },
+				{ type: "message", id: "assistant-1", message: { role: "assistant", content: "Thinking" } },
+				{ type: "message", id: "user-2", message: { role: "user", content: "Please continue with the task browser UX" } },
+				{ type: "message", id: "assistant-2", message: { role: "assistant", content: "Calling task tool" } },
+			] as any,
+			"assistant-2",
+		);
+
+		expect(origin).toMatchObject({
+			originEntryId: "assistant-2",
+			originUserEntryId: "user-2",
+			originPreview: "Please continue with the task browser UX",
+		});
+	});
+});
+
+describe("task terminal backend configuration", () => {
+	it("parses disabled and explicit backend preferences", () => {
+		expect(__test__.parseTaskTerminalBackendPreference("disabled")).toEqual({ preference: "disabled" });
+		expect(__test__.parseTaskTerminalBackendPreference("wezterm")).toEqual({ preference: "wezterm" });
+		expect(__test__.parseTaskTerminalBackendPreference("bogus")).toEqual({ preference: "disabled", unsupported: "bogus" });
+	});
+
+	it("normalizes legacy wezterm metadata into generic terminal fields", () => {
+		const snapshot = __test__.normalizeChildSessionSnapshot({
+			v: 1,
+			runId: "run-1",
+			toolCallId: "tool-1",
+			mode: "single",
+			step: 1,
+			childSessionId: "child-1",
+			childSessionPath: "/tmp/child-1.jsonl",
+			effectiveContext: "fresh",
+			persist: true,
+			taskPreview: "task",
+			createdAt: "2024-01-01T00:00:00.000Z",
+			status: "succeeded",
+			weztermPaneId: "42",
+			weztermWorkspace: "pi-tasks",
+		});
+
+		expect(snapshot).toMatchObject({
+			terminalBackend: "wezterm",
+			terminalTargetId: "42",
+			terminalWorkspace: "pi-tasks",
+			weztermPaneId: "42",
+			weztermWorkspace: "pi-tasks",
+		});
+	});
+
+	it("preserves generic terminal metadata when already present", () => {
+		const snapshot = __test__.normalizeChildSessionSnapshot({
+			v: 1,
+			runId: "run-2",
+			toolCallId: "tool-2",
+			mode: "single",
+			step: 1,
+			childSessionId: "child-2",
+			childSessionPath: "/tmp/child-2.jsonl",
+			effectiveContext: "fresh",
+			persist: true,
+			taskPreview: "task",
+			createdAt: "2024-01-01T00:00:00.000Z",
+			status: "succeeded",
+			terminalBackend: "wezterm",
+			terminalTargetId: "77",
+			terminalWorkspace: "pi-tasks-alt",
+		});
+
+		expect(snapshot).toMatchObject({
+			terminalBackend: "wezterm",
+			terminalTargetId: "77",
+			terminalWorkspace: "pi-tasks-alt",
+			weztermPaneId: "77",
+			weztermWorkspace: "pi-tasks-alt",
+		});
+	});
+
+	it("keeps workspace-only terminal metadata when no pane id is recorded", () => {
+		const snapshot = __test__.normalizeChildSessionSnapshot({
+			v: 1,
+			runId: "run-3",
+			toolCallId: "tool-3",
+			mode: "single",
+			step: 1,
+			childSessionId: "child-3",
+			childSessionPath: "/tmp/child-3.jsonl",
+			effectiveContext: "fresh",
+			persist: true,
+			taskPreview: "task",
+			createdAt: "2024-01-01T00:00:00.000Z",
+			status: "succeeded",
+			terminalBackend: "wezterm",
+			terminalWorkspace: "pi-session-abc",
+		});
+
+		expect(snapshot).toMatchObject({
+			terminalBackend: "wezterm",
+			terminalTargetId: undefined,
+			terminalWorkspace: "pi-session-abc",
+			weztermPaneId: undefined,
+			weztermWorkspace: "pi-session-abc",
+		});
+	});
+});
+
+describe("/tasks list formatting", () => {
+	it("includes attach guidance in list output", () => {
+		const output = __test__.formatTaskRunList("current", [makeRun("alpha-run", "alpha-child")]);
+		expect(output).toContain("/tasks attach <selector>");
+		expect(output).toContain("/tasks attach 1");
 	});
 });
 

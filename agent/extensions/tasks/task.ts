@@ -12,16 +12,22 @@
  * Uses JSON mode to capture structured output from delegated agents.
  */
 
-import { spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as readline from "node:readline";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Message } from "@mariozechner/pi-ai";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { type ExtensionAPI, type SessionEntry, getAgentDir, getMarkdownTheme, withFileMutationQueue } from "@mariozechner/pi-coding-agent";
+import {
+	type ExtensionAPI,
+	type SessionEntry,
+	SessionManager,
+	getAgentDir,
+	getMarkdownTheme,
+	withFileMutationQueue,
+} from "@mariozechner/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { MAIN_SESSION_AGENT_CUSTOM_TYPE } from "../agent-state";
@@ -29,41 +35,89 @@ import {
 	type AgentConfig,
 	type AgentScope,
 	type ContextMode,
-	type ModelTierConfig,
+	type EffortConfig,
 	type ProfileConfig,
 	type ResourceDiscoveryResult,
 	discoverResources,
 	resolveSkillPaths,
 } from "./agents.js";
+import { parseTasksCommand, resolveTaskSelector, type TasksScope } from "./task-command-utils.js";
+import {
+	applyTaskTerminalAttachment,
+	formatTaskTerminalAttachment,
+	getTaskAttachActionLabel,
+	getTaskTerminalAttachment,
+	parseTaskTerminalBackendPreference,
+	resolveConfiguredTaskTerminalBackend,
+	resolveTaskTerminalBackendById,
+	type TaskTerminalAttachment,
+} from "./task-terminal.js";
+import {
+	extractMessagePreviewText,
+	formatTimestampCompact,
+	getSnapshotEventTimestamp,
+	getTaskOriginNavigationTarget,
+	makeTaskRunStepKey,
+	normalizeChildSessionSnapshot,
+	reconstructCurrentTaskRuns,
+	resolveTaskOriginForBranch,
+	resolveTaskRunOriginSnapshot,
+	toMillis,
+	type ChildSessionSnapshot,
+	type ChildSessionStatus,
+	type TaskExecutionMode,
+	type TaskOriginSnapshot,
+	type TaskRunStatus,
+	type TaskRunStepStatus,
+	type TaskRunStepView,
+	type TaskRunView,
+} from "./task-runs.js";
+import {
+	clearLiveTaskControllers,
+	deleteLiveTaskController,
+	getLiveTaskController,
+	listLiveTaskControllers,
+	readLiveTaskRuntimeInfo,
+	rejectPendingRpcResponses,
+	sendLiveTaskRpcCommand,
+	setLiveTaskController,
+	type LiveTaskController,
+	type LiveTaskRuntimeInfo,
+	type RpcResponseEnvelope,
+} from "./task-live.js";
+import {
+	TaskViewerOverlay,
+	type TaskTranscriptPreview,
+	type TaskViewerOverlayResult,
+	type TaskViewerOverlayState,
+} from "./task-viewer.js";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const TASK_SESSION_VERSION_FALLBACK = 3;
 const TASK_CHILD_SESSION_CUSTOM_TYPE = "tasks.child-session";
+const TASK_CHILD_SESSION_CUSTOM_TYPE_PARENT_LINK = "tasks.parent-link";
 const TASK_CHILD_SESSION_METADATA_VERSION = 1;
+const TASK_CHILD_SESSION_LINK_VERSION = 1;
 const TASKS_PARENT_SESSION_ROOT = path.join(getAgentDir(), "sessions");
 const TASKS_CHILD_SESSION_RUNS_DIR = "task-runs";
 const TASKS_CHILD_SESSION_FALLBACK_PARENT = "detached";
-const TASKS_NO_CURRENT_RUNS_MESSAGE = "No task runs in current session. Try /tasks recent.";
+const TASKS_NO_CURRENT_RUNS_MESSAGE = "No task runs in current session.";
 const TASKS_COMMAND_USAGE = [
 	"/tasks",
 	"/tasks list",
+	"/tasks toggle",
 	"/tasks parent",
-	"/tasks recent",
 	"/tasks show <selector>",
 	"/tasks open <selector>",
-	"/tasks recent show <selector>",
-	"/tasks recent open <selector>",
+	"/tasks attach <selector>",
+	"/tasks view <selector>",
+	"/tasks origin <selector>",
+	"/tasks steer <selector> <message>",
 ].join(" | ");
-const TASK_SELECTOR_CANDIDATE_LIMIT = 8;
 
-type TaskExecutionMode = "single" | "parallel" | "chain";
-type ChildSessionStatus = "created" | "succeeded" | "failed" | "aborted";
-type TasksScope = "current" | "recent";
-type TasksAction = "list" | "show" | "open" | "parent";
-type TaskRunStepStatus = ChildSessionStatus | "running" | "interrupted" | "not-persisted";
-type TaskRunStatus = "running" | "interrupted" | "failed" | "aborted" | "succeeded" | "not-persisted";
+const taskWidgetEnabledSessions = new Set<string>();
 
 // Recursion depth guard
 const DEFAULT_MAX_SUBAGENT_DEPTH = 2;
@@ -143,15 +197,15 @@ function formatUsageStats(
 }
 
 function formatTaskExecutionSelection(
-	selection: { profile?: string; modelTier?: string },
+	selection: { profile?: string; effort?: string },
 	themeFg: (color: any, text: string) => string,
 ): string {
 	const parts: string[] = [];
 	if (selection.profile) {
 		parts.push(themeFg("muted", "profile: ") + themeFg("accent", selection.profile));
 	}
-	if (selection.modelTier) {
-		parts.push(themeFg("muted", "model-tier: ") + themeFg("accent", selection.modelTier));
+	if (selection.effort) {
+		parts.push(themeFg("muted", "effort: ") + themeFg("accent", selection.effort));
 	}
 	return parts.join(themeFg("muted", " · "));
 }
@@ -167,7 +221,7 @@ function formatTaskExecutionContext(
 }
 
 function formatTaskExecutionMetadata(
-	taskResult: { agentSource?: string; sessionMode?: ContextMode; profile?: string; modelTier?: string },
+	taskResult: { agentSource?: string; sessionMode?: ContextMode; profile?: string; effort?: string },
 	themeFg: (color: any, text: string) => string,
 ): string {
 	const context = formatTaskExecutionContext(taskResult.agentSource, taskResult.sessionMode, themeFg);
@@ -178,7 +232,7 @@ function formatTaskExecutionMetadata(
 function formatTaskHeader(
 	options: {
 		agent: string;
-		taskResult: { agentSource?: string; sessionMode?: ContextMode; profile?: string; modelTier?: string };
+		taskResult: { agentSource?: string; sessionMode?: ContextMode; profile?: string; effort?: string };
 		prefix?: string;
 		leadingIcon?: string;
 		suffix?: string;
@@ -327,7 +381,7 @@ interface UsageStats {
 interface TaskStepConfig {
 	agent?: string;
 	profile?: string;
-	modelTier?: string;
+	effort?: string;
 	task: string;
 	cwd?: string;
 	model?: string;
@@ -336,32 +390,11 @@ interface TaskStepConfig {
 	context?: ContextMode;
 }
 
-interface ChildSessionSnapshot {
-	v: number;
-	runId: string;
-	toolCallId: string;
-	mode: TaskExecutionMode;
-	step: number;
-	childSessionId: string;
-	childSessionPath: string;
-	effectiveContext: ContextMode;
-	persist: boolean;
-	agent?: string;
-	profile?: string;
-	taskPreview: string;
-	createdAt: string;
-	finishedAt?: string;
-	status: ChildSessionStatus;
-	exitCode?: number;
-	stopReason?: string;
-	errorMessage?: string;
-}
-
 interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
 	profile?: string;
-	modelTier?: string;
+	effort?: string;
 	task: string;
 	exitCode: number;
 	messages: Message[];
@@ -524,7 +557,7 @@ type OnUpdateCallback = (partial: AgentToolResult<TaskDetails>) => void;
 interface ResolvedWorkerConfig {
 	agent?: AgentConfig;
 	profile?: ProfileConfig;
-	modelTier?: ModelTierConfig;
+	effort?: EffortConfig;
 	model?: string;
 	skills?: string[];
 	tools?: string[];
@@ -559,8 +592,8 @@ function formatProfileList(resources: ResourceDiscoveryResult): string {
 	return resources.profiles.filter((profile) => profile.enabled).map((profile) => `${profile.name} (${profile.source})`).join(", ") || "none";
 }
 
-function formatModelTierList(resources: ResourceDiscoveryResult): string {
-	return resources.modelTiers.map((tier) => `${tier.name} (${tier.source})`).join(", ") || "none";
+function formatEffortList(resources: ResourceDiscoveryResult): string {
+	return resources.efforts.map((effort) => `${effort.name} (${effort.source})`).join(", ") || "none";
 }
 
 function composePromptLayers(...layers: string[]): string {
@@ -575,20 +608,50 @@ function firstDefined<T>(...values: Array<T | undefined>): T | undefined {
 	return undefined;
 }
 
-function resolveModelFromTier(
+function buildEffortModelSpec(effort: EffortConfig): { model?: string; error?: string } {
+	const normalizedModel = normalizeLegacyModelName(effort.model)?.trim();
+	if (!normalizedModel) {
+		return { error: `Effort "${effort.name}" has no model configured.` };
+	}
+
+	const slashIndex = normalizedModel.indexOf("/");
+	if (slashIndex !== -1) {
+		const modelProvider = normalizedModel.slice(0, slashIndex).trim();
+		const modelId = normalizedModel.slice(slashIndex + 1).trim();
+		if (!modelProvider || !modelId) {
+			return { error: `Effort "${effort.name}" has an invalid model spec: "${effort.model}".` };
+		}
+		if (effort.provider && effort.provider !== modelProvider) {
+			return {
+				error: `Effort "${effort.name}" has provider "${effort.provider}" but model "${effort.model}" is qualified for provider "${modelProvider}".`,
+			};
+		}
+		return { model: `${modelProvider}/${modelId}` };
+	}
+
+	if (effort.provider) {
+		return { model: `${effort.provider}/${normalizedModel}` };
+	}
+
+	return { model: normalizedModel };
+}
+
+function resolveModelFromEffort(
 	model: string | undefined,
-	modelTierName: string | undefined,
+	effortName: string | undefined,
 	resources: ResourceDiscoveryResult,
-): { model?: string; modelTier?: ModelTierConfig; error?: string } {
+): { model?: string; effort?: EffortConfig; error?: string } {
 	if (model) return { model: normalizeLegacyModelName(model) };
-	if (!modelTierName) return {};
-	const tier = resources.modelTiers.find((candidate) => candidate.name === modelTierName);
-	if (!tier) {
+	if (!effortName) return {};
+	const effort = resources.efforts.find((candidate) => candidate.name === effortName);
+	if (!effort) {
 		return {
-			error: `Unknown model-tier: "${modelTierName}". Available model-tiers: ${formatModelTierList(resources)}.`,
+			error: `Unknown effort: "${effortName}". Available efforts: ${formatEffortList(resources)}.`,
 		};
 	}
-	return { model: normalizeLegacyModelName(tier.model), modelTier: tier };
+	const resolvedModel = buildEffortModelSpec(effort);
+	if (resolvedModel.error) return { error: resolvedModel.error };
+	return { model: resolvedModel.model, effort };
 }
 
 function resolveWorkerConfig(
@@ -625,7 +688,7 @@ function resolveWorkerConfig(
 		if (!profile.enabled) return { error: `Profile "${profileName}" is disabled.` };
 	}
 
-	const resolvedModel = resolveModelFromTier(step.model ?? agent?.model, step.modelTier ?? agent?.defaultModelTier, resources);
+	const resolvedModel = resolveModelFromEffort(step.model ?? agent?.model, step.effort ?? agent?.defaultEffort, resources);
 	if (resolvedModel.error) return { error: resolvedModel.error };
 
 	const skills = step.skills ?? agent?.defaultSkills;
@@ -746,7 +809,7 @@ function resolveWorkerConfig(
 		config: {
 			agent,
 			profile,
-			modelTier: resolvedModel.modelTier,
+			effort: resolvedModel.effort,
 			model: resolvedModel.model,
 			skills,
 			tools,
@@ -768,6 +831,7 @@ function resolveWorkerConfig(
 interface MainSessionBaseline {
 	sessionId: string;
 	model?: { provider: string; id: string };
+	thinkingLevel: ReturnType<ExtensionAPI["getThinkingLevel"]>;
 	tools: string[];
 }
 
@@ -775,7 +839,7 @@ interface PersistedMainAgentState {
 	found: boolean;
 	agent?: string;
 	profile?: string;
-	modelTier?: string;
+	effort?: string;
 }
 
 let mainSessionBaseline: MainSessionBaseline | undefined;
@@ -803,13 +867,14 @@ function ensureMainSessionBaseline(
 		model?: { provider: string; id: string };
 		sessionManager: { getSessionId(): string };
 	},
-	piApi: Pick<ExtensionAPI, "getActiveTools">,
+	piApi: Pick<ExtensionAPI, "getActiveTools" | "getThinkingLevel">,
 ): void {
 	const sessionId = ctx.sessionManager.getSessionId();
 	if (mainSessionBaseline?.sessionId === sessionId) return;
 	mainSessionBaseline = {
 		sessionId,
 		model: getCurrentModelRef(ctx),
+		thinkingLevel: piApi.getThinkingLevel(),
 		tools: [...piApi.getActiveTools()],
 	};
 }
@@ -840,7 +905,7 @@ function getPersistedMainAgentState(entries: SessionEntry[]): PersistedMainAgent
 			found: true,
 			agent: typeof data.agent === "string" ? data.agent : undefined,
 			profile: typeof data.profile === "string" ? data.profile : undefined,
-			modelTier: typeof data.modelTier === "string" ? data.modelTier : undefined,
+			effort: typeof data.effort === "string" ? data.effort : undefined,
 		};
 	}
 	return { found: false };
@@ -848,14 +913,14 @@ function getPersistedMainAgentState(entries: SessionEntry[]): PersistedMainAgent
 
 function persistMainAgentSelection(
 	ctx: { sessionManager: { getBranch(): SessionEntry[]; appendCustomEntry(customType: string, data?: unknown): string } },
-	state: { agent?: string; profile?: string; modelTier?: string },
+	state: { agent?: string; profile?: string; effort?: string },
 ): void {
 	const current = getPersistedMainAgentState(ctx.sessionManager.getBranch());
-	if (current.found && current.agent === state.agent && current.profile === state.profile && current.modelTier === state.modelTier) return;
+	if (current.found && current.agent === state.agent && current.profile === state.profile && current.effort === state.effort) return;
 	ctx.sessionManager.appendCustomEntry(MAIN_SESSION_AGENT_CUSTOM_TYPE, {
 		agent: state.agent ?? null,
 		profile: state.profile ?? null,
-		modelTier: state.modelTier ?? null,
+		effort: state.effort ?? null,
 	});
 }
 
@@ -881,7 +946,7 @@ async function restoreMainSessionBaseline(
 		model?: { provider: string; id: string };
 		modelRegistry: { find(provider: string, modelId: string): unknown };
 	},
-	piApi: Pick<ExtensionAPI, "setModel" | "setActiveTools">,
+	piApi: Pick<ExtensionAPI, "setModel" | "setActiveTools" | "setThinkingLevel">,
 ): Promise<string | undefined> {
 	if (!mainSessionBaseline) return undefined;
 	if (mainSessionBaseline.model) {
@@ -896,6 +961,7 @@ async function restoreMainSessionBaseline(
 			return `No API key available for baseline model ${mainSessionBaseline.model.provider}/${mainSessionBaseline.model.id}.`;
 		}
 	}
+	piApi.setThinkingLevel(mainSessionBaseline.thinkingLevel);
 	piApi.setActiveTools([...mainSessionBaseline.tools]);
 	return undefined;
 }
@@ -909,8 +975,8 @@ async function applyMainSessionAgentSelection(
 		modelRegistry: { find(provider: string, modelId: string): unknown };
 		sessionManager: { getSessionId(): string; getBranch(): SessionEntry[]; appendCustomEntry(customType: string, data?: unknown): string };
 	},
-	piApi: Pick<ExtensionAPI, "getAllTools" | "getActiveTools" | "getFlag" | "setActiveTools" | "setModel">,
-	selection: { agent?: string; profile?: string; modelTier?: string },
+	piApi: Pick<ExtensionAPI, "getAllTools" | "getActiveTools" | "getFlag" | "getThinkingLevel" | "setActiveTools" | "setModel" | "setThinkingLevel">,
+	selection: { agent?: string; profile?: string; effort?: string },
 	options: { persist?: boolean; notify?: boolean; confirmProjectAgent?: boolean } = {},
 ): Promise<{ ok: true; worker?: ResolvedWorkerConfig } | { ok: false; error: string }> {
 	ensureMainSessionBaseline(ctx, piApi);
@@ -932,7 +998,7 @@ async function applyMainSessionAgentSelection(
 		}
 	}
 
-	if (!selection.agent && !selection.profile && !selection.modelTier) {
+	if (!selection.agent && !selection.profile && !selection.effort) {
 		const restoreError = await restoreMainSessionBaseline(ctx, piApi);
 		if (restoreError) return { ok: false, error: restoreError };
 		activeMainWorker = undefined;
@@ -946,7 +1012,7 @@ async function applyMainSessionAgentSelection(
 		{
 			agent: selection.agent,
 			profile: selection.profile,
-			modelTier: selection.modelTier,
+			effort: selection.effort,
 			task: "main-session",
 			prompt: undefined,
 		},
@@ -980,6 +1046,9 @@ async function applyMainSessionAgentSelection(
 		if (restoreError) return { ok: false, error: restoreError };
 	}
 
+	if (worker.effort?.thinkingLevel) {
+		piApi.setThinkingLevel(worker.effort.thinkingLevel);
+	}
 	if (worker.tools !== undefined) piApi.setActiveTools([...worker.tools]);
 	else if (mainSessionBaseline) piApi.setActiveTools([...mainSessionBaseline.tools]);
 
@@ -988,7 +1057,7 @@ async function applyMainSessionAgentSelection(
 	if (options.persist) persistMainAgentSelection(ctx, selection);
 	if (options.notify) {
 		ctx.ui.notify(
-			`Main session: ${selection.agent ?? "generic"}${selection.profile ? ` + ${selection.profile}` : ""}${selection.modelTier ? ` + ${selection.modelTier}` : ""}`,
+			`Main session: ${selection.agent ?? "generic"}${selection.profile ? ` + ${selection.profile}` : ""}${selection.effort ? ` + ${selection.effort}` : ""}`,
 			"info",
 		);
 	}
@@ -1005,6 +1074,9 @@ interface PreparedTaskStep {
 		persist: boolean;
 		sessionFile?: string;
 		sessionId?: string;
+		sessionName?: string;
+		parentSessionFile?: string;
+		parentSessionId?: string;
 		stepDir?: string;
 	};
 }
@@ -1055,6 +1127,20 @@ function sanitizePathSegment(value: string | undefined, fallback: string): strin
 		.replace(/^-+|-+$/g, "")
 		.slice(0, 80);
 	return sanitized || fallback;
+}
+
+function buildTaskSessionWorkspaceName(run: TaskRunView, preferredStep?: TaskRunStepView): string {
+	const snapshot = preferredStep?.snapshot;
+	const stableId = sanitizePathSegment(
+		snapshot?.parentSessionId ?? run.sourceSessionId ?? path.basename(run.sourceSessionFile ?? ""),
+		"session",
+	);
+	const readableSource = sanitizePathSegment(
+		path.basename(snapshot?.parentSessionPath ?? run.sourceSessionFile ?? "", path.extname(snapshot?.parentSessionPath ?? run.sourceSessionFile ?? "")),
+		"",
+	);
+	if (!readableSource || readableSource === stableId) return `pi-${stableId}`;
+	return `pi-${stableId}-${readableSource}`.slice(0, 80);
 }
 
 function getSessionFileStem(sessionFile: string | undefined): string | undefined {
@@ -1236,61 +1322,158 @@ async function resolveParentSessionForCurrentSession(
 	};
 }
 
-function cloneSessionEntries(entries: SessionEntry[]): SessionEntry[] {
-	return entries.map((entry) => JSON.parse(JSON.stringify(entry)) as SessionEntry);
-}
-
 async function writeJsonFile(filePath: string, data: unknown): Promise<void> {
 	await withFileMutationQueue(filePath, async () => {
 		await fs.promises.writeFile(filePath, `${JSON.stringify(data, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
 	});
 }
 
-async function writeFreshSessionFile(filePath: string, childCwd: string): Promise<string> {
-	const sessionId = randomUUID();
-	const header = {
-		type: "session",
-		version: TASK_SESSION_VERSION_FALLBACK,
-		id: sessionId,
-		timestamp: new Date().toISOString(),
-		cwd: childCwd,
-	};
-	await withFileMutationQueue(filePath, async () => {
-		await fs.promises.writeFile(filePath, `${JSON.stringify(header)}\n`, { encoding: "utf-8", mode: 0o600, flag: "wx" });
-	});
-	return sessionId;
+function createSessionEntryId(): string {
+	return randomUUID().slice(0, 8);
 }
 
-async function writeForkedSessionFile(
-	filePath: string,
-	parentSessionFile: string,
-	parentEntries: SessionEntry[],
-	childCwd: string,
-): Promise<string> {
-	const sourceHeader = parentEntries.find((entry) => entry.type === "session") as
-		| (SessionEntry & { type: "session"; version?: number })
-		| undefined;
-	if (!sourceHeader) {
-		throw new Error("Parent session snapshot has no header.");
-	}
-	const sessionId = randomUUID();
-	const header = {
-		type: "session",
-		version: typeof sourceHeader.version === "number" ? sourceHeader.version : TASK_SESSION_VERSION_FALLBACK,
-		id: sessionId,
-		timestamp: new Date().toISOString(),
-		cwd: childCwd,
-		parentSession: parentSessionFile,
+function buildTaskChildSessionName(agentLabel: string, task: string): string {
+	const preview = createTaskPreview(task, 48);
+	return `task: ${agentLabel} · ${preview}`;
+}
+
+function buildTaskChildParentLinkData(params: {
+	runId: string;
+	step: number;
+	mode: TaskExecutionMode;
+	parentSessionFile?: string;
+	parentSessionId?: string;
+	taskPreview: string;
+	sessionName: string;
+	agent?: string;
+	profile?: string;
+}): Record<string, unknown> {
+	return {
+		v: TASK_CHILD_SESSION_LINK_VERSION,
+		runId: params.runId,
+		step: params.step,
+		mode: params.mode,
+		parentSessionFile: params.parentSessionFile,
+		parentSessionId: params.parentSessionId,
+		taskPreview: params.taskPreview,
+		sessionName: params.sessionName,
+		agent: params.agent,
+		profile: params.profile,
 	};
-	const lines = [JSON.stringify(header)];
-	for (const entry of parentEntries) {
-		if (entry.type === "session") continue;
-		lines.push(JSON.stringify(entry));
-	}
+}
+
+async function appendRawSessionEntries(
+	filePath: string,
+	entries: Array<Record<string, unknown>>,
+): Promise<void> {
+	if (entries.length === 0) return;
 	await withFileMutationQueue(filePath, async () => {
-		await fs.promises.writeFile(filePath, `${lines.join("\n")}\n`, { encoding: "utf-8", mode: 0o600, flag: "wx" });
+		await fs.promises.appendFile(filePath, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, {
+			encoding: "utf-8",
+			mode: 0o600,
+		});
 	});
-	return sessionId;
+}
+
+async function seedFreshTaskSessionFile(params: {
+	filePath: string;
+	sessionId: string;
+	childCwd: string;
+	parentSessionFile?: string;
+	sessionName: string;
+	linkData: Record<string, unknown>;
+}): Promise<void> {
+	const timestamp = new Date().toISOString();
+	const sessionInfoId = createSessionEntryId();
+	const linkEntryId = createSessionEntryId();
+	const lines = [
+		{
+			type: "session",
+			version: TASK_SESSION_VERSION_FALLBACK,
+			id: params.sessionId,
+			timestamp,
+			cwd: params.childCwd,
+			parentSession: params.parentSessionFile,
+		},
+		{
+			type: "session_info",
+			id: sessionInfoId,
+			parentId: null,
+			timestamp,
+			name: params.sessionName,
+		},
+		{
+			type: "custom",
+			customType: TASK_CHILD_SESSION_CUSTOM_TYPE_PARENT_LINK,
+			data: params.linkData,
+			id: linkEntryId,
+			parentId: sessionInfoId,
+			timestamp,
+		},
+	];
+	await withFileMutationQueue(params.filePath, async () => {
+		await fs.promises.writeFile(params.filePath, `${lines.map((entry) => JSON.stringify(entry)).join("\n")}\n`, {
+			encoding: "utf-8",
+			mode: 0o600,
+			flag: "wx",
+		});
+	});
+}
+
+async function createManagedFreshTaskSession(params: {
+	childCwd: string;
+	parentSessionFile?: string;
+	sessionName: string;
+	linkData: Record<string, unknown>;
+}): Promise<{ sessionId: string; sessionFile: string }> {
+	const manager = SessionManager.create(params.childCwd);
+	const sessionFile = manager.getSessionFile();
+	const sessionId = manager.getSessionId();
+	if (!sessionFile) throw new Error("Pi did not allocate a persisted session file for the child task.");
+	await seedFreshTaskSessionFile({
+		filePath: sessionFile,
+		sessionId,
+		childCwd: params.childCwd,
+		parentSessionFile: params.parentSessionFile,
+		sessionName: params.sessionName,
+		linkData: params.linkData,
+	});
+	return { sessionId, sessionFile };
+}
+
+async function createManagedForkedTaskSession(params: {
+	parentSessionFile: string;
+	childCwd: string;
+	sessionName: string;
+	linkData: Record<string, unknown>;
+}): Promise<{ sessionId: string; sessionFile: string }> {
+	const manager = SessionManager.forkFrom(params.parentSessionFile, params.childCwd);
+	const sessionFile = manager.getSessionFile();
+	const sessionId = manager.getSessionId();
+	if (!sessionFile) throw new Error("Pi did not allocate a persisted fork session file for the child task.");
+
+	const timestamp = new Date().toISOString();
+	const leafId = manager.getLeafId();
+	const sessionInfoId = createSessionEntryId();
+	const linkEntryId = createSessionEntryId();
+	await appendRawSessionEntries(sessionFile, [
+		{
+			type: "session_info",
+			id: sessionInfoId,
+			parentId: leafId ?? null,
+			timestamp,
+			name: params.sessionName,
+		},
+		{
+			type: "custom",
+			customType: TASK_CHILD_SESSION_CUSTOM_TYPE_PARENT_LINK,
+			data: params.linkData,
+			id: linkEntryId,
+			parentId: sessionInfoId,
+			timestamp,
+		},
+	]);
+	return { sessionId, sessionFile };
 }
 
 async function preflightTaskRun(
@@ -1338,7 +1521,6 @@ async function preflightTaskRun(
 
 	let parentSessionFile: string | undefined;
 	let parentSessionId: string | undefined;
-	let parentSnapshot: SessionEntry[] = [];
 	let parentBranch: SessionEntry[] | undefined;
 	if (needsPersistedSessions || needsFork) {
 		parentSessionFile = sessionManager.getSessionFile?.();
@@ -1352,7 +1534,6 @@ async function preflightTaskRun(
 		if (!parentBranch || !parentBranch.some((entry) => entry.type === "session")) {
 			return { error: "context.mode=\"fork\" requires a valid parent session snapshot, but none was found." };
 		}
-		parentSnapshot = cloneSessionEntries(parentBranch);
 	}
 
 	let sessionRunId: string | undefined;
@@ -1422,16 +1603,43 @@ async function preflightTaskRun(
 			return { error: `Internal error: missing step directory for persisted step ${i + 1}.` };
 		}
 
-		const sessionFile = path.join(preparedStep.session.stepDir, "child-session.jsonl");
+		const sessionName = buildTaskChildSessionName(preparedStep.worker.displayAgentName, preparedStep.rawStep.task);
+		const taskPreview = createTaskPreview(preparedStep.rawStep.task);
+		const linkData = buildTaskChildParentLinkData({
+			runId: sessionRunId ?? `pending-${i + 1}`,
+			step: i + 1,
+			mode,
+			parentSessionFile,
+			parentSessionId,
+			taskPreview,
+			sessionName,
+			agent: preparedStep.worker.agent?.name,
+			profile: preparedStep.worker.profile?.name,
+		});
 		let sessionId: string;
+		let sessionFile: string;
 		try {
 			if (preparedStep.session.mode === "fresh") {
-				sessionId = await writeFreshSessionFile(sessionFile, preparedStep.launchCwd);
+				const createdSession = await createManagedFreshTaskSession({
+					childCwd: preparedStep.launchCwd,
+					parentSessionFile,
+					sessionName,
+					linkData,
+				});
+				sessionId = createdSession.sessionId;
+				sessionFile = createdSession.sessionFile;
 			} else {
 				if (!parentSessionFile) {
 					return { error: `Step ${i + 1} cannot fork because parent session is unavailable.` };
 				}
-				sessionId = await writeForkedSessionFile(sessionFile, parentSessionFile, parentSnapshot, preparedStep.launchCwd);
+				const createdSession = await createManagedForkedTaskSession({
+					parentSessionFile,
+					childCwd: preparedStep.launchCwd,
+					sessionName,
+					linkData,
+				});
+				sessionId = createdSession.sessionId;
+				sessionFile = createdSession.sessionFile;
 			}
 		} catch (error) {
 			return {
@@ -1440,6 +1648,9 @@ async function preflightTaskRun(
 		}
 		preparedStep.session.sessionFile = sessionFile;
 		preparedStep.session.sessionId = sessionId;
+		preparedStep.session.sessionName = sessionName;
+		preparedStep.session.parentSessionFile = parentSessionFile;
+		preparedStep.session.parentSessionId = parentSessionId;
 		try {
 			await writeJsonFile(path.join(preparedStep.session.stepDir, "step.json"), {
 				step: i + 1,
@@ -1450,6 +1661,9 @@ async function preflightTaskRun(
 				profile: preparedStep.worker.profile?.name ?? null,
 				sessionId,
 				sessionFile,
+				sessionName,
+				parentSessionFile: parentSessionFile ?? null,
+				parentSessionId: parentSessionId ?? null,
 			});
 		} catch (error) {
 			return {
@@ -1468,7 +1682,7 @@ async function preflightTaskRun(
 	};
 }
 
-async function runSingleAgent(
+async function runSingleAgentViaJson(
 	preparedStep: PreparedTaskStep,
 	task: string,
 	step: number | undefined,
@@ -1486,7 +1700,7 @@ async function runSingleAgent(
 				agent: worker.displayAgentName,
 				agentSource: agent?.source ?? "unknown",
 				profile: worker.profile?.name,
-				modelTier: worker.modelTier?.name,
+				effort: worker.effort?.name,
 				task,
 				exitCode: 1,
 				messages: [],
@@ -1507,7 +1721,7 @@ async function runSingleAgent(
 
 	const agentModel = worker.model;
 	if (agentModel) args.push("--model", agentModel);
-	if (worker.modelTier?.thinkingLevel) args.push("--thinking", worker.modelTier.thinkingLevel);
+	if (worker.effort?.thinkingLevel) args.push("--thinking", worker.effort.thinkingLevel);
 	if (worker.tools !== undefined) {
 		if (worker.tools.length > 0) args.push("--tools", worker.tools.join(","));
 		else args.push("--no-tools");
@@ -1521,7 +1735,7 @@ async function runSingleAgent(
 				agent: worker.displayAgentName,
 				agentSource: agent?.source ?? "unknown",
 				profile: worker.profile?.name,
-				modelTier: worker.modelTier?.name,
+				effort: worker.effort?.name,
 				task,
 				exitCode: 1,
 				messages: [],
@@ -1548,7 +1762,7 @@ async function runSingleAgent(
 		agent: worker.displayAgentName,
 		agentSource: agent?.source ?? "unknown",
 		profile: worker.profile?.name,
-		modelTier: worker.modelTier?.name,
+		effort: worker.effort?.name,
 		task,
 		exitCode: 0,
 		messages: [],
@@ -1692,6 +1906,330 @@ async function runSingleAgent(
 	}
 }
 
+async function runSingleAgentViaRpc(
+	preparedStep: PreparedTaskStep,
+	task: string,
+	step: number | undefined,
+	signal: AbortSignal | undefined,
+	onUpdate: OnUpdateCallback | undefined,
+	makeDetails: (results: SingleResult[]) => TaskDetails,
+	initialChildSession: ChildSessionSnapshot,
+	toolCallId: string,
+): Promise<SingleResult> {
+	const worker = preparedStep.worker;
+	const agent = worker.agent;
+	const args: string[] = ["--mode", "rpc"];
+	if (!preparedStep.session.sessionFile) {
+		return {
+			agent: worker.displayAgentName,
+			agentSource: agent?.source ?? "unknown",
+			profile: worker.profile?.name,
+			effort: worker.effort?.name,
+			task,
+			exitCode: 1,
+			messages: [],
+			stderr: "Missing child session file for persisted RPC task step.",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			model: worker.model,
+			step,
+			sessionMode: preparedStep.session.mode,
+			sessionPersist: preparedStep.session.persist,
+			sessionFile: preparedStep.session.sessionFile,
+			childSession: { ...initialChildSession },
+		};
+	}
+	args.push("--session", preparedStep.session.sessionFile);
+
+	const agentModel = worker.model;
+	if (agentModel) args.push("--model", agentModel);
+	if (worker.effort?.thinkingLevel) args.push("--thinking", worker.effort.thinkingLevel);
+	if (worker.tools !== undefined) {
+		if (worker.tools.length > 0) args.push("--tools", worker.tools.join(","));
+		else args.push("--no-tools");
+	}
+	if (!worker.inheritProjectContext) args.push("--no-context-files");
+	if (worker.skills && worker.skills.length > 0) {
+		const { paths, missing } = resolveSkillPaths(worker.skills, preparedStep.launchCwd);
+		if (missing.length > 0) {
+			return {
+				agent: worker.displayAgentName,
+				agentSource: agent?.source ?? "unknown",
+				profile: worker.profile?.name,
+				effort: worker.effort?.name,
+				task,
+				exitCode: 1,
+				messages: [],
+				stderr: `Failed to resolve required skills for worker "${worker.displayAgentName}": ${missing.join(", ")}.`,
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+				model: agentModel,
+				step,
+				sessionMode: preparedStep.session.mode,
+				sessionPersist: preparedStep.session.persist,
+				sessionFile: preparedStep.session.sessionFile,
+				childSession: { ...initialChildSession },
+			};
+		}
+		args.push("--no-skills");
+		for (const skillPath of paths) args.push("--skill", skillPath);
+	} else if (!worker.inheritSkills) {
+		args.push("--no-skills");
+	}
+
+	let tmpPromptDir: string | null = null;
+	let tmpPromptPath: string | null = null;
+	const currentResult: SingleResult = {
+		agent: worker.displayAgentName,
+		agentSource: agent?.source ?? "unknown",
+		profile: worker.profile?.name,
+		effort: worker.effort?.name,
+		task,
+		exitCode: 0,
+		messages: [],
+		stderr: "",
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		model: agentModel,
+		step,
+		sessionMode: preparedStep.session.mode,
+		sessionPersist: preparedStep.session.persist,
+		sessionFile: preparedStep.session.sessionFile,
+		childSession: { ...initialChildSession },
+	};
+	const emitUpdate = () => {
+		if (!onUpdate) return;
+		onUpdate({
+			content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
+			details: makeDetails([currentResult]),
+		});
+	};
+
+	try {
+		const composedPrompt = worker.systemPrompt;
+		if (composedPrompt.trim()) {
+			const tmp = await writePromptToTempFile(worker.displayAgentName, composedPrompt);
+			tmpPromptDir = tmp.dir;
+			tmpPromptPath = tmp.filePath;
+			const promptFlag = worker.systemPromptMode === "append" ? "--append-system-prompt" : "--system-prompt";
+			args.push(promptFlag, tmpPromptPath);
+		}
+
+		const invocation = getPiInvocation(args);
+		const proc = spawn(invocation.command, invocation.args, {
+			cwd: preparedStep.launchCwd,
+			shell: false,
+			stdio: ["pipe", "pipe", "pipe"],
+			env: {
+				...process.env,
+				...getSubagentDepthEnv(),
+				...(agent ? { PI_AGENT_NAME: agent.name } : {}),
+				...(worker.profile ? { PI_PROFILE_NAME: worker.profile.permissionsProfile ?? worker.profile.name } : {}),
+			},
+		});
+		const controllerKey = makeTaskRunStepKey(initialChildSession.runId, step ?? initialChildSession.step);
+		const controller: LiveTaskController = {
+			key: controllerKey,
+			toolCallId,
+			runId: initialChildSession.runId,
+			step: step ?? initialChildSession.step,
+			childSessionId: initialChildSession.childSessionId,
+			childSessionPath: initialChildSession.childSessionPath,
+			parentSessionPath: initialChildSession.parentSessionPath,
+			task,
+			agent: worker.displayAgentName,
+			transport: "rpc",
+			proc,
+			pendingResponses: new Map<string, PendingRpcResponse>(),
+			status: "running",
+			startedAt: new Date().toISOString(),
+			isStreaming: false,
+			pendingSteeringCount: 0,
+			pendingFollowUpCount: 0,
+			lastMessageCount: 0,
+			syncCursor: 0,
+		};
+		setLiveTaskController(controller);
+
+		let buffer = "";
+		let completionResolve: ((value: number) => void) | undefined;
+		const completion = new Promise<number>((resolve) => {
+			completionResolve = resolve;
+		});
+		let sawAgentEnd = false;
+		let rpcAborted = false;
+		let closed = false;
+
+		const finishController = (exitCode: number) => {
+			if (closed) return;
+			closed = true;
+			controller.finishedAt = new Date().toISOString();
+			deleteLiveTaskController(controller.key);
+			rejectPendingRpcResponses(controller, new Error("Task controller closed"));
+			completionResolve?.(exitCode);
+		};
+
+		const handleLine = (line: string) => {
+			if (!line.trim()) return;
+			let event: unknown;
+			try {
+				event = JSON.parse(line);
+			} catch {
+				return;
+			}
+			if (!isRecord(event)) return;
+			if (event.type === "response") {
+				const response = event as RpcResponseEnvelope;
+				if (typeof response.id === "string") {
+					const pending = controller.pendingResponses.get(response.id);
+					if (pending) {
+						controller.pendingResponses.delete(response.id);
+						pending.resolve(response);
+					}
+				}
+				return;
+			}
+			if (event.type === "agent_start") {
+				controller.isStreaming = true;
+				controller.lastActivity = "agent_start";
+				return;
+			}
+			if (event.type === "agent_end") {
+				sawAgentEnd = true;
+				controller.isStreaming = false;
+				controller.status = rpcAborted ? "aborted" : "completed";
+				controller.lastActivity = "agent_end";
+				const maybeMessages = Array.isArray(event.messages) ? (event.messages as Message[]) : undefined;
+				if (maybeMessages) {
+					currentResult.messages = maybeMessages;
+					controller.lastMessageCount = maybeMessages.length;
+				}
+				emitUpdate();
+				proc.kill("SIGTERM");
+				return;
+			}
+			if (event.type === "message_end" && event.message) {
+				const msg = event.message as Message;
+				currentResult.messages.push(msg);
+				controller.lastMessageCount = currentResult.messages.length;
+				controller.lastActivity = msg.role;
+				if (msg.role === "assistant") {
+					currentResult.usage.turns++;
+					const usage = msg.usage;
+					if (usage) {
+						currentResult.usage.input += usage.input || 0;
+						currentResult.usage.output += usage.output || 0;
+						currentResult.usage.cacheRead += usage.cacheRead || 0;
+						currentResult.usage.cacheWrite += usage.cacheWrite || 0;
+						currentResult.usage.cost += usage.cost?.total || 0;
+						currentResult.usage.contextTokens = usage.totalTokens || 0;
+					}
+					if (!currentResult.model && msg.model) currentResult.model = msg.model;
+					if (msg.stopReason) currentResult.stopReason = msg.stopReason;
+					if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
+				}
+				emitUpdate();
+				return;
+			}
+			if (event.type === "tool_execution_start") {
+				controller.lastActivity = typeof event.toolName === "string" ? `tool:${event.toolName}` : "tool:start";
+				return;
+			}
+			if (event.type === "tool_execution_end") {
+				controller.lastActivity = typeof event.toolName === "string" ? `tool:${event.toolName}` : "tool:end";
+				return;
+			}
+			if (event.type === "queue_update") {
+				controller.lastActivity = "queue_update";
+				controller.pendingSteeringCount = Array.isArray(event.steering) ? event.steering.length : controller.pendingSteeringCount;
+				controller.pendingFollowUpCount = Array.isArray(event.followUp) ? event.followUp.length : controller.pendingFollowUpCount;
+			}
+		};
+
+		proc.stdout.on("data", (data) => {
+			buffer += data.toString();
+			const lines = buffer.split("\n");
+			buffer = lines.pop() || "";
+			for (const line of lines) handleLine(line);
+		});
+		proc.stderr.on("data", (data) => {
+			currentResult.stderr += data.toString();
+		});
+		proc.on("close", (code) => {
+			if (buffer.trim()) handleLine(buffer);
+			finishController(sawAgentEnd ? 0 : (code ?? 1));
+		});
+		proc.on("error", (error) => {
+			controller.status = rpcAborted ? "aborted" : "failed";
+			currentResult.stderr += error instanceof Error ? error.message : String(error);
+			finishController(1);
+		});
+
+		if (signal) {
+			const killProc = () => {
+				rpcAborted = true;
+				controller.status = "aborted";
+				proc.kill("SIGTERM");
+				setTimeout(() => {
+					if (!proc.killed) proc.kill("SIGKILL");
+				}, 5000);
+			};
+			if (signal.aborted) killProc();
+			else signal.addEventListener("abort", killProc, { once: true });
+		}
+
+		const promptResponse = await sendLiveTaskRpcCommand(controller, {
+			type: "prompt",
+			message: `Task: ${task}`,
+		});
+		if (promptResponse.success === false) {
+			controller.status = "failed";
+			proc.kill("SIGTERM");
+			await completion;
+			currentResult.exitCode = 1;
+			currentResult.errorMessage = typeof promptResponse.error === "string" ? promptResponse.error : "Task prompt rejected";
+			if (!currentResult.stderr && currentResult.errorMessage) currentResult.stderr = currentResult.errorMessage;
+			return currentResult;
+		}
+
+		const exitCode = await completion;
+		currentResult.exitCode = exitCode;
+		if (rpcAborted) {
+			currentResult.stopReason = "aborted";
+			if (!currentResult.errorMessage) currentResult.errorMessage = "Task was aborted";
+			if (currentResult.exitCode === 0) currentResult.exitCode = 130;
+		}
+		return currentResult;
+	} finally {
+		if (tmpPromptPath)
+			try {
+				fs.unlinkSync(tmpPromptPath);
+			} catch {
+				/* ignore */
+			}
+		if (tmpPromptDir)
+			try {
+				fs.rmdirSync(tmpPromptDir);
+			} catch {
+				/* ignore */
+			}
+	}
+}
+
+async function runSingleAgent(
+	preparedStep: PreparedTaskStep,
+	task: string,
+	step: number | undefined,
+	signal: AbortSignal | undefined,
+	onUpdate: OnUpdateCallback | undefined,
+	makeDetails: (results: SingleResult[]) => TaskDetails,
+	initialChildSession?: ChildSessionSnapshot,
+	enableRpcControl = false,
+	toolCallId?: string,
+): Promise<SingleResult> {
+	if (enableRpcControl && initialChildSession && preparedStep.session.persist && preparedStep.session.sessionFile && toolCallId) {
+		return runSingleAgentViaRpc(preparedStep, task, step, signal, onUpdate, makeDetails, initialChildSession, toolCallId);
+	}
+	return runSingleAgentViaJson(preparedStep, task, step, signal, onUpdate, makeDetails, initialChildSession);
+}
+
 function appendTaskChildSessionMetadata(
 	sessionManager: { appendCustomEntry(customType: string, data?: unknown): string },
 	snapshot: ChildSessionSnapshot,
@@ -1715,8 +2253,11 @@ async function runTaskStepWithMetadata(options: {
 	onUpdate: OnUpdateCallback | undefined;
 	makeDetails: (results: SingleResult[]) => TaskDetails;
 	sessionManager: { appendCustomEntry(customType: string, data?: unknown): string };
+	origin?: TaskOriginSnapshot;
+	refreshUi?: () => Promise<void> | void;
+	enableRpcControl?: boolean;
 }): Promise<SingleResult> {
-	const { preparedStep, task, mode, step, toolCallId, runId, signal, onUpdate, makeDetails, sessionManager } = options;
+	const { preparedStep, task, mode, step, toolCallId, runId, signal, onUpdate, makeDetails, sessionManager, origin, refreshUi, enableRpcControl } = options;
 	const metadataRunId = runId ?? `${toolCallId}-run`;
 
 	let createdSnapshot: ChildSessionSnapshot | undefined;
@@ -1729,6 +2270,12 @@ async function runTaskStepWithMetadata(options: {
 			step,
 			childSessionId: preparedStep.session.sessionId,
 			childSessionPath: preparedStep.session.sessionFile,
+			childSessionName: preparedStep.session.sessionName,
+			parentSessionId: preparedStep.session.parentSessionId,
+			parentSessionPath: preparedStep.session.parentSessionFile,
+			originEntryId: origin?.originEntryId,
+			originUserEntryId: origin?.originUserEntryId,
+			originPreview: origin?.originPreview,
 			effectiveContext: preparedStep.session.mode,
 			persist: true,
 			agent: preparedStep.worker.agent?.name,
@@ -1738,6 +2285,7 @@ async function runTaskStepWithMetadata(options: {
 			status: "created",
 		};
 		const appendError = appendTaskChildSessionMetadata(sessionManager, createdSnapshot);
+		if (!appendError) await Promise.resolve(refreshUi?.());
 		if (appendError) {
 			const metadataError =
 				`Failed to append initial ${TASK_CHILD_SESSION_CUSTOM_TYPE} metadata (status="created"). ` +
@@ -1747,7 +2295,7 @@ async function runTaskStepWithMetadata(options: {
 				agent: preparedStep.worker.displayAgentName,
 				agentSource: preparedStep.worker.agent?.source ?? "unknown",
 				profile: preparedStep.worker.profile?.name,
-				modelTier: preparedStep.worker.modelTier?.name,
+				effort: preparedStep.worker.effort?.name,
 				task,
 				exitCode: 1,
 				messages: [],
@@ -1782,6 +2330,8 @@ async function runTaskStepWithMetadata(options: {
 			onUpdate,
 			makeDetails,
 			createdSnapshot,
+			enableRpcControl === true,
+			toolCallId,
 		);
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1790,7 +2340,7 @@ async function runTaskStepWithMetadata(options: {
 			agent: preparedStep.worker.displayAgentName,
 			agentSource: preparedStep.worker.agent?.source ?? "unknown",
 			profile: preparedStep.worker.profile?.name,
-			modelTier: preparedStep.worker.modelTier?.name,
+			effort: preparedStep.worker.effort?.name,
 			task,
 			exitCode: aborted ? 130 : 1,
 			messages: [],
@@ -1817,6 +2367,7 @@ async function runTaskStepWithMetadata(options: {
 			errorMessage: result.errorMessage ?? (result.stderr.trim().length > 0 ? createTaskPreview(result.stderr.trim(), 240) : undefined),
 		};
 		const appendError = appendTaskChildSessionMetadata(sessionManager, terminalSnapshot);
+		if (!appendError) await Promise.resolve(refreshUi?.());
 		if (appendError) {
 			const metadataError =
 				`Failed to append terminal ${TASK_CHILD_SESSION_CUSTOM_TYPE} metadata (status="${terminalSnapshot.status}"). ` +
@@ -1840,420 +2391,81 @@ async function runTaskStepWithMetadata(options: {
 	return result;
 }
 
-interface ParsedTasksCommand {
-	scope: TasksScope;
-	action: TasksAction;
-	selector?: string;
-	error?: string;
-}
-
-interface TaskChildSessionRecord {
-	snapshot: ChildSessionSnapshot;
-	sourceOrder: number;
-	sourceSessionFile?: string;
-	sourceSessionId?: string;
-}
-
-interface TaskRunStepView {
-	step: number;
-	snapshot: ChildSessionSnapshot;
-	status: TaskRunStepStatus;
-	isLive: boolean;
-	hasTerminalMetadata: boolean;
-	warnings: string[];
-	sourceOrder: number;
-}
-
-interface TaskRunView {
-	internalRunKey: string;
-	runId: string;
-	toolCallId: string;
-	mode: TaskExecutionMode;
-	sourceSessionFile?: string;
-	sourceSessionId?: string;
-	steps: TaskRunStepView[];
-	stepCount: number;
-	persistedStepCount: number;
-	createdAt: string;
-	updatedAt: string;
-	status: TaskRunStatus;
-	warnings: string[];
-	latestSourceOrder: number;
-}
-
-interface TaskSelectorResolution {
-	run: TaskRunView;
-	step?: TaskRunStepView;
-	matchedBy: "runId" | "childSession" | "basename" | "index";
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return Boolean(value) && typeof value === "object";
 }
 
-function isTaskExecutionMode(value: unknown): value is TaskExecutionMode {
-	return value === "single" || value === "parallel" || value === "chain";
-}
-
-function isChildSessionStatus(value: unknown): value is ChildSessionStatus {
-	return value === "created" || value === "succeeded" || value === "failed" || value === "aborted";
-}
-
-function isContextMode(value: unknown): value is ContextMode {
-	return value === "fresh" || value === "fork";
-}
-
-function normalizeChildSessionSnapshot(data: unknown): ChildSessionSnapshot | undefined {
-	if (!isRecord(data)) return undefined;
-	if (!isTaskExecutionMode(data.mode)) return undefined;
-	if (typeof data.runId !== "string" || !data.runId.trim()) return undefined;
-	if (typeof data.toolCallId !== "string" || !data.toolCallId.trim()) return undefined;
-	if (typeof data.step !== "number" || !Number.isInteger(data.step) || data.step <= 0) return undefined;
-	if (typeof data.createdAt !== "string" || !data.createdAt.trim()) return undefined;
-
-	const persist = typeof data.persist === "boolean" ? data.persist : true;
-	const childSessionId =
-		typeof data.childSessionId === "string" && data.childSessionId.trim().length > 0
-			? data.childSessionId
-			: `${data.runId}-step-${data.step}`;
-	const childSessionPath = typeof data.childSessionPath === "string" ? data.childSessionPath : "";
-	if (persist && !childSessionPath.trim()) return undefined;
-
-	const status = isChildSessionStatus(data.status) ? data.status : "created";
-	const contextMode = isContextMode(data.effectiveContext) ? data.effectiveContext : "fresh";
-
-	return {
-		v: typeof data.v === "number" && Number.isFinite(data.v) ? data.v : TASK_CHILD_SESSION_METADATA_VERSION,
-		runId: data.runId,
-		toolCallId: data.toolCallId,
-		mode: data.mode,
-		step: data.step,
-		childSessionId,
-		childSessionPath,
-		effectiveContext: contextMode,
-		persist,
-		agent: typeof data.agent === "string" ? data.agent : undefined,
-		profile: typeof data.profile === "string" ? data.profile : undefined,
-		taskPreview: typeof data.taskPreview === "string" ? data.taskPreview : "",
-		createdAt: data.createdAt,
-		finishedAt: typeof data.finishedAt === "string" ? data.finishedAt : undefined,
-		status,
-		exitCode: typeof data.exitCode === "number" && Number.isFinite(data.exitCode) ? data.exitCode : undefined,
-		stopReason: typeof data.stopReason === "string" ? data.stopReason : undefined,
-		errorMessage: typeof data.errorMessage === "string" ? data.errorMessage : undefined,
-	};
-}
-
-function parseTasksCommand(args: string): ParsedTasksCommand {
-	const trimmed = args.trim();
-	if (!trimmed) return { scope: "current", action: "list" };
-	const tokens = trimmed.split(/\s+/).filter(Boolean);
-	const lower = tokens.map((token) => token.toLowerCase());
-
-	if (lower[0] === "list") {
-		if (tokens.length === 1) return { scope: "current", action: "list" };
-		return { scope: "current", action: "list", error: `Unsupported /tasks arguments: ${args}` };
+function collectLiveTaskControllerStepKeys(currentSessionFile?: string): Set<string> {
+	const keys = new Set<string>();
+	for (const controller of listLiveTaskControllers()) {
+		if (controller.status !== "running") continue;
+		if (currentSessionFile && controller.parentSessionPath && controller.parentSessionPath !== currentSessionFile) continue;
+		keys.add(controller.key);
 	}
+	return keys;
+}
 
-	if (lower[0] === "recent") {
-		if (tokens.length === 1) return { scope: "recent", action: "list" };
-		if ((lower[1] === "show" || lower[1] === "open") && tokens.length >= 3) {
-			return {
-				scope: "recent",
-				action: lower[1] as TasksAction,
-				selector: tokens.slice(2).join(" "),
-			};
+function resolveLiveTaskControllerForRun(run: TaskRunView, step?: TaskRunStepView): { controller?: LiveTaskController; error?: string } {
+	if (step) {
+		const controller = getLiveTaskController(makeTaskRunStepKey(run.runId, step.step));
+		if (!controller || controller.status !== "running") {
+			return { error: `Run ${run.runId} step ${step.step} is not attached to a running live task controller.` };
 		}
-		return { scope: "recent", action: "list", error: `Unsupported /tasks arguments: ${args}` };
+		return { controller };
 	}
 
-	if (lower[0] === "parent") {
-		if (tokens.length === 1) return { scope: "current", action: "parent" };
-		return { scope: "current", action: "parent", error: `Unsupported /tasks arguments: ${args}` };
+	const controllers = run.steps
+		.map((candidate) => getLiveTaskController(makeTaskRunStepKey(run.runId, candidate.step)))
+		.filter((candidate): candidate is LiveTaskController => Boolean(candidate) && candidate.status === "running");
+	if (controllers.length === 0) {
+		return { error: `Run ${run.runId} has no running live task controller.` };
 	}
-
-	if ((lower[0] === "show" || lower[0] === "open") && tokens.length >= 2) {
-		return {
-			scope: "current",
-			action: lower[0] as TasksAction,
-			selector: tokens.slice(1).join(" "),
-		};
+	if (controllers.length > 1) {
+		return { error: `Run ${run.runId} has multiple running steps. Select a specific child session id prefix first.` };
 	}
-
-	return { scope: "current", action: "list", error: `Unsupported /tasks arguments: ${args}` };
+	return { controller: controllers[0] };
 }
 
-function makeTaskRunStepKey(runId: string, step: number): string {
-	return `${runId}:${step}`;
-}
-
-function toMillis(value: string | undefined): number {
-	if (!value) return 0;
-	const parsed = Date.parse(value);
-	return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function getSnapshotEventTimestamp(snapshot: ChildSessionSnapshot): string {
-	return snapshot.finishedAt ?? snapshot.createdAt;
-}
-
-function formatTimestampCompact(value: string): string {
-	const date = new Date(value);
-	if (Number.isNaN(date.getTime())) return value;
-	return date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "Z");
-}
-
-function collectTaskMetadataRecordsFromEntries(entries: readonly SessionEntry[], sourceSessionFile?: string): TaskChildSessionRecord[] {
-	const records: TaskChildSessionRecord[] = [];
-	for (let index = 0; index < entries.length; index++) {
-		const entry = entries[index];
-		if (entry.type !== "custom" || entry.customType !== TASK_CHILD_SESSION_CUSTOM_TYPE) continue;
-		const snapshot = normalizeChildSessionSnapshot(entry.data);
-		if (!snapshot) continue;
-		records.push({ snapshot, sourceOrder: index, sourceSessionFile });
+function describeTaskRunAccess(run: TaskRunView, selectedStep?: TaskRunStepView): string[] {
+	const labels: string[] = [];
+	const targetStep = selectTaskRunStepForOpen(run, selectedStep);
+	const liveControllerResolution = resolveLiveTaskControllerForRun(run, selectedStep);
+	if (targetStep?.snapshot.persist) {
+		labels.push("open");
+		const liveController = getLiveTaskController(makeTaskRunStepKey(run.runId, targetStep.step));
+		if (getTaskTerminalAttachment(targetStep.snapshot) || liveController?.status !== "running") labels.push("attach");
 	}
-	return records;
-}
-
-function collectLiveTaskRunSteps(entries: readonly SessionEntry[]): Set<string> {
-	const live = new Set<string>();
-	for (const entry of entries) {
-		if (entry.type !== "message") continue;
-		const message = entry.message;
-		if (!isRecord(message) || message.role !== "toolResult" || message.toolName !== "task") continue;
-		const details = message.details;
-		if (!isRecord(details)) continue;
-
-		const childSessions = Array.isArray(details.childSessions) ? details.childSessions : [];
-		for (const value of childSessions) {
-			const snapshot = normalizeChildSessionSnapshot(value);
-			if (!snapshot) continue;
-			if (snapshot.status === "created") live.add(makeTaskRunStepKey(snapshot.runId, snapshot.step));
-		}
-
-		const results = Array.isArray(details.results) ? details.results : [];
-		for (const rawResult of results) {
-			if (!isRecord(rawResult)) continue;
-			const snapshot = normalizeChildSessionSnapshot(rawResult.childSession);
-			if (!snapshot) continue;
-			const exitCode = typeof rawResult.exitCode === "number" ? rawResult.exitCode : undefined;
-			if (snapshot.status === "created" || exitCode === -1) {
-				live.add(makeTaskRunStepKey(snapshot.runId, snapshot.step));
-			}
-		}
-	}
-	return live;
-}
-
-async function listSessionFiles(rootDir: string): Promise<string[]> {
-	const files: string[] = [];
-	let currentLayer: string[] = [rootDir];
-	while (currentLayer.length > 0) {
-		const nextLayer: string[] = [];
-		for (const dir of currentLayer) {
-			let entries: fs.Dirent[];
-			try {
-				entries = await fs.promises.readdir(dir, { withFileTypes: true });
-			} catch {
-				continue;
-			}
-			for (const entry of entries) {
-				const fullPath = path.join(dir, entry.name);
-				if (entry.isDirectory()) nextLayer.push(fullPath);
-				else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(fullPath);
-			}
-		}
-		currentLayer = nextLayer;
-	}
-	return files;
-}
-
-async function collectTaskMetadataRecordsFromSessionFile(sessionFile: string): Promise<TaskChildSessionRecord[]> {
-	const records: TaskChildSessionRecord[] = [];
-	const stream = fs.createReadStream(sessionFile, { encoding: "utf-8" });
-	const lines = readline.createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY });
-	let lineNumber = 0;
-	let sourceSessionId: string | undefined;
-
-	try {
-		for await (const line of lines) {
-			lineNumber++;
-			if (!line.trim()) continue;
-
-			if (lineNumber === 1) {
-				try {
-					const parsedHeader = JSON.parse(line) as unknown;
-					if (isRecord(parsedHeader) && parsedHeader.type === "session" && typeof parsedHeader.id === "string") {
-						sourceSessionId = parsedHeader.id;
-					}
-				} catch {
-					// Ignore malformed header line.
-				}
-			}
-
-			if (!line.includes(TASK_CHILD_SESSION_CUSTOM_TYPE)) continue;
-
-			let parsed: unknown;
-			try {
-				parsed = JSON.parse(line);
-			} catch {
-				continue;
-			}
-			if (!isRecord(parsed) || parsed.type !== "custom" || parsed.customType !== TASK_CHILD_SESSION_CUSTOM_TYPE) continue;
-			const snapshot = normalizeChildSessionSnapshot(parsed.data);
-			if (!snapshot) continue;
-			records.push({
-				snapshot,
-				sourceOrder: lineNumber,
-				sourceSessionFile: sessionFile,
-				sourceSessionId,
-			});
-		}
-	} finally {
-		lines.close();
-		stream.destroy();
-	}
-
-	return records;
-}
-
-function deriveTaskRunStepStatus(snapshot: ChildSessionSnapshot, isLive: boolean): TaskRunStepStatus {
-	if (!snapshot.persist) return "not-persisted";
-	if (snapshot.status === "created") return isLive ? "running" : "interrupted";
-	return snapshot.status;
-}
-
-function deriveTaskRunStatus(stepStatuses: TaskRunStepStatus[]): TaskRunStatus {
-	if (stepStatuses.some((status) => status === "running")) return "running";
-	if (stepStatuses.some((status) => status === "interrupted")) return "interrupted";
-	if (stepStatuses.some((status) => status === "failed")) return "failed";
-	if (stepStatuses.some((status) => status === "aborted")) return "aborted";
-	if (stepStatuses.some((status) => status === "succeeded")) return "succeeded";
-	return "not-persisted";
-}
-
-function buildTaskRunViews(records: TaskChildSessionRecord[], liveStepKeys: Set<string>): TaskRunView[] {
-	const byRun = new Map<string, Map<number, TaskChildSessionRecord>>();
-
-	for (const record of records) {
-		const runKey = `${record.sourceSessionFile ?? "current"}::${record.snapshot.runId}`;
-		let byStep = byRun.get(runKey);
-		if (!byStep) {
-			byStep = new Map();
-			byRun.set(runKey, byStep);
-		}
-		const existing = byStep.get(record.snapshot.step);
-		if (!existing || record.sourceOrder >= existing.sourceOrder) {
-			byStep.set(record.snapshot.step, record);
-		}
-	}
-
-	const runs: TaskRunView[] = [];
-	for (const [internalRunKey, byStep] of byRun.entries()) {
-		const orderedRecords = Array.from(byStep.values()).sort((left, right) => left.snapshot.step - right.snapshot.step);
-		if (orderedRecords.length === 0) continue;
-
-		const steps: TaskRunStepView[] = orderedRecords.map((record) => {
-			const snapshot = record.snapshot;
-			const isLive = liveStepKeys.has(makeTaskRunStepKey(snapshot.runId, snapshot.step));
-			const status = deriveTaskRunStepStatus(snapshot, isLive);
-			const hasTerminalMetadata = snapshot.status !== "created";
-			const warnings: string[] = [];
-
-			if (snapshot.persist) {
-				if (!snapshot.childSessionPath.trim()) warnings.push("missing child session path (stale metadata)");
-				else if (!fs.existsSync(snapshot.childSessionPath)) warnings.push("child session file missing (stale metadata)");
-			}
-			if (!hasTerminalMetadata && !isLive) warnings.push("no terminal metadata; treated as interrupted");
-			if (!snapshot.persist) warnings.push("legacy non-persisted child session metadata");
-
-			return {
-				step: snapshot.step,
-				snapshot,
-				status,
-				isLive,
-				hasTerminalMetadata,
-				warnings,
-				sourceOrder: record.sourceOrder,
-			};
-		});
-
-		const latestStep = steps.reduce((latest, current) => (current.sourceOrder > latest.sourceOrder ? current : latest), steps[0]!);
-		const createdAt = steps.reduce((minValue, step) => {
-			const value = toMillis(step.snapshot.createdAt);
-			if (value === 0) return minValue;
-			return minValue === 0 ? value : Math.min(minValue, value);
-		}, 0);
-		const updatedAt = steps.reduce((maxValue, step) => {
-			const value = toMillis(getSnapshotEventTimestamp(step.snapshot));
-			return Math.max(maxValue, value);
-		}, 0);
-		const runWarnings = steps.flatMap((step) => step.warnings.map((warning) => `step ${step.step}: ${warning}`));
-		const stepStatuses = steps.map((step) => step.status);
-		const status = deriveTaskRunStatus(stepStatuses);
-
-		runs.push({
-			internalRunKey,
-			runId: latestStep.snapshot.runId,
-			toolCallId: latestStep.snapshot.toolCallId,
-			mode: latestStep.snapshot.mode,
-			sourceSessionFile: orderedRecords.find((record) => Boolean(record.sourceSessionFile))?.sourceSessionFile,
-			sourceSessionId: orderedRecords.find((record) => Boolean(record.sourceSessionId))?.sourceSessionId,
-			steps,
-			stepCount: steps.length,
-			persistedStepCount: steps.filter((step) => step.snapshot.persist).length,
-			createdAt: createdAt > 0 ? new Date(createdAt).toISOString() : latestStep.snapshot.createdAt,
-			updatedAt: updatedAt > 0 ? new Date(updatedAt).toISOString() : getSnapshotEventTimestamp(latestStep.snapshot),
-			status,
-			warnings: runWarnings,
-			latestSourceOrder: Math.max(...steps.map((step) => step.sourceOrder)),
-		});
-	}
-
-	return runs.sort((left, right) => {
-		const updatedDiff = toMillis(right.updatedAt) - toMillis(left.updatedAt);
-		if (updatedDiff !== 0) return updatedDiff;
-		return right.latestSourceOrder - left.latestSourceOrder;
-	});
-}
-
-async function reconstructRecentTaskRuns(): Promise<TaskRunView[]> {
-	if (!fs.existsSync(TASKS_PARENT_SESSION_ROOT)) return [];
-	const sessionFiles = await listSessionFiles(TASKS_PARENT_SESSION_ROOT);
-	const fileRecords = await mapWithConcurrencyLimit<string, TaskChildSessionRecord[]>(sessionFiles, MAX_CONCURRENCY, async (sessionFile) => {
-		return collectTaskMetadataRecordsFromSessionFile(sessionFile);
-	});
-	const records = fileRecords.flat();
-	const runs = buildTaskRunViews(records, new Set<string>());
-	return runs.filter((run) => run.persistedStepCount > 0);
-}
-
-function reconstructCurrentTaskRuns(entries: readonly SessionEntry[], sourceSessionFile?: string): TaskRunView[] {
-	const records = collectTaskMetadataRecordsFromEntries(entries, sourceSessionFile);
-	const liveSteps = collectLiveTaskRunSteps(entries);
-	return buildTaskRunViews(records, liveSteps);
+	if (liveControllerResolution.controller) labels.push("steer");
+	if (resolveTaskRunOriginSnapshot(run, selectedStep)) labels.push("origin");
+	return labels;
 }
 
 function formatTaskRunSummary(run: TaskRunView, index: number, includeSource: boolean): string {
 	const stepLabel = run.stepCount === 1 ? "step" : "steps";
-	let text = `${index}. ${run.status} ${run.runId} · ${run.mode} · ${run.stepCount} ${stepLabel} · ${formatTimestampCompact(run.updatedAt)}`;
+	const hasLiveController = run.steps.some((step) => Boolean(getLiveTaskController(makeTaskRunStepKey(run.runId, step.step))));
+	const access = describeTaskRunAccess(run);
+	const originPreview = resolveTaskRunOriginSnapshot(run)?.originPreview;
+	let text = `${index}. ${run.status}${hasLiveController ? "/live" : ""} ${run.runId} · ${run.mode} · ${run.stepCount} ${stepLabel} · ${formatTimestampCompact(run.updatedAt)}`;
+	if (access.length > 0) text += ` · ${access.join(",")}`;
+	if (access.includes("attach")) text += ` · /tasks attach ${index}`;
 	if (includeSource && run.sourceSessionFile) {
 		text += ` · ${path.basename(run.sourceSessionFile)}`;
 	}
+	if (originPreview) text += ` · ${originPreview}`;
 	if (run.warnings.length > 0) text += ` · warnings:${run.warnings.length}`;
 	return text;
 }
 
 function formatTaskRunList(scope: TasksScope, runs: TaskRunView[]): string {
 	if (runs.length === 0) {
-		return scope === "current" ? TASKS_NO_CURRENT_RUNS_MESSAGE : "No persisted task runs in recent sessions.";
+		return TASKS_NO_CURRENT_RUNS_MESSAGE;
 	}
-	const header = scope === "current" ? `Task runs in current session (${runs.length}):` : `Recent persisted task runs (${runs.length}):`;
-	const includeSource = scope === "recent";
-	return [header, ...runs.map((run, index) => formatTaskRunSummary(run, index + 1, includeSource))].join("\n");
+	const header = `Task runs in current session (${runs.length}):`;
+	const guidance = `Open a persisted task in a terminal window with /tasks attach <selector> (${getTaskAttachActionLabel()}). Running externally hosted tasks are focused instead.`;
+	return [header, guidance, ...runs.map((run, index) => formatTaskRunSummary(run, index + 1, false))].join("\n");
 }
 
-function formatTaskRunDetails(scope: TasksScope, run: TaskRunView, selectedStep?: TaskRunStepView): string {
+async function formatTaskRunDetails(scope: TasksScope, run: TaskRunView, selectedStep?: TaskRunStepView): Promise<string> {
 	const lines: string[] = [];
 	lines.push(`Run: ${run.runId}`);
 	lines.push(`Status: ${run.status} · mode: ${run.mode} · steps: ${run.stepCount}`);
@@ -2265,13 +2477,55 @@ function formatTaskRunDetails(scope: TasksScope, run: TaskRunView, selectedStep?
 	if (selectedStep) {
 		lines.push(`Selector matched step ${selectedStep.step} (${selectedStep.status}).`);
 	}
-	lines.push("Steps:");
+	const origin = resolveTaskRunOriginSnapshot(run, selectedStep);
+	const originTarget = getTaskOriginNavigationTarget(run, selectedStep);
+	const access = describeTaskRunAccess(run, selectedStep);
+	if (origin?.originPreview) lines.push(`Origin: ${origin.originPreview}`);
+	if (originTarget) lines.push(`Origin entry: ${originTarget.slice(0, 8)}`);
+	if (access.length > 0) lines.push(`Actions: ${access.join(", ")}`);
+	const liveControllerResolution = resolveLiveTaskControllerForRun(run, selectedStep);
+	if (liveControllerResolution.controller) {
+		const liveInfo = await readLiveTaskRuntimeInfo(liveControllerResolution.controller);
+		lines.push(
+			`Live controller: ${liveInfo.transport} · ${liveInfo.status} · streaming:${liveInfo.isStreaming ? "yes" : "no"} · queued:${liveInfo.pendingSteeringCount}/${liveInfo.pendingFollowUpCount}`,
+		);
+		if (liveInfo.sessionName) lines.push(`Live session: ${liveInfo.sessionName}`);
+		if (liveInfo.lastActivity) lines.push(`Live activity: ${liveInfo.lastActivity}`);
+		if (typeof liveInfo.messageCount === "number") lines.push(`Live messages: ${liveInfo.messageCount}`);
+		if (liveInfo.lastAssistantText) lines.push(`Live assistant: ${createTaskPreview(liveInfo.lastAssistantText, 160)}`);
+		lines.push(`Steer: /tasks steer ${selectedStep ? selectedStep.snapshot.childSessionId : run.runId} <message>`);
+		lines.push("");
+		lines.push("Steps:");
+	} else if (selectedStep?.status === "running") {
+		lines.push(`Live controller: unavailable (${liveControllerResolution.error ?? "not attached"})`);
+		lines.push("Steps:");
+	} else {
+		lines.push("Steps:");
+	}
+	if (selectedStep?.snapshot.persist) {
+		lines.push(`Open: /tasks open ${selectedStep.snapshot.childSessionId}`);
+		lines.push(`Attach: /tasks attach ${selectedStep.snapshot.childSessionId}`);
+		lines.push(`View: /tasks view ${selectedStep.snapshot.childSessionId}`);
+	} else if (!selectedStep && run.persistedStepCount > 0) {
+		lines.push(`Open: /tasks open ${run.runId}`);
+		lines.push(`Attach: /tasks attach ${run.runId}`);
+		lines.push(`View: /tasks view ${run.runId}`);
+	}
+	if (originTarget) {
+		lines.push(`Origin: /tasks origin ${selectedStep ? selectedStep.snapshot.childSessionId : run.runId}`);
+	}
 	for (const step of run.steps) {
 		const marker = selectedStep?.step === step.step ? "*" : "-";
 		const childShort = step.snapshot.childSessionId.slice(0, 8);
 		const persistLabel = step.snapshot.persist ? "persisted" : "not-persisted";
 		lines.push(`${marker} ${step.step}. ${step.status} · ${persistLabel} · session ${childShort} · ${step.snapshot.effectiveContext}`);
 		lines.push(`   path: ${step.snapshot.childSessionPath ? shortenHomePath(step.snapshot.childSessionPath) : "(missing)"}`);
+		if (step.snapshot.childSessionName) lines.push(`   name: ${step.snapshot.childSessionName}`);
+		if (step.snapshot.parentSessionPath) lines.push(`   parent: ${shortenHomePath(step.snapshot.parentSessionPath)}`);
+		const terminalAttachment = getTaskTerminalAttachment(step.snapshot);
+		if (terminalAttachment) {
+			lines.push(`   terminal: ${formatTaskTerminalAttachment(terminalAttachment)}`);
+		}
 		if (step.snapshot.taskPreview) lines.push(`   task: ${step.snapshot.taskPreview}`);
 		for (const warning of step.warnings) lines.push(`   warning: ${warning}`);
 	}
@@ -2282,92 +2536,194 @@ function formatTaskRunDetails(scope: TasksScope, run: TaskRunView, selectedStep?
 	return lines.join("\n");
 }
 
-function formatRunCandidate(run: TaskRunView, runs: TaskRunView[]): string {
-	const index = runs.findIndex((candidate) => candidate.internalRunKey === run.internalRunKey);
-	const indexLabel = index >= 0 ? `#${index + 1}` : "#?";
-	return `${indexLabel} ${run.runId} (${run.status}, ${run.mode})`;
+function extractToolCallNames(message: Message): string[] {
+	const content = Array.isArray(message.content) ? message.content : [];
+	return content
+		.filter((part): part is { type: "toolCall"; name: string } => isRecord(part) && part.type === "toolCall" && typeof part.name === "string")
+		.map((part) => part.name);
 }
 
-function formatStepCandidate(run: TaskRunView, step: TaskRunStepView, runs: TaskRunView[]): string {
-	const index = runs.findIndex((candidate) => candidate.internalRunKey === run.internalRunKey);
-	const indexLabel = index >= 0 ? `#${index + 1}` : "#?";
-	const basename = path.basename(step.snapshot.childSessionPath);
-	return `${indexLabel} ${run.runId} step ${step.step} session ${step.snapshot.childSessionId.slice(0, 8)} (${basename})`;
+function formatTranscriptPreviewLine(message: Message): string {
+	const preview = extractMessagePreviewText(message) ?? (() => {
+		const toolCallNames = extractToolCallNames(message);
+		if (toolCallNames.length > 0) return `tool calls: ${toolCallNames.join(", ")}`;
+		return "(no text)";
+	})();
+	return `${message.role}: ${createTaskPreview(preview, 180)}`;
 }
 
-function formatAmbiguousSelectorError(
-	selector: string,
-	kind: string,
-	candidates: string[],
-): string {
-	const shown = candidates.slice(0, TASK_SELECTOR_CANDIDATE_LIMIT);
-	const lines = [`Ambiguous selector "${selector}" (${kind}).`, ...shown.map((candidate) => `- ${candidate}`)];
-	if (candidates.length > shown.length) lines.push(`- ... ${candidates.length - shown.length} more`);
-	return lines.join("\n");
+function extractMessagesFromSessionEntries(entries: readonly SessionEntry[]): Message[] {
+	const messages: Message[] = [];
+	for (const entry of entries) {
+		if (entry.type !== "message" || !isRecord(entry.message) || typeof entry.message.role !== "string") continue;
+		messages.push(entry.message as Message);
+	}
+	return messages;
 }
 
-function resolveTaskSelector(selector: string, runs: TaskRunView[]): { resolution?: TaskSelectorResolution; error?: string } {
-	const trimmed = selector.trim();
-	if (!trimmed) return { error: `Missing selector. Usage: ${TASKS_COMMAND_USAGE}` };
+function readSessionEntriesFromFile(sessionPath: string): SessionEntry[] {
+	const raw = fs.readFileSync(sessionPath, "utf-8");
+	return raw
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as SessionEntry);
+}
 
-	if (/^\d+$/.test(trimmed)) {
-		const index = Number.parseInt(trimmed, 10);
-		const run = runs[index - 1];
-		if (!run) {
-			return { error: `List index ${index} is out of range (1-${runs.length}).` };
-		}
-		return { resolution: { run, matchedBy: "index" } };
+async function readTaskTranscriptPreview(run: TaskRunView, selectedStep?: TaskRunStepView): Promise<TaskTranscriptPreview> {
+	const inspectStep = selectTaskRunStepForInspect(run, selectedStep);
+	if (!inspectStep) {
+		return { lines: ["No task steps available."], sourceLabel: "none", truncated: false };
 	}
-
-	const runIdMatches = runs.filter((run) => run.runId.startsWith(trimmed));
-	if (runIdMatches.length === 1) return { resolution: { run: runIdMatches[0]!, matchedBy: "runId" } };
-	if (runIdMatches.length > 1) {
-		return {
-			error: formatAmbiguousSelectorError(trimmed, "runId prefix", runIdMatches.map((run) => formatRunCandidate(run, runs))),
-		};
-	}
-
-	const childSessionMatches: Array<{ run: TaskRunView; step: TaskRunStepView }> = [];
-	for (const run of runs) {
-		for (const step of run.steps) {
-			if (step.snapshot.childSessionId.startsWith(trimmed)) childSessionMatches.push({ run, step });
-		}
-	}
-	if (childSessionMatches.length === 1) {
-		const match = childSessionMatches[0]!;
-		return { resolution: { run: match.run, step: match.step, matchedBy: "childSession" } };
-	}
-	if (childSessionMatches.length > 1) {
-		return {
-			error: formatAmbiguousSelectorError(
-				trimmed,
-				"child session id prefix",
-				childSessionMatches.map((match) => formatStepCandidate(match.run, match.step, runs)),
-			),
-		};
-	}
-
-	const basenameMatches: Array<{ run: TaskRunView; step: TaskRunStepView }> = [];
-	for (const run of runs) {
-		for (const step of run.steps) {
-			if (path.basename(step.snapshot.childSessionPath) === trimmed) basenameMatches.push({ run, step });
+	const controller = getLiveTaskController(makeTaskRunStepKey(run.runId, inspectStep.step));
+	if (controller?.status === "running" && controller.transport === "rpc") {
+		try {
+			const response = await sendLiveTaskRpcCommand(controller, { type: "get_messages" });
+			if (response.success !== false && isRecord(response.data) && Array.isArray(response.data.messages)) {
+				const messages = response.data.messages as Message[];
+				const truncated = messages.length > 12;
+				return {
+					lines: messages.slice(-12).map(formatTranscriptPreviewLine),
+					sourceLabel: "live rpc",
+					truncated,
+				};
+			}
+		} catch (error) {
+			return {
+				lines: ["Live transcript unavailable."],
+				sourceLabel: "live rpc",
+				truncated: false,
+				error: error instanceof Error ? error.message : String(error),
+			};
 		}
 	}
-	if (basenameMatches.length === 1) {
-		const match = basenameMatches[0]!;
-		return { resolution: { run: match.run, step: match.step, matchedBy: "basename" } };
-	}
-	if (basenameMatches.length > 1) {
+	if (!inspectStep.snapshot.childSessionPath || !fs.existsSync(inspectStep.snapshot.childSessionPath)) {
 		return {
-			error: formatAmbiguousSelectorError(
-				trimmed,
-				"session file basename",
-				basenameMatches.map((match) => formatStepCandidate(match.run, match.step, runs)),
-			),
+			lines: ["Persisted transcript file is unavailable."],
+			sourceLabel: "persisted session",
+			truncated: false,
 		};
 	}
+	try {
+		const entries = readSessionEntriesFromFile(inspectStep.snapshot.childSessionPath);
+		const messages = extractMessagesFromSessionEntries(entries);
+		const truncated = messages.length > 12;
+		return {
+			lines: messages.slice(-12).map(formatTranscriptPreviewLine),
+			sourceLabel: "persisted session",
+			truncated,
+		};
+	} catch (error) {
+		return {
+			lines: ["Failed to read persisted transcript."],
+			sourceLabel: "persisted session",
+			truncated: false,
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
 
-	return { error: `No task run matches selector "${trimmed}".` };
+interface TaskUiChromeSink {
+	hasUI?: boolean;
+	ui?: { setWidget?: (...args: unknown[]) => void; setStatus?: (...args: unknown[]) => void };
+}
+
+interface TaskUiChromeContext extends TaskUiChromeSink {
+	sessionManager: { getBranch(): readonly SessionEntry[]; getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined };
+}
+
+interface TaskWidgetSummary {
+	totalRuns: number;
+	runningRuns: number;
+	runs: TaskRunView[];
+}
+
+function getTaskWidgetSessionKey(ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } }): string | undefined {
+	const sessionFile = ctx.sessionManager?.getSessionFile?.();
+	if (typeof sessionFile === "string" && sessionFile.trim()) {
+		return `file:${normalizeSessionPathForComparison(sessionFile)}`;
+	}
+	const sessionId = ctx.sessionManager?.getSessionId?.();
+	if (typeof sessionId === "string" && sessionId.trim()) {
+		return `id:${sessionId.trim()}`;
+	}
+	return undefined;
+}
+
+function isTaskWidgetEnabled(ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } }): boolean {
+	const sessionKey = getTaskWidgetSessionKey(ctx);
+	return sessionKey ? taskWidgetEnabledSessions.has(sessionKey) : false;
+}
+
+function setTaskWidgetEnabled(
+	ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } },
+	enabled: boolean,
+): boolean {
+	const sessionKey = getTaskWidgetSessionKey(ctx);
+	if (!sessionKey) return false;
+	if (enabled) taskWidgetEnabledSessions.add(sessionKey);
+	else taskWidgetEnabledSessions.delete(sessionKey);
+	return true;
+}
+
+function buildTaskWidgetSummary(runs: TaskRunView[]): TaskWidgetSummary {
+	const runningRuns = runs.filter((run) => run.status === "running").length;
+	return {
+		totalRuns: runs.length,
+		runningRuns,
+		runs: [...runs].sort((left, right) => {
+			const leftRunning = left.status === "running" ? 1 : 0;
+			const rightRunning = right.status === "running" ? 1 : 0;
+			if (rightRunning !== leftRunning) return rightRunning - leftRunning;
+			return toMillis(right.updatedAt) - toMillis(left.updatedAt);
+		}),
+	};
+}
+
+function buildTaskWidgetLines(summary: TaskWidgetSummary): string[] {
+	if (summary.totalRuns === 0) {
+		return ["Tasks widget active · no task runs · Ctrl+Shift+T browse · /tasks toggle hide"];
+	}
+	const lines = [
+		`Tasks widget active · ${summary.runningRuns} running · ${summary.totalRuns} total · Ctrl+Shift+T browse · /tasks toggle hide`,
+	];
+	for (const run of summary.runs.slice(0, 3)) {
+		const originPreview = resolveTaskRunOriginSnapshot(run)?.originPreview;
+		const preview = originPreview ?? run.steps.find((step) => step.snapshot.taskPreview)?.snapshot.taskPreview ?? "task";
+		lines.push(`• ${run.status} ${run.runId} · ${createTaskPreview(preview, 100)}`);
+	}
+	return lines;
+}
+
+function clearTaskUiChrome(ctx: TaskUiChromeSink): void {
+	if (!ctx.hasUI || !ctx.ui) return;
+	if (typeof ctx.ui.setWidget === "function") {
+		ctx.ui.setWidget("tasks.runs", undefined);
+	}
+	if (typeof ctx.ui.setStatus === "function") {
+		ctx.ui.setStatus("tasks.runs", undefined);
+	}
+}
+
+function syncTaskUiChrome(ctx: TaskUiChromeContext): void {
+	if (!ctx.hasUI || !ctx.ui) return;
+	if (!isTaskWidgetEnabled(ctx)) {
+		clearTaskUiChrome(ctx);
+		return;
+	}
+	const runs = reconstructCurrentTaskRuns({
+		entries: ctx.sessionManager.getBranch(),
+		sourceSessionFile: ctx.sessionManager.getSessionFile?.(),
+		customType: TASK_CHILD_SESSION_CUSTOM_TYPE,
+		metadataVersion: TASK_CHILD_SESSION_METADATA_VERSION,
+		extraLiveStepKeys: collectLiveTaskControllerStepKeys(ctx.sessionManager.getSessionFile?.()),
+	});
+	if (typeof ctx.ui.setWidget === "function") {
+		ctx.ui.setWidget("tasks.runs", buildTaskWidgetLines(buildTaskWidgetSummary(runs)), { placement: "belowEditor" });
+	}
+	if (typeof ctx.ui.setStatus === "function") {
+		ctx.ui.setStatus("tasks.runs", undefined);
+	}
 }
 
 function selectTaskRunStepForOpen(run: TaskRunView, preferredStep?: TaskRunStepView): TaskRunStepView | undefined {
@@ -2375,6 +2731,21 @@ function selectTaskRunStepForOpen(run: TaskRunView, preferredStep?: TaskRunStepV
 	const persistedSteps = run.steps.filter((step) => step.snapshot.persist);
 	if (persistedSteps.length === 0) return undefined;
 	return persistedSteps.sort((left, right) => {
+		if (right.step !== left.step) return right.step - left.step;
+		return toMillis(getSnapshotEventTimestamp(right.snapshot)) - toMillis(getSnapshotEventTimestamp(left.snapshot));
+	})[0];
+}
+
+function selectTaskRunStepForInspect(run: TaskRunView, preferredStep?: TaskRunStepView): TaskRunStepView | undefined {
+	if (preferredStep) return preferredStep;
+	const running = run.steps.filter((step) => step.status === "running");
+	if (running.length > 0) {
+		return running.sort((left, right) => {
+			if (right.step !== left.step) return right.step - left.step;
+			return toMillis(getSnapshotEventTimestamp(right.snapshot)) - toMillis(getSnapshotEventTimestamp(left.snapshot));
+		})[0];
+	}
+	return [...run.steps].sort((left, right) => {
 		if (right.step !== left.step) return right.step - left.step;
 		return toMillis(getSnapshotEventTimestamp(right.snapshot)) - toMillis(getSnapshotEventTimestamp(left.snapshot));
 	})[0];
@@ -2392,6 +2763,446 @@ function manualParentSessionOpenInstruction(sessionPath: string): string {
 		`Parent session path: ${shortenHomePath(sessionPath)}`,
 		`Open manually via /resume, or run: pi --session "${sessionPath}"`,
 	].join("\n");
+}
+
+function canPersistTaskSnapshotUpdate(
+	currentSessionFile: string | undefined,
+	run: TaskRunView,
+): boolean {
+	if (!currentSessionFile || !run.sourceSessionFile) return false;
+	return normalizeSessionPathForComparison(currentSessionFile) === normalizeSessionPathForComparison(run.sourceSessionFile);
+}
+
+async function attachTaskRunInTerminal(
+	ctx: {
+		sessionManager: { getSessionFile?: () => string | undefined; appendCustomEntry(customType: string, data?: unknown): string };
+	},
+	run: TaskRunView,
+	preferredStep?: TaskRunStepView,
+): Promise<{ ok: boolean; level: "info" | "warning" | "error"; message: string }> {
+	const targetStep = selectTaskRunStepForOpen(run, preferredStep);
+	if (!targetStep) {
+		return { ok: false, level: "error", message: `Run ${run.runId} has no persisted child session to attach.` };
+	}
+	if (!targetStep.snapshot.persist) {
+		return { ok: false, level: "error", message: `Run ${run.runId} step ${targetStep.step} is not persisted and cannot be attached.` };
+	}
+	const childSessionPath = targetStep.snapshot.childSessionPath;
+	if (!childSessionPath.trim()) {
+		return {
+			ok: false,
+			level: "error",
+			message: `Run ${run.runId} step ${targetStep.step} has missing child session path metadata (stale metadata).`,
+		};
+	}
+	if (!fs.existsSync(childSessionPath)) {
+		return {
+			ok: false,
+			level: "error",
+			message: `Run ${run.runId} step ${targetStep.step} child session is missing: ${shortenHomePath(childSessionPath)}.`,
+		};
+	}
+
+	const liveController = getLiveTaskController(makeTaskRunStepKey(run.runId, targetStep.step));
+	const existingAttachment = getTaskTerminalAttachment(targetStep.snapshot);
+	const isRunning = liveController?.status === "running";
+	if (isRunning && !existingAttachment) {
+		return {
+			ok: false,
+			level: "warning",
+			message:
+				`Run ${run.runId} step ${targetStep.step} is running under an internal controller, not an external terminal. ` +
+				`Use /tasks steer ${targetStep.snapshot.childSessionId} <message> or wait for completion before attaching.`,
+		};
+	}
+
+	if (isRunning && existingAttachment) {
+		const backendResolution = await resolveTaskTerminalBackendById(existingAttachment.backend);
+		if (!backendResolution.backend) {
+			return {
+				ok: false,
+				level: "error",
+				message: backendResolution.reason ?? `Backend ${existingAttachment.backend} is unavailable for a running task.`,
+			};
+		}
+		const focusResult = await backendResolution.backend.focus(existingAttachment);
+		if (focusResult.ok) {
+			return {
+				ok: true,
+				level: "info",
+				message: `Focused running task in ${formatTaskTerminalAttachment(existingAttachment)} for run ${run.runId} step ${targetStep.step}.`,
+			};
+		}
+		return {
+			ok: false,
+			level: "error",
+			message: focusResult.error ?? `Could not focus ${formatTaskTerminalAttachment(existingAttachment)}.`,
+		};
+	}
+
+	const backendResolution = await resolveConfiguredTaskTerminalBackend();
+	if (!backendResolution.backend) {
+		return { ok: false, level: "warning", message: backendResolution.reason ?? "No task terminal backend is available." };
+	}
+	const title = `task ${run.runId} step ${targetStep.step}`;
+	const workspace = buildTaskSessionWorkspaceName(run, targetStep);
+	const invocation = getPiInvocation(["--session", childSessionPath]);
+	const launchResult = await backendResolution.backend.openSession({
+		sessionPath: childSessionPath,
+		cwd: path.dirname(childSessionPath),
+		title,
+		workspace,
+		command: invocation.command,
+		args: invocation.args,
+	});
+	if (!launchResult.ok || !launchResult.attachment) {
+		return {
+			ok: false,
+			level: "error",
+			message: launchResult.error ?? `Failed to attach run ${run.runId} in ${backendResolution.backend.displayName}.`,
+		};
+	}
+
+	const currentSessionFile = ctx.sessionManager.getSessionFile?.();
+	if (canPersistTaskSnapshotUpdate(currentSessionFile, run)) {
+		appendTaskChildSessionMetadata(ctx.sessionManager, applyTaskTerminalAttachment(targetStep.snapshot, launchResult.attachment));
+	}
+
+	return {
+		ok: true,
+		level: "info",
+		message:
+			`Opened run ${run.runId} step ${targetStep.step} in ${backendResolution.backend.displayName} ` +
+			`(${formatTaskTerminalAttachment(launchResult.attachment)}). Workspace: ${workspace}. It should open as a new tab in that session workspace. Session: ${shortenHomePath(childSessionPath)}`,
+	};
+}
+
+async function openTaskRunSession(
+	ctx: unknown,
+	run: TaskRunView,
+	preferredStep?: TaskRunStepView,
+): Promise<{ ok: boolean; opened?: boolean; level: "info" | "warning" | "error"; message?: string }> {
+	const targetStep = selectTaskRunStepForOpen(run, preferredStep);
+	if (!targetStep) {
+		return { ok: false, level: "error", message: `Run ${run.runId} has no persisted child session to open.` };
+	}
+	if (!targetStep.snapshot.persist) {
+		return { ok: false, level: "error", message: `Run ${run.runId} step ${targetStep.step} is not persisted and cannot be opened.` };
+	}
+	const childSessionPath = targetStep.snapshot.childSessionPath;
+	if (!childSessionPath.trim()) {
+		return {
+			ok: false,
+			level: "error",
+			message: `Run ${run.runId} step ${targetStep.step} has missing child session path metadata (stale metadata).`,
+		};
+	}
+	if (!fs.existsSync(childSessionPath)) {
+		return {
+			ok: false,
+			level: "error",
+			message: `Run ${run.runId} step ${targetStep.step} child session is missing: ${shortenHomePath(childSessionPath)}.`,
+		};
+	}
+
+	let openedMessage = `Opened run ${run.runId} step ${targetStep.step} (${targetStep.snapshot.childSessionId.slice(0, 8)}).`;
+	if (!preferredStep && run.persistedStepCount > 1) {
+		openedMessage += " Use a child session id prefix selector to open a different step.";
+	}
+
+	const openResult = await tryOpenTaskSession(ctx, childSessionPath, {
+		targetSessionId: targetStep.snapshot.childSessionId,
+		withSession: async (replacementCtx) => {
+			await notifyTaskSessionOpened(replacementCtx, openedMessage);
+		},
+	});
+	if (openResult.opened) {
+		return { ok: true, opened: true, level: "info" };
+	}
+	return {
+		ok: false,
+		level: "warning",
+		message: `${openResult.message}\n${manualTaskSessionOpenInstruction(childSessionPath)}`,
+	};
+}
+
+async function sendTaskSteeringMessage(
+	run: TaskRunView,
+	preferredStep: TaskRunStepView | undefined,
+	message: string,
+): Promise<{ ok: boolean; level: "info" | "warning" | "error"; message: string }> {
+	const controllerResolution = resolveLiveTaskControllerForRun(run, preferredStep);
+	if (!controllerResolution.controller) {
+		return { ok: false, level: "error", message: controllerResolution.error ?? `Run ${run.runId} is not steerable right now.` };
+	}
+	try {
+		const response = await sendLiveTaskRpcCommand(controllerResolution.controller, { type: "steer", message });
+		if (response.success === false) {
+			return {
+				ok: false,
+				level: "error",
+				message: response.error ?? `Task ${run.runId} rejected the steering message.`,
+			};
+		}
+		return {
+			ok: true,
+			level: "info",
+			message: `Steering sent to run ${run.runId}${preferredStep ? ` step ${preferredStep.step}` : ""}.`,
+		};
+	} catch (error) {
+		return {
+			ok: false,
+			level: "error",
+			message: `Failed to steer run ${run.runId}${preferredStep ? ` step ${preferredStep.step}` : ""}: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+}
+
+async function buildTaskViewerOverlayState(
+	scope: TasksScope,
+	run: TaskRunView,
+	preferredStep?: TaskRunStepView,
+): Promise<{ overlayState: TaskViewerOverlayState; step?: TaskRunStepView }> {
+	const inspectStep = selectTaskRunStepForInspect(run, preferredStep);
+	const detailText = await formatTaskRunDetails(scope, run, inspectStep);
+	const transcript = await readTaskTranscriptPreview(run, inspectStep);
+	const access = describeTaskRunAccess(run, inspectStep);
+	return {
+		overlayState: {
+			runId: run.runId,
+			runStatus: run.status,
+			runMode: run.mode,
+			detailText,
+			transcript,
+			canOpen: access.includes("open"),
+			canAttach: access.includes("attach"),
+			canOrigin: access.includes("origin"),
+			canSteer: access.includes("steer"),
+			attachActionLabel: getTaskAttachActionLabel(),
+		},
+		step: inspectStep,
+	};
+}
+
+async function openTaskViewerOverlay(
+	ctx: { hasUI?: boolean; ui: { custom: <T>(factory: any, options?: any) => Promise<T | undefined>; notify(text: string, level?: "info" | "warning" | "error"): void } },
+	scope: TasksScope,
+	run: TaskRunView,
+	preferredStep?: TaskRunStepView,
+): Promise<void> {
+	if (!ctx.hasUI) {
+		ctx.ui.notify("Task viewer overlay is only available with UI.", "warning");
+		return;
+	}
+	const state = await buildTaskViewerOverlayState(scope, run, preferredStep);
+	const result = await ctx.ui.custom<TaskViewerOverlayResult | undefined>(
+		(_tui: unknown, theme: unknown, _keybindings: unknown, done: (value: TaskViewerOverlayResult | undefined) => void) =>
+			new TaskViewerOverlay(theme, state.overlayState, done),
+		{
+			overlay: true,
+			overlayOptions: { anchor: "right-center", width: "55%", maxHeight: "85%", margin: 1 },
+		},
+	);
+	if (!result || result.action === "close") return;
+	if (result.action === "open") {
+		const openResult = await openTaskRunSession(ctx, run, state.step);
+		if (!openResult.opened && openResult.message) ctx.ui.notify(openResult.message, openResult.level);
+		return;
+	}
+	if (result.action === "attach") {
+		const attachResult = await attachTaskRunInTerminal(ctx as any, run, state.step);
+		ctx.ui.notify(attachResult.message, attachResult.level);
+		syncTaskUiChrome(ctx as any);
+		return;
+	}
+	if (result.action === "origin") {
+		const originResult = await revealTaskRunOrigin(ctx as any, run, state.step);
+		ctx.ui.notify(originResult.message, originResult.level);
+		syncTaskUiChrome(ctx as any);
+		return;
+	}
+	if (result.action === "steer" && result.message) {
+		const steerResult = await sendTaskSteeringMessage(run, state.step, result.message);
+		ctx.ui.notify(steerResult.message, steerResult.level);
+		syncTaskUiChrome(ctx as any);
+	}
+}
+
+async function revealTaskRunOrigin(
+	ctx: {
+		sessionManager: { getSessionFile?: () => string | undefined };
+		navigateTree?: (
+			targetId: string,
+			options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
+		) => Promise<{ editorText?: string; cancelled: boolean }>;
+	},
+	run: TaskRunView,
+	preferredStep?: TaskRunStepView,
+): Promise<{ ok: boolean; level: "info" | "warning" | "error"; message: string }> {
+	const origin = resolveTaskRunOriginSnapshot(run, preferredStep);
+	if (!origin) {
+		return { ok: false, level: "error", message: `Run ${run.runId} has no recorded origin metadata.` };
+	}
+	const targetId = origin.originUserEntryId ?? origin.originEntryId;
+	const preview = origin.originPreview ?? "(origin preview unavailable)";
+	const currentSessionFile = ctx.sessionManager.getSessionFile?.();
+	const sourceSessionFile = run.sourceSessionFile;
+	if (
+		targetId &&
+		typeof ctx.navigateTree === "function" &&
+		currentSessionFile &&
+		sourceSessionFile &&
+		normalizeSessionPathForComparison(currentSessionFile) === normalizeSessionPathForComparison(sourceSessionFile)
+	) {
+		try {
+			const result = await ctx.navigateTree(targetId, { summarize: false, label: "task-origin" });
+			if (result.cancelled) {
+				return { ok: false, level: "warning", message: `Origin navigation for run ${run.runId} was cancelled.` };
+			}
+			return {
+				ok: true,
+				level: "info",
+				message: `Moved to origin for run ${run.runId}: ${preview}`,
+			};
+		} catch (error) {
+			return {
+				ok: false,
+				level: "error",
+				message: `Failed to reveal origin for run ${run.runId}: ${error instanceof Error ? error.message : String(error)}`,
+			};
+		}
+	}
+
+	const lines = [`Origin for run ${run.runId}: ${preview}`];
+	if (targetId) lines.push(`Origin entry id: ${targetId}`);
+	if (sourceSessionFile) {
+		lines.push(`Source session: ${shortenHomePath(sourceSessionFile)}`);
+		if (!currentSessionFile || normalizeSessionPathForComparison(currentSessionFile) !== normalizeSessionPathForComparison(sourceSessionFile)) {
+			lines.push(`Open manually via /resume, or run: pi --session "${sourceSessionFile}"`);
+		}
+	}
+	return { ok: true, level: "info", message: lines.join("\n") };
+}
+
+async function browseTaskRuns(ctx: any, scope: TasksScope, runs: TaskRunView[]): Promise<boolean> {
+	if (!ctx.hasUI) return false;
+	const runOptions = runs.map((run, index) => formatTaskRunSummary(run, index + 1, false));
+	const selectedRunLabel = await ctx.ui.select("Task runs", runOptions);
+	if (!selectedRunLabel) return true;
+	const selectedRunIndex = runOptions.indexOf(selectedRunLabel);
+	if (selectedRunIndex < 0) {
+		ctx.ui.notify("Selected task run could not be resolved.", "error");
+		return true;
+	}
+	const selectedRun = runs[selectedRunIndex]!;
+	const hasLiveController = selectedRun.steps.some((candidate) => {
+		const controller = getLiveTaskController(makeTaskRunStepKey(selectedRun.runId, candidate.step));
+		return controller?.status === "running";
+	});
+	const hasPersistedSteps = selectedRun.steps.some((candidate) => candidate.snapshot.persist);
+	const hasOrigin = Boolean(getTaskOriginNavigationTarget(selectedRun) || resolveTaskRunOriginSnapshot(selectedRun)?.originPreview);
+	const attachActionLabel = getTaskAttachActionLabel();
+	const actionOptions = [
+		"Show details",
+		"View overlay",
+		...(hasPersistedSteps ? ["Open session", attachActionLabel] : []),
+		...(hasOrigin ? ["Reveal origin"] : []),
+		...(hasLiveController ? ["Steer running task"] : []),
+		"Cancel",
+	];
+	const action = await ctx.ui.select(`Run ${selectedRun.runId}`, actionOptions);
+	if (!action || action === "Cancel") return true;
+	if (action === "Show details") {
+		const hasWarnings = selectedRun.warnings.length > 0 || selectedRun.steps.some((candidate) => candidate.warnings.length > 0);
+		ctx.ui.notify(await formatTaskRunDetails(scope, selectedRun), hasWarnings ? "warning" : "info");
+		return true;
+	}
+	if (action === "View overlay") {
+		await openTaskViewerOverlay(ctx, scope, selectedRun);
+		return true;
+	}
+	if (action === attachActionLabel) {
+		const persistedSteps = selectedRun.steps.filter((candidate) => candidate.snapshot.persist);
+		let targetStep = selectTaskRunStepForOpen(selectedRun);
+		if (persistedSteps.length > 1) {
+			const stepOptions = persistedSteps.map(
+				(candidate) =>
+					`step ${candidate.step} · ${candidate.status} · ${candidate.snapshot.childSessionId.slice(0, 8)} · ${candidate.snapshot.taskPreview || candidate.snapshot.childSessionName || "persisted"}`,
+			);
+			const selectedStepLabel = await ctx.ui.select(`Attach run ${selectedRun.runId}`, stepOptions);
+			if (!selectedStepLabel) return true;
+			const stepIndex = stepOptions.indexOf(selectedStepLabel);
+			if (stepIndex < 0) {
+				ctx.ui.notify("Selected task step could not be resolved.", "error");
+				return true;
+			}
+			targetStep = persistedSteps[stepIndex];
+		}
+		const attachResult = await attachTaskRunInTerminal(ctx, selectedRun, targetStep);
+		ctx.ui.notify(attachResult.message, attachResult.level);
+		syncTaskUiChrome(ctx);
+		return true;
+	}
+	if (action === "Reveal origin") {
+		await ctx.waitForIdle();
+		const originResult = await revealTaskRunOrigin(ctx, selectedRun);
+		ctx.ui.notify(originResult.message, originResult.level);
+		syncTaskUiChrome(ctx);
+		return true;
+	}
+	if (action === "Steer running task") {
+		const liveSteps = selectedRun.steps.filter((candidate) => {
+			const controller = getLiveTaskController(makeTaskRunStepKey(selectedRun.runId, candidate.step));
+			return controller?.status === "running";
+		});
+		let selectedStep = liveSteps[0];
+		if (liveSteps.length > 1) {
+			const stepOptions = liveSteps.map(
+				(candidate) =>
+					`step ${candidate.step} · ${candidate.snapshot.childSessionId.slice(0, 8)} · ${candidate.snapshot.taskPreview || candidate.snapshot.childSessionName || "running"}`,
+			);
+			const selectedStepLabel = await ctx.ui.select(`Steer run ${selectedRun.runId}`, stepOptions);
+			if (!selectedStepLabel) return true;
+			const stepIndex = stepOptions.indexOf(selectedStepLabel);
+			if (stepIndex < 0) {
+				ctx.ui.notify("Selected task step could not be resolved.", "error");
+				return true;
+			}
+			selectedStep = liveSteps[stepIndex];
+		}
+		if (!selectedStep) {
+			ctx.ui.notify(`Run ${selectedRun.runId} has no running live step to steer.`, "error");
+			return true;
+		}
+		const message = await ctx.ui.input(`Steer run ${selectedRun.runId} step ${selectedStep.step}`, "");
+		if (!message?.trim()) return true;
+		const steerResult = await sendTaskSteeringMessage(selectedRun, selectedStep, message);
+		ctx.ui.notify(steerResult.message, steerResult.level);
+		syncTaskUiChrome(ctx);
+		return true;
+	}
+	const persistedSteps = selectedRun.steps.filter((candidate) => candidate.snapshot.persist);
+	let targetStep = selectTaskRunStepForOpen(selectedRun);
+	if (persistedSteps.length > 1) {
+		const stepOptions = persistedSteps.map(
+			(candidate) =>
+				`step ${candidate.step} · ${candidate.status} · ${candidate.snapshot.childSessionId.slice(0, 8)} · ${candidate.snapshot.taskPreview || candidate.snapshot.childSessionName || "persisted"}`,
+		);
+		const selectedStepLabel = await ctx.ui.select(`Open run ${selectedRun.runId}`, stepOptions);
+		if (!selectedStepLabel) return true;
+		const stepIndex = stepOptions.indexOf(selectedStepLabel);
+		if (stepIndex < 0) {
+			ctx.ui.notify("Selected task step could not be resolved.", "error");
+			return true;
+		}
+		targetStep = persistedSteps[stepIndex];
+	}
+	const openResult = await openTaskRunSession(ctx, selectedRun, targetStep);
+	if (!openResult.opened) {
+		if (openResult.message) ctx.ui.notify(openResult.message, openResult.level);
+		syncTaskUiChrome(ctx);
+	}
+	return true;
 }
 
 type TaskSessionWithSessionCallback = (ctx: unknown) => Promise<void> | void;
@@ -2586,7 +3397,7 @@ const ContextModeSchema = StringEnum(["fresh", "fork"] as const, {
 const TaskItem = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Name of the role agent to invoke" })),
 	profile: Type.Optional(Type.String({ description: "Capability profile to apply" })),
-	modelTier: Type.Optional(Type.String({ description: "Named model-tier override for this task step" })),
+	effort: Type.Optional(Type.String({ description: "Named effort override for this task step" })),
 	task: Type.String({ description: "Task to delegate to the agent" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	model: Type.Optional(Type.String({ description: "Exact model override for this task step" })),
@@ -2598,7 +3409,7 @@ const TaskItem = Type.Object({
 const ChainItem = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Name of the role agent to invoke" })),
 	profile: Type.Optional(Type.String({ description: "Capability profile to apply" })),
-	modelTier: Type.Optional(Type.String({ description: "Named model-tier override for this task step" })),
+	effort: Type.Optional(Type.String({ description: "Named effort override for this task step" })),
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	model: Type.Optional(Type.String({ description: "Exact model override for this task step" })),
@@ -2615,7 +3426,7 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
 const SubagentParams = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Name of the role agent to invoke (for single mode)" })),
 	profile: Type.Optional(Type.String({ description: "Capability profile to apply (for single mode)" })),
-	modelTier: Type.Optional(Type.String({ description: "Named model-tier override for single mode" })),
+	effort: Type.Optional(Type.String({ description: "Named effort override for single mode" })),
 	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
 	model: Type.Optional(Type.String({ description: "Exact model override for single mode" })),
 	skills: Type.Optional(Type.Array(Type.String(), { description: "Explicit skill names to load for single mode" })),
@@ -2649,8 +3460,8 @@ export default function (pi: ExtensionAPI) {
 		type: "string",
 		default: "",
 	});
-	pi.registerFlag("model-tier", {
-		description: "Main-session model-tier preset to use",
+	pi.registerFlag("effort", {
+		description: "Main-session effort preset to use",
 		type: "string",
 		default: "",
 	});
@@ -2662,17 +3473,18 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		ensureMainSessionBaseline(ctx, pi);
+		syncTaskUiChrome(ctx);
 		startupCompositionError = undefined;
 		const rawCliAgent = pi.getFlag("agent");
 		const rawCliProfile = pi.getFlag("profile");
-		const rawCliModelTier = pi.getFlag("model-tier");
-		const hasCliSelection = [rawCliAgent, rawCliProfile, rawCliModelTier].some(
+		const rawCliEffort = pi.getFlag("effort");
+		const hasCliSelection = [rawCliAgent, rawCliProfile, rawCliEffort].some(
 			(value) => typeof value === "string" && value.trim().length > 0,
 		);
 		const cliSelection = {
 			agent: normalizeMainAgentSelection(rawCliAgent),
 			profile: normalizeMainAgentSelection(rawCliProfile),
-			modelTier: normalizeMainAgentSelection(rawCliModelTier),
+			effort: normalizeMainAgentSelection(rawCliEffort),
 		};
 		const persisted = getPersistedMainAgentState(ctx.sessionManager.getBranch());
 		if (hasCliSelection) {
@@ -2681,7 +3493,7 @@ export default function (pi: ExtensionAPI) {
 					!persisted.found ||
 					persisted.agent !== cliSelection.agent ||
 					persisted.profile !== cliSelection.profile ||
-					persisted.modelTier !== cliSelection.modelTier,
+					persisted.effort !== cliSelection.effort,
 				notify: false,
 				confirmProjectAgent: false,
 			});
@@ -2709,6 +3521,19 @@ export default function (pi: ExtensionAPI) {
 		}
 		activeMainWorker = undefined;
 		syncRuntimeEnv(pi, {});
+	});
+
+	pi.on("session_shutdown", async (_event, ctx) => {
+		setTaskWidgetEnabled(ctx, false);
+		clearTaskUiChrome(ctx);
+		for (const controller of listLiveTaskControllers()) {
+			try {
+				controller.proc.kill("SIGTERM");
+			} catch {
+				// Ignore best-effort cleanup failures.
+			}
+		}
+		clearLiveTaskControllers();
 	});
 
 	pi.on("before_agent_start", async (event) => {
@@ -2748,7 +3573,7 @@ export default function (pi: ExtensionAPI) {
 			const result = await applyMainSessionAgentSelection(
 				ctx,
 				pi,
-				{ agent: normalizeMainAgentSelection(trimmed), profile: activeMainWorker?.profile?.name, modelTier: activeMainWorker?.modelTier?.name },
+				{ agent: normalizeMainAgentSelection(trimmed), profile: activeMainWorker?.profile?.name, effort: activeMainWorker?.effort?.name },
 				{ persist: true, notify: true, confirmProjectAgent: true },
 			);
 			if (result.ok) return;
@@ -2768,27 +3593,27 @@ export default function (pi: ExtensionAPI) {
 			const result = await applyMainSessionAgentSelection(
 				ctx,
 				pi,
-				{ agent: activeMainWorker?.agent?.name, profile: normalizeMainAgentSelection(trimmed), modelTier: activeMainWorker?.modelTier?.name },
+				{ agent: activeMainWorker?.agent?.name, profile: normalizeMainAgentSelection(trimmed), effort: activeMainWorker?.effort?.name },
 				{ persist: true, notify: true, confirmProjectAgent: false },
 			);
 			if (result.ok) return;
 			ctx.ui.notify(result.error, "error");
 		},
 	});
-	pi.registerCommand("model-tier", {
-		description: "Show or switch the main-session model-tier (/model-tier <name>, /model-tier clear)",
+	pi.registerCommand("effort", {
+		description: "Show or switch the main-session effort (/effort <name>, /effort clear)",
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 			const trimmed = args.trim();
 			if (!trimmed) {
-				const current = activeMainWorker?.modelTier?.name ?? "none";
-				ctx.ui.notify(`Main-session model-tier: ${current}.`, "info");
+				const current = activeMainWorker?.effort?.name ?? "none";
+				ctx.ui.notify(`Main-session effort: ${current}.`, "info");
 				return;
 			}
 			const result = await applyMainSessionAgentSelection(
 				ctx,
 				pi,
-				{ agent: activeMainWorker?.agent?.name, profile: activeMainWorker?.profile?.name, modelTier: normalizeMainAgentSelection(trimmed) },
+				{ agent: activeMainWorker?.agent?.name, profile: activeMainWorker?.profile?.name, effort: normalizeMainAgentSelection(trimmed) },
 				{ persist: true, notify: true, confirmProjectAgent: false },
 			);
 			if (result.ok) return;
@@ -2799,10 +3624,27 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("tasks", {
 		description: `Inspect persisted task child sessions. Usage: ${TASKS_COMMAND_USAGE}`,
 		handler: async (args, ctx) => {
-			await ctx.waitForIdle();
 			const parsed = parseTasksCommand(args);
+			if (parsed.action === "open" || parsed.action === "parent" || parsed.action === "origin") {
+				await ctx.waitForIdle();
+			}
 			if (parsed.error) {
 				ctx.ui.notify(`${parsed.error}. Usage: ${TASKS_COMMAND_USAGE}`, "error");
+				return;
+			}
+
+			if (parsed.action === "toggle") {
+				if (!ctx.hasUI) {
+					ctx.ui.notify("Task widget toggle is only available with UI.", "warning");
+					return;
+				}
+				const nextEnabled = !isTaskWidgetEnabled(ctx);
+				if (!setTaskWidgetEnabled(ctx, nextEnabled)) {
+					ctx.ui.notify("Could not resolve the current session identity for /tasks toggle.", "error");
+					return;
+				}
+				syncTaskUiChrome(ctx);
+				ctx.ui.notify(nextEnabled ? "Tasks widget enabled for this session." : "Tasks widget hidden for this session.", "info");
 				return;
 			}
 
@@ -2859,18 +3701,21 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			const runs =
-				parsed.scope === "current"
-					? reconstructCurrentTaskRuns(ctx.sessionManager.getBranch(), ctx.sessionManager.getSessionFile?.())
-					: await reconstructRecentTaskRuns();
+			const runs = reconstructCurrentTaskRuns({
+				entries: ctx.sessionManager.getBranch(),
+				sourceSessionFile: ctx.sessionManager.getSessionFile?.(),
+				customType: TASK_CHILD_SESSION_CUSTOM_TYPE,
+				metadataVersion: TASK_CHILD_SESSION_METADATA_VERSION,
+				extraLiveStepKeys: collectLiveTaskControllerStepKeys(ctx.sessionManager.getSessionFile?.()),
+			});
 
 			if (runs.length === 0) {
-				const emptyMessage = parsed.scope === "current" ? TASKS_NO_CURRENT_RUNS_MESSAGE : "No persisted task runs in recent sessions.";
-				ctx.ui.notify(emptyMessage, "info");
+				ctx.ui.notify(TASKS_NO_CURRENT_RUNS_MESSAGE, "info");
 				return;
 			}
 
 			if (parsed.action === "list") {
+				if (await browseTaskRuns(ctx, parsed.scope, runs)) return;
 				ctx.ui.notify(formatTaskRunList(parsed.scope, runs), "info");
 				return;
 			}
@@ -2890,53 +3735,62 @@ export default function (pi: ExtensionAPI) {
 			const { run, step } = resolved.resolution;
 			if (parsed.action === "show") {
 				const hasWarnings = run.warnings.length > 0 || run.steps.some((candidate) => candidate.warnings.length > 0);
-				ctx.ui.notify(formatTaskRunDetails(parsed.scope, run, step), hasWarnings ? "warning" : "info");
+				ctx.ui.notify(await formatTaskRunDetails(parsed.scope, run, step), hasWarnings ? "warning" : "info");
+				syncTaskUiChrome(ctx);
+				return;
+			}
+			if (parsed.action === "view") {
+				await openTaskViewerOverlay(ctx, parsed.scope, run, step);
+				return;
+			}
+			if (parsed.action === "attach") {
+				const attachResult = await attachTaskRunInTerminal(ctx, run, step);
+				ctx.ui.notify(attachResult.message, attachResult.level);
+				syncTaskUiChrome(ctx);
+				return;
+			}
+			if (parsed.action === "origin") {
+				const originResult = await revealTaskRunOrigin(ctx, run, step);
+				ctx.ui.notify(originResult.message, originResult.level);
+				syncTaskUiChrome(ctx);
+				return;
+			}
+			if (parsed.action === "steer") {
+				const message = parsed.message?.trim();
+				if (!message) {
+					ctx.ui.notify(`Missing steering message. Usage: ${TASKS_COMMAND_USAGE}`, "error");
+					return;
+				}
+				const steerResult = await sendTaskSteeringMessage(run, step, message);
+				ctx.ui.notify(steerResult.message, steerResult.level);
+				syncTaskUiChrome(ctx);
 				return;
 			}
 
-			const targetStep = selectTaskRunStepForOpen(run, step);
-			if (!targetStep) {
-				ctx.ui.notify(`Run ${run.runId} has no persisted child session to open.`, "error");
-				return;
+			const openResult = await openTaskRunSession(ctx, run, step);
+			if (!openResult.opened) {
+				if (openResult.message) ctx.ui.notify(openResult.message, openResult.level);
+				syncTaskUiChrome(ctx);
 			}
-			if (!targetStep.snapshot.persist) {
-				ctx.ui.notify(
-					`Run ${run.runId} step ${targetStep.step} is not persisted and cannot be opened.`,
-					"error",
-				);
-				return;
-			}
+		},
+	});
 
-			const childSessionPath = targetStep.snapshot.childSessionPath;
-			if (!childSessionPath.trim()) {
-				ctx.ui.notify(
-					`Run ${run.runId} step ${targetStep.step} has missing child session path metadata (stale metadata).`,
-					"error",
-				);
-				return;
-			}
-			if (!fs.existsSync(childSessionPath)) {
-				ctx.ui.notify(
-					`Run ${run.runId} step ${targetStep.step} child session is missing: ${shortenHomePath(childSessionPath)}.`,
-					"error",
-				);
-				return;
-			}
-
-			let openedMessage = `Opened run ${run.runId} step ${targetStep.step} (${targetStep.snapshot.childSessionId.slice(0, 8)}).`;
-			if (!step && run.persistedStepCount > 1) {
-				openedMessage += " Use a child session id prefix selector to open a different step.";
-			}
-
-			const openResult = await tryOpenTaskSession(ctx as unknown, childSessionPath, {
-				targetSessionId: targetStep.snapshot.childSessionId,
-				withSession: async (replacementCtx) => {
-					await notifyTaskSessionOpened(replacementCtx, openedMessage);
-				},
+	pi.registerShortcut("ctrl+shift+t", {
+		description: "Browse task runs in the current session",
+		handler: async (ctx) => {
+			const runs = reconstructCurrentTaskRuns({
+				entries: ctx.sessionManager.getBranch(),
+				sourceSessionFile: ctx.sessionManager.getSessionFile?.(),
+				customType: TASK_CHILD_SESSION_CUSTOM_TYPE,
+				metadataVersion: TASK_CHILD_SESSION_METADATA_VERSION,
+				extraLiveStepKeys: collectLiveTaskControllerStepKeys(ctx.sessionManager.getSessionFile?.()),
 			});
-			if (openResult.opened) return;
-
-			ctx.ui.notify(`${openResult.message}\n${manualTaskSessionOpenInstruction(childSessionPath)}`, "warning");
+			if (runs.length === 0) {
+				ctx.ui.notify(TASKS_NO_CURRENT_RUNS_MESSAGE, "info");
+				return;
+			}
+			if (await browseTaskRuns(ctx, "current", runs)) return;
+			ctx.ui.notify(formatTaskRunList("current", runs), "info");
 		},
 	});
 
@@ -3015,6 +3869,11 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const mode: TaskExecutionMode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
+			const taskOrigin = resolveTaskOriginForBranch(
+				ctx.sessionManager.getBranch(),
+				createTaskPreview,
+				ctx.sessionManager.getLeafId?.(),
+			);
 			const stepsToRun: TaskStepConfig[] = [];
 			if (params.chain) stepsToRun.push(...params.chain);
 			if (params.tasks) stepsToRun.push(...params.tasks);
@@ -3022,7 +3881,7 @@ export default function (pi: ExtensionAPI) {
 				stepsToRun.push({
 					agent: params.agent,
 					profile: params.profile,
-					modelTier: params.modelTier,
+					effort: params.effort,
 					task: params.task,
 					cwd: params.cwd,
 					model: params.model,
@@ -3135,6 +3994,9 @@ export default function (pi: ExtensionAPI) {
 						onUpdate: chainUpdate,
 						makeDetails: makeDetails("chain"),
 						sessionManager: ctx.sessionManager,
+						origin: taskOrigin,
+						refreshUi: () => syncTaskUiChrome(ctx),
+						enableRpcControl: ctx.hasUI === true,
 					});
 					results.push(result);
 
@@ -3170,7 +4032,7 @@ export default function (pi: ExtensionAPI) {
 						agent: preparedStep.worker.displayAgentName,
 						agentSource: preparedStep.worker.agent?.source ?? "unknown",
 						profile: preparedStep.worker.profile?.name,
-						modelTier: preparedStep.worker.modelTier?.name,
+						effort: preparedStep.worker.effort?.name,
 						task: preparedStep.rawStep.task,
 						exitCode: -1,
 						messages: [],
@@ -3217,6 +4079,9 @@ export default function (pi: ExtensionAPI) {
 							},
 							makeDetails: makeDetails("parallel"),
 							sessionManager: ctx.sessionManager,
+							origin: taskOrigin,
+							refreshUi: () => syncTaskUiChrome(ctx),
+							enableRpcControl: ctx.hasUI === true,
 						});
 						allResults[index] = result;
 						emitParallelUpdate();
@@ -3254,6 +4119,9 @@ export default function (pi: ExtensionAPI) {
 					onUpdate,
 					makeDetails: makeDetails("single"),
 					sessionManager: ctx.sessionManager,
+					origin: taskOrigin,
+					refreshUi: () => syncTaskUiChrome(ctx),
+					enableRpcControl: ctx.hasUI === true,
 				});
 				const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 				if (isError) {
@@ -3551,7 +4419,15 @@ export default function (pi: ExtensionAPI) {
 
 export const __test__ = {
 	hasRuntimePersistOverride,
+	formatTaskRunList,
+	normalizeChildSessionSnapshot: (data: unknown) => normalizeChildSessionSnapshot(data, TASK_CHILD_SESSION_METADATA_VERSION),
+	parseTaskTerminalBackendPreference,
+	parseTasksCommand,
 	preflightTaskRun,
+	resolveModelFromEffort,
+	resolveParentSessionForCurrentSession,
 	resolvePersistedTaskSessionRoot,
+	resolveTaskOriginForBranch: (entries: readonly SessionEntry[], leafId?: string | null) =>
+		resolveTaskOriginForBranch(entries, createTaskPreview, leafId),
 	resolveTaskSelector,
 };

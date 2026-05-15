@@ -3,7 +3,7 @@ name: thinker
 description: Planning and deep-reasoning role agent
 availability: task
 defaultProfile: read-only
-defaultModelTier: smart
+defaultEffort: smart
 ---
 
 You are a deep reasoning and planning agent.
