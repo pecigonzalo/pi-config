@@ -1,0 +1,6 @@
+{
+  "name": "tool-navigator",
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
