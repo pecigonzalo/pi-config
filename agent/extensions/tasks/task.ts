@@ -97,9 +97,7 @@ const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const TASK_SESSION_VERSION_FALLBACK = 3;
 const TASK_CHILD_SESSION_CUSTOM_TYPE = "tasks.child-session";
-const TASK_CHILD_SESSION_CUSTOM_TYPE_PARENT_LINK = "tasks.parent-link";
 const TASK_CHILD_SESSION_METADATA_VERSION = 1;
-const TASK_CHILD_SESSION_LINK_VERSION = 1;
 const TASKS_PARENT_SESSION_ROOT = path.join(getAgentDir(), "sessions");
 const TASKS_CHILD_SESSION_RUNS_DIR = "task-runs";
 const TASKS_CHILD_SESSION_FALLBACK_PARENT = "detached";
@@ -1198,77 +1196,9 @@ function resolveSessionReferencePath(referencePath: string, baseFilePath: string
 	return path.resolve(path.dirname(baseFilePath), trimmedReference);
 }
 
-function isLikelyTaskChildSessionFile(sessionFile: string): boolean {
-	if (path.basename(sessionFile) !== "child-session.jsonl") return false;
-	const normalized = path.normalize(sessionFile);
-	const marker = `${path.sep}${TASKS_CHILD_SESSION_RUNS_DIR}${path.sep}`;
-	return normalized.includes(marker);
-}
-
-async function findTaskRunMetadataFileForChildSession(sessionFile: string): Promise<string | undefined> {
-	if (!isLikelyTaskChildSessionFile(sessionFile)) return undefined;
-	let currentDir = path.dirname(sessionFile);
-	const resolvedTasksRoot = path.resolve(TASKS_PARENT_SESSION_ROOT);
-
-	while (true) {
-		const candidate = path.join(currentDir, "run.json");
-		if (fs.existsSync(candidate)) return candidate;
-		if (path.resolve(currentDir) === resolvedTasksRoot) break;
-		const parentDir = path.dirname(currentDir);
-		if (parentDir === currentDir) break;
-		currentDir = parentDir;
-	}
-
-	return undefined;
-}
-
-interface TaskRunParentInfo {
-	parentSessionFile?: string;
-	parentSessionId?: string;
-}
-
-async function readTaskRunParentInfo(runJsonPath: string): Promise<{ info?: TaskRunParentInfo; error?: string }> {
-	let rawJson: string;
-	try {
-		rawJson = await fs.promises.readFile(runJsonPath, "utf-8");
-	} catch (error) {
-		return {
-			error: `Failed to read task run metadata ${shortenHomePath(runJsonPath)}: ${error instanceof Error ? error.message : String(error)}`,
-		};
-	}
-
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(rawJson);
-	} catch (error) {
-		return {
-			error: `Task run metadata is invalid JSON at ${shortenHomePath(runJsonPath)}: ${error instanceof Error ? error.message : String(error)}`,
-		};
-	}
-	if (!isRecord(parsed)) {
-		return { error: `Task run metadata has unexpected shape at ${shortenHomePath(runJsonPath)}.` };
-	}
-
-	const parentSessionFile = typeof parsed.parentSessionFile === "string" && parsed.parentSessionFile.trim().length > 0
-		? parsed.parentSessionFile.trim()
-		: undefined;
-	const parentSessionId = typeof parsed.parentSessionId === "string" && parsed.parentSessionId.trim().length > 0
-		? parsed.parentSessionId.trim()
-		: undefined;
-
-	return {
-		info: {
-			parentSessionFile,
-			parentSessionId,
-		},
-	};
-}
-
 interface ResolvedParentSession {
 	parentSessionPath: string;
-	parentSessionId?: string;
-	source: "header" | "run-json";
-	runJsonPath?: string;
+	source: "header";
 }
 
 async function resolveParentSessionForCurrentSession(
@@ -1285,40 +1215,9 @@ async function resolveParentSessionForCurrentSession(
 		};
 	}
 
-	if (!isLikelyTaskChildSessionFile(currentSessionFile)) {
-		return {
-			noParent: true,
-			error: "Current session has no parentSession header and is not a persisted task child session.",
-		};
-	}
-
-	const runJsonPath = await findTaskRunMetadataFileForChildSession(currentSessionFile);
-	if (!runJsonPath) {
-		return {
-			noParent: true,
-			error: "Current task child session has no run.json metadata nearby, so a parent session cannot be resolved.",
-		};
-	}
-
-	const parentInfo = await readTaskRunParentInfo(runJsonPath);
-	if (parentInfo.error || !parentInfo.info) {
-		return { error: parentInfo.error ?? `Failed to read parent session metadata from ${shortenHomePath(runJsonPath)}.` };
-	}
-
-	if (!parentInfo.info.parentSessionFile) {
-		return {
-			noParent: true,
-			error: `Task run metadata at ${shortenHomePath(runJsonPath)} has no parentSessionFile. This session has no persisted parent to open.`,
-		};
-	}
-
 	return {
-		resolved: {
-			parentSessionPath: resolveSessionReferencePath(parentInfo.info.parentSessionFile, runJsonPath),
-			parentSessionId: parentInfo.info.parentSessionId,
-			source: "run-json",
-			runJsonPath,
-		},
+		noParent: true,
+		error: "Current session has no parentSession header, so a parent session cannot be resolved automatically.",
 	};
 }
 
@@ -1335,31 +1234,6 @@ function createSessionEntryId(): string {
 function buildTaskChildSessionName(agentLabel: string, task: string): string {
 	const preview = createTaskPreview(task, 48);
 	return `task: ${agentLabel} · ${preview}`;
-}
-
-function buildTaskChildParentLinkData(params: {
-	runId: string;
-	step: number;
-	mode: TaskExecutionMode;
-	parentSessionFile?: string;
-	parentSessionId?: string;
-	taskPreview: string;
-	sessionName: string;
-	agent?: string;
-	profile?: string;
-}): Record<string, unknown> {
-	return {
-		v: TASK_CHILD_SESSION_LINK_VERSION,
-		runId: params.runId,
-		step: params.step,
-		mode: params.mode,
-		parentSessionFile: params.parentSessionFile,
-		parentSessionId: params.parentSessionId,
-		taskPreview: params.taskPreview,
-		sessionName: params.sessionName,
-		agent: params.agent,
-		profile: params.profile,
-	};
 }
 
 async function appendRawSessionEntries(
@@ -1381,11 +1255,9 @@ async function seedFreshTaskSessionFile(params: {
 	childCwd: string;
 	parentSessionFile?: string;
 	sessionName: string;
-	linkData: Record<string, unknown>;
 }): Promise<void> {
 	const timestamp = new Date().toISOString();
 	const sessionInfoId = createSessionEntryId();
-	const linkEntryId = createSessionEntryId();
 	const lines = [
 		{
 			type: "session",
@@ -1402,14 +1274,6 @@ async function seedFreshTaskSessionFile(params: {
 			timestamp,
 			name: params.sessionName,
 		},
-		{
-			type: "custom",
-			customType: TASK_CHILD_SESSION_CUSTOM_TYPE_PARENT_LINK,
-			data: params.linkData,
-			id: linkEntryId,
-			parentId: sessionInfoId,
-			timestamp,
-		},
 	];
 	await withFileMutationQueue(params.filePath, async () => {
 		await fs.promises.writeFile(params.filePath, `${lines.map((entry) => JSON.stringify(entry)).join("\n")}\n`, {
@@ -1424,7 +1288,6 @@ async function createManagedFreshTaskSession(params: {
 	childCwd: string;
 	parentSessionFile?: string;
 	sessionName: string;
-	linkData: Record<string, unknown>;
 }): Promise<{ sessionId: string; sessionFile: string }> {
 	const manager = SessionManager.create(params.childCwd);
 	const sessionFile = manager.getSessionFile();
@@ -1436,7 +1299,6 @@ async function createManagedFreshTaskSession(params: {
 		childCwd: params.childCwd,
 		parentSessionFile: params.parentSessionFile,
 		sessionName: params.sessionName,
-		linkData: params.linkData,
 	});
 	return { sessionId, sessionFile };
 }
@@ -1445,7 +1307,6 @@ async function createManagedForkedTaskSession(params: {
 	parentSessionFile: string;
 	childCwd: string;
 	sessionName: string;
-	linkData: Record<string, unknown>;
 }): Promise<{ sessionId: string; sessionFile: string }> {
 	const manager = SessionManager.forkFrom(params.parentSessionFile, params.childCwd);
 	const sessionFile = manager.getSessionFile();
@@ -1455,7 +1316,6 @@ async function createManagedForkedTaskSession(params: {
 	const timestamp = new Date().toISOString();
 	const leafId = manager.getLeafId();
 	const sessionInfoId = createSessionEntryId();
-	const linkEntryId = createSessionEntryId();
 	await appendRawSessionEntries(sessionFile, [
 		{
 			type: "session_info",
@@ -1463,14 +1323,6 @@ async function createManagedForkedTaskSession(params: {
 			parentId: leafId ?? null,
 			timestamp,
 			name: params.sessionName,
-		},
-		{
-			type: "custom",
-			customType: TASK_CHILD_SESSION_CUSTOM_TYPE_PARENT_LINK,
-			data: params.linkData,
-			id: linkEntryId,
-			parentId: sessionInfoId,
-			timestamp,
 		},
 	]);
 	return { sessionId, sessionFile };
@@ -1604,18 +1456,6 @@ async function preflightTaskRun(
 		}
 
 		const sessionName = buildTaskChildSessionName(preparedStep.worker.displayAgentName, preparedStep.rawStep.task);
-		const taskPreview = createTaskPreview(preparedStep.rawStep.task);
-		const linkData = buildTaskChildParentLinkData({
-			runId: sessionRunId ?? `pending-${i + 1}`,
-			step: i + 1,
-			mode,
-			parentSessionFile,
-			parentSessionId,
-			taskPreview,
-			sessionName,
-			agent: preparedStep.worker.agent?.name,
-			profile: preparedStep.worker.profile?.name,
-		});
 		let sessionId: string;
 		let sessionFile: string;
 		try {
@@ -1624,7 +1464,6 @@ async function preflightTaskRun(
 					childCwd: preparedStep.launchCwd,
 					parentSessionFile,
 					sessionName,
-					linkData,
 				});
 				sessionId = createdSession.sessionId;
 				sessionFile = createdSession.sessionFile;
@@ -1636,7 +1475,6 @@ async function preflightTaskRun(
 					parentSessionFile,
 					childCwd: preparedStep.launchCwd,
 					sessionName,
-					linkData,
 				});
 				sessionId = createdSession.sessionId;
 				sessionFile = createdSession.sessionFile;
@@ -3684,13 +3522,9 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
-				const openedMessage =
-					parentResolution.resolved.source === "header"
-						? "Opened parent session (from child session header)."
-						: "Opened parent session (from task run metadata).";
+				const openedMessage = "Opened parent session (from child session header).";
 
 				const openResult = await tryOpenTaskSession(ctx as unknown, parentSessionPath, {
-					targetSessionId: parentResolution.resolved.parentSessionId,
 					withSession: async (replacementCtx) => {
 						await notifyTaskSessionOpened(replacementCtx, openedMessage);
 					},

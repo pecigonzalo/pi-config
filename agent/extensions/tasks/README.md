@@ -81,7 +81,6 @@ Persisted child sessions are seeded with:
 
 - a task-oriented session name (`task: ...`) for easier discovery in `/resume`
 - a `parentSession` header pointing back to the originating parent session
-- a hidden `tasks.parent-link` custom entry with parent/task linkage metadata
 
 If `persist=false`, step execution uses non-persisted sessions and cannot be reopened later.
 
@@ -90,10 +89,6 @@ If `persist=false`, step execution uses non-persisted sessions and cannot be reo
 For persisted steps, the parent session appends hidden custom metadata entries of type:
 
 - `tasks.child-session` (created + terminal status, child session identity, parent link, origin preview, optional terminal-backend metadata; current backend implementation: WezTerm)
-
-Each child session also gets a hidden custom metadata entry of type:
-
-- `tasks.parent-link` (parent session path/id + task linkage)
 
 User-visible task results include compact child-session summaries (session id/status, and expanded path in detailed views).
 
@@ -114,7 +109,7 @@ Supported commands:
 Semantics:
 
 - `/tasks` commands operate on task runs reconstructed from metadata in the current parent session.
-- `parent`: from the current session, open its parent session (via `parentSession` in the child header, or `run.json` fallback for persisted fresh child sessions).
+- `parent`: from the current session, open its parent session via `parentSession` in the child session header.
 - `show`: inspect run/step metadata, origin preview, actions, and warnings.
 - `open`: open selected persisted child session inside the current Pi UI when auto-open is available.
 - `attach`: for completed tasks, open the persisted child session in a new terminal window using the configured terminal backend. For already-running externally hosted tasks, open/switch to the terminal workspace first and then focus the existing terminal target.

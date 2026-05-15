@@ -351,7 +351,7 @@ describe("tasks extension persisted-session guardrails", () => {
 		expect(preflight.error).toContain('context.mode="fork" requires a parent session file');
 	});
 
-	it("stores persisted child sessions as normal Pi sessions and seeds parent linkage metadata", async () => {
+	it("stores persisted child sessions as normal Pi sessions with parentSession headers", async () => {
 		const parentSessionId = "parent-session-id";
 		const parentSessionFile = path.join(testAgentDir, "sessions", "workspace", "main", "parent-session.jsonl");
 		const expectedRunRoot = path.join(
@@ -394,17 +394,10 @@ describe("tasks extension persisted-session guardrails", () => {
 			type: "session_info",
 			name: preflight.prepared?.steps[0]?.session.sessionName,
 		});
-		expect(entries[2]).toMatchObject({
-			type: "custom",
-			customType: "tasks.parent-link",
-			data: {
-				parentSessionFile,
-				parentSessionId,
-			},
-		});
+		expect(entries).toHaveLength(2);
 	});
 
-	it("resolves parent session from fresh child headers without run.json fallback", async () => {
+	it("resolves parent session from child session headers", async () => {
 		const parentSessionFile = path.join(testAgentDir, "sessions", "workspace", "main", "parent.jsonl");
 		const childSessionFile = path.join(testAgentDir, "sessions", "workspace", "child", "task-child.jsonl");
 		await fs.mkdir(path.dirname(childSessionFile), { recursive: true });
@@ -439,6 +432,17 @@ describe("tasks extension persisted-session guardrails", () => {
 			parentSessionPath: parentSessionFile,
 			source: "header",
 		});
+	});
+
+	it("does not resolve a parent session without a parentSession header", async () => {
+		const currentSessionFile = path.join(testAgentDir, "sessions", "workspace", "child", "task-child.jsonl");
+		const resolved = await __test__.resolveParentSessionForCurrentSession(currentSessionFile, [
+			{ type: "session", id: "child-session-id" } as any,
+		]);
+
+		expect(resolved.resolved).toBeUndefined();
+		expect(resolved.noParent).toBe(true);
+		expect(resolved.error).toContain("has no parentSession header");
 	});
 });
 
