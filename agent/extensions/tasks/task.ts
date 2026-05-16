@@ -2856,16 +2856,11 @@ function setTaskWidgetEnabled(
 }
 
 function buildTaskWidgetSummary(runs: TaskRunView[]): TaskWidgetSummary {
-	const runningRuns = runs.filter((run) => run.status === "running").length;
+	const activeRuns = runs.filter((run) => run.status === "running");
 	return {
 		totalRuns: runs.length,
-		runningRuns,
-		runs: [...runs].sort((left, right) => {
-			const leftRunning = left.status === "running" ? 1 : 0;
-			const rightRunning = right.status === "running" ? 1 : 0;
-			if (rightRunning !== leftRunning) return rightRunning - leftRunning;
-			return toMillis(right.updatedAt) - toMillis(left.updatedAt);
-		}),
+		runningRuns: activeRuns.length,
+		runs: [...activeRuns].sort((left, right) => toMillis(right.updatedAt) - toMillis(left.updatedAt)),
 	};
 }
 
@@ -2875,9 +2870,15 @@ function buildTaskWidgetLines(
 ): string[] {
 	const fg = typeof style?.fg === "function" ? style.fg.bind(style) : ((_color: any, text: string) => text);
 	const bold = typeof style?.bold === "function" ? style.bold.bind(style) : ((text: string) => text);
-	const lines = [fg("toolTitle", bold(themeIndependentTaskBrowserHeading(summary.totalRuns)))];
+	const lines = [fg("toolTitle", bold(themeIndependentTaskBrowserHeading(summary.runningRuns)))];
 	if (summary.totalRuns === 0) {
 		lines.push(fg("muted", TASKS_NO_CURRENT_RUNS_MESSAGE));
+		lines.push(fg("dim", "Use /tasks or Ctrl+Shift+T to browse · /tasks toggle hide"));
+		return lines;
+	}
+	if (summary.runningRuns === 0) {
+		lines.push(fg("muted", "No active task runs in current session."));
+		lines.push(fg("dim", `Hidden non-active runs: ${summary.totalRuns}`));
 		lines.push(fg("dim", "Use /tasks or Ctrl+Shift+T to browse · /tasks toggle hide"));
 		return lines;
 	}
@@ -2900,6 +2901,9 @@ function buildTaskWidgetLines(
 		if (data.originPreview) parts.push(fg("dim", `· ${createTaskPreview(data.originPreview, 80)}`));
 		if (data.warningCount > 0) parts.push(fg("warning", `· warnings:${data.warningCount}`));
 		lines.push(parts.join(" "));
+	}
+	if (summary.totalRuns > summary.runningRuns) {
+		lines.push(fg("dim", `Hidden non-active runs: ${summary.totalRuns - summary.runningRuns}`));
 	}
 	lines.push(fg("dim", "Use /tasks or Ctrl+Shift+T to interact · /tasks toggle hide"));
 	return lines;
@@ -2935,6 +2939,25 @@ function syncTaskUiChrome(ctx: TaskUiChromeContext): void {
 	}
 	if (typeof ctx.ui.setStatus === "function") {
 		ctx.ui.setStatus("tasks.runs", undefined);
+	}
+}
+
+async function withTaskWidgetTemporarilyHidden<T>(
+	ctx: TaskUiChromeContext,
+	action: () => Promise<T>,
+): Promise<T> {
+	const wasEnabled = isTaskWidgetEnabled(ctx);
+	if (wasEnabled) {
+		setTaskWidgetEnabled(ctx, false);
+		clearTaskUiChrome(ctx);
+	}
+	try {
+		return await action();
+	} finally {
+		if (wasEnabled) {
+			setTaskWidgetEnabled(ctx, true);
+			syncTaskUiChrome(ctx);
+		}
 	}
 }
 
@@ -3923,7 +3946,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (parsed.action === "list") {
-				if (await browseTaskRuns(ctx, parsed.scope, runs)) return;
+				if (await withTaskWidgetTemporarilyHidden(ctx, async () => browseTaskRuns(ctx, parsed.scope, runs))) return;
 				ctx.ui.notify(formatTaskRunList(parsed.scope, runs), "info");
 				return;
 			}
@@ -3997,7 +4020,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(TASKS_NO_CURRENT_RUNS_MESSAGE, "info");
 				return;
 			}
-			if (await browseTaskRuns(ctx, "current", runs)) return;
+			if (await withTaskWidgetTemporarilyHidden(ctx, async () => browseTaskRuns(ctx, "current", runs))) return;
 			ctx.ui.notify(formatTaskRunList("current", runs), "info");
 		},
 	});

@@ -152,8 +152,10 @@ function createTaskTool() {
 	return createExtensionHarness().tool;
 }
 
-function makeRun(runId: string, childSessionId: string): any {
+function makeRun(runId: string, childSessionId: string, status: "running" | "succeeded" = "succeeded"): any {
 	const timestamp = "2024-01-01T00:00:00.000Z";
+	const stepStatus = status === "running" ? "running" : "succeeded";
+	const snapshotStatus = status === "running" ? "created" : "succeeded";
 	return {
 		internalRunKey: runId,
 		runId,
@@ -174,11 +176,11 @@ function makeRun(runId: string, childSessionId: string): any {
 					persist: true,
 					taskPreview: "task",
 					createdAt: timestamp,
-					status: "succeeded",
+					status: snapshotStatus,
 				},
-				status: "succeeded",
-				isLive: false,
-				hasTerminalMetadata: true,
+				status: stepStatus,
+				isLive: status === "running",
+				hasTerminalMetadata: status !== "running",
 				warnings: [],
 				sourceOrder: 1,
 			},
@@ -187,7 +189,7 @@ function makeRun(runId: string, childSessionId: string): any {
 		persistedStepCount: 1,
 		createdAt: timestamp,
 		updatedAt: timestamp,
-		status: "succeeded",
+		status,
 		warnings: [],
 		latestSourceOrder: 1,
 	};
@@ -885,13 +887,14 @@ describe("/tasks list formatting", () => {
 
 	it("uses the same run summary lines for the persistent task widget", () => {
 		const widgetLines = __test__.buildTaskWidgetLines({
-			totalRuns: 1,
-			runningRuns: 0,
-			runs: [makeRun("alpha-run", "alpha-child")],
+			totalRuns: 2,
+			runningRuns: 1,
+			runs: [makeRun("alpha-run", "alpha-child", "running")],
 		});
 		expect(widgetLines[0]).toBe("Task runs in current session (1):");
-		expect(widgetLines[1]).toContain("1. succeeded alpha-run");
-		expect(widgetLines[2]).toBe("Use /tasks or Ctrl+Shift+T to interact · /tasks toggle hide");
+		expect(widgetLines[1]).toContain("1. running alpha-run");
+		expect(widgetLines[2]).toContain("Hidden non-active runs: 1");
+		expect(widgetLines[3]).toBe("Use /tasks or Ctrl+Shift+T to interact · /tasks toggle hide");
 	});
 });
 
