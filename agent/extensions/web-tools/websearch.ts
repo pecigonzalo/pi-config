@@ -1,11 +1,10 @@
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
+import { callMcpTool } from "./mcp";
 import {
 	clampTimeout,
 	clipText,
-	createTimedSignal,
-	createToolUserAgent,
 	formatTruncationNotice,
 	normalizeDomainFilters,
 	normalizeWhitespace,
@@ -16,8 +15,8 @@ import {
 
 const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 10;
-const EXA_BASE_URL = process.env.EXA_BASE_URL || "https://api.exa.ai";
-const EXA_TIMEOUT_SECONDS = clampTimeout(
+const DEFAULT_EXA_MCP_URL = "https://mcp.exa.ai/mcp";
+const EXA_MCP_TIMEOUT_SECONDS = clampTimeout(
 	process.env.WEBSEARCH_TIMEOUT_SECONDS ? Number(process.env.WEBSEARCH_TIMEOUT_SECONDS) : DEFAULT_TIMEOUT_SECONDS,
 );
 
@@ -58,6 +57,7 @@ export interface WebsearchResultItem {
 
 export interface WebsearchDetails {
 	provider: "exa";
+	transport: "mcp";
 	query: string;
 	mode: WebsearchMode;
 	requestedLimit?: number;
@@ -70,6 +70,7 @@ export interface WebsearchDetails {
 	response: {
 		status?: number;
 		requestId?: string;
+		endpoint: string;
 		rateLimit?: {
 			retryAfterSeconds?: number;
 			remaining?: number;
@@ -78,19 +79,11 @@ export interface WebsearchDetails {
 	};
 }
 
-interface ExaSearchResponse {
-	requestId?: string;
-	results?: unknown[];
-}
-
-interface ExaResultCandidate {
-	title?: unknown;
-	url?: unknown;
-	highlights?: unknown;
-	text?: unknown;
-	summary?: unknown;
-	score?: unknown;
-	publishedDate?: unknown;
+interface ParsedMcpSearchBlock {
+	title?: string;
+	url?: string;
+	publishedDate?: string;
+	highlights: string[];
 }
 
 function normalizeLimit(limit: number | undefined): number {
@@ -126,42 +119,87 @@ function parseHeaderNumber(value: string | null): number | undefined {
 	return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function pickSnippet(candidate: ExaResultCandidate): string {
-	const highlights = Array.isArray(candidate.highlights)
-		? candidate.highlights.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-		: [];
-	const text = typeof candidate.text === "string" ? candidate.text : undefined;
-	const summary = typeof candidate.summary === "string" ? candidate.summary : undefined;
-	const snippetSource = highlights[0] ?? summary ?? text ?? "";
-	return clipText(snippetSource || "No snippet available.", 320);
+function buildExaMcpUrl(): string {
+	const url = new URL(process.env.EXA_MCP_URL || DEFAULT_EXA_MCP_URL);
+	const apiKey = process.env.EXA_API_KEY?.trim();
+	if (apiKey) url.searchParams.set("exaApiKey", apiKey);
+	return url.toString();
 }
 
-function normalizeResult(candidate: ExaResultCandidate): WebsearchResultItem | undefined {
-	if (typeof candidate.url !== "string") return undefined;
+function parseSearchBlock(block: string): ParsedMcpSearchBlock | undefined {
+	const lines = block.replace(/\r\n/g, "\n").split("\n");
+	const parsed: ParsedMcpSearchBlock = { highlights: [] };
+	let inHighlights = false;
+
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+
+		if (trimmed.startsWith("Title:")) {
+			parsed.title = trimmed.slice("Title:".length).trim();
+			inHighlights = false;
+			continue;
+		}
+		if (trimmed.startsWith("URL:")) {
+			parsed.url = trimmed.slice("URL:".length).trim();
+			inHighlights = false;
+			continue;
+		}
+		if (trimmed.startsWith("Published:")) {
+			const published = trimmed.slice("Published:".length).trim();
+			parsed.publishedDate = published === "N/A" ? undefined : published;
+			inHighlights = false;
+			continue;
+		}
+		if (trimmed.startsWith("Author:")) {
+			inHighlights = false;
+			continue;
+		}
+		if (trimmed === "Highlights:") {
+			inHighlights = true;
+			continue;
+		}
+		if (inHighlights && trimmed !== "[...]" && !trimmed.startsWith("Title:")) {
+			parsed.highlights.push(trimmed);
+		}
+	}
+
+	if (!parsed.url) return undefined;
+	return parsed;
+}
+
+function parseMcpSearchText(text: string): ParsedMcpSearchBlock[] {
+	return text
+		.split(/\n\s*---\s*\n/g)
+		.map((block) => block.trim())
+		.filter(Boolean)
+		.map(parseSearchBlock)
+		.filter((block): block is ParsedMcpSearchBlock => Boolean(block));
+}
+
+function pickSnippet(block: ParsedMcpSearchBlock): string {
+	const uniqueLines = [...new Set(block.highlights.map((line) => normalizeWhitespace(line)).filter(Boolean))];
+	const combined = uniqueLines.join(" ").trim();
+	return clipText(combined || "No snippet available.", 320);
+}
+
+function normalizeResult(block: ParsedMcpSearchBlock): WebsearchResultItem | undefined {
+	if (!block.url) return undefined;
 
 	let parsed: URL;
 	try {
-		parsed = validateHttpUrl(candidate.url, "result URL");
+		parsed = validateHttpUrl(block.url, "result URL");
 	} catch {
 		return undefined;
 	}
 
-	const title = typeof candidate.title === "string" && candidate.title.trim().length > 0
-		? clipText(candidate.title, 200)
-		: parsed.hostname;
-	const snippet = pickSnippet(candidate);
-	const score = typeof candidate.score === "number" && Number.isFinite(candidate.score) ? candidate.score : undefined;
-	const publishedDate = typeof candidate.publishedDate === "string" && candidate.publishedDate.trim().length > 0
-		? candidate.publishedDate
-		: undefined;
-
+	const title = block.title && block.title.trim().length > 0 ? clipText(block.title, 200) : parsed.hostname;
 	return {
 		title,
 		url: parsed.toString(),
-		snippet,
+		snippet: pickSnippet(block),
 		domain: parsed.hostname.toLowerCase(),
-		score,
-		publishedDate,
+		publishedDate: block.publishedDate,
 	};
 }
 
@@ -181,7 +219,6 @@ function renderResults(query: string, mode: WebsearchMode, domains: string[], re
 		lines.push(`   URL: ${result.url}`);
 		lines.push(`   Snippet: ${normalizeWhitespace(result.snippet)}`);
 		const meta: string[] = [`domain=${result.domain}`];
-		if (typeof result.score === "number") meta.push(`score=${result.score.toFixed(3)}`);
 		if (result.publishedDate) meta.push(`published=${result.publishedDate}`);
 		lines.push(`   Meta: ${meta.join(" | ")}`);
 		lines.push("");
@@ -190,75 +227,39 @@ function renderResults(query: string, mode: WebsearchMode, domains: string[], re
 	return lines.join("\n").trim();
 }
 
-async function callExaSearch(
+async function callExaMcpSearch(
 	request: { query: string; limit: number; domains: string[]; mode: WebsearchMode },
 	options?: { signal?: AbortSignal; fetchImpl?: typeof fetch },
-): Promise<{ response: Response; body: ExaSearchResponse }> {
-	const fetchImpl = options?.fetchImpl ?? fetch;
-	const apiKey = process.env.EXA_API_KEY;
-	if (!apiKey) {
-		throw new Error("websearch is not configured: set EXA_API_KEY in the environment");
-	}
+): Promise<{ response: Response; requestId?: string; text: string; endpoint: string }> {
+	const endpoint = buildExaMcpUrl();
 
-	const timedSignal = createTimedSignal(options?.signal, EXA_TIMEOUT_SECONDS);
 	try {
-		let response: Response;
-		try {
-			response = await fetchImpl(`${EXA_BASE_URL.replace(/\/$/, "")}/search`, {
-				method: "POST",
-				signal: timedSignal.signal,
-				headers: {
-					accept: "application/json",
-					"content-type": "application/json",
-					"x-api-key": apiKey,
-					"user-agent": createToolUserAgent("websearch"),
-				},
-				body: JSON.stringify({
-					query: request.query,
-					type: mapModeToExaType(request.mode),
-					numResults: request.limit,
-					includeDomains: request.domains.length > 0 ? request.domains : undefined,
-					contents: {
-						highlights: true,
-					},
-				}),
-			});
-		} catch (error) {
-			if (timedSignal.didTimeout()) {
-				throw new Error(`websearch timed out after ${EXA_TIMEOUT_SECONDS}s`);
-			}
-			throw new Error(`websearch failed: ${error instanceof Error ? error.message : String(error)}`);
-		}
+		const { response, text } = await callMcpTool({
+			url: endpoint,
+			toolName: "web_search_exa",
+			args: {
+				query: request.query,
+				type: mapModeToExaType(request.mode),
+				numResults: request.limit,
+				livecrawl: "fallback",
+				includeDomains: request.domains.length > 0 ? request.domains : undefined,
+			},
+			timeoutSeconds: EXA_MCP_TIMEOUT_SECONDS,
+			signal: options?.signal,
+			fetchImpl: options?.fetchImpl,
+		});
 
-		if (response.status === 401 || response.status === 403) {
-			throw new Error("websearch authentication failed; check EXA_API_KEY");
+		const requestId = text.match(/"requestId":"([^"]+)"/)?.[1];
+		return { response, requestId, text, endpoint };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (/HTTP 401|HTTP 403|auth/i.test(message)) {
+			throw new Error("websearch authentication failed; check EXA_API_KEY or remove it to use unauthenticated MCP access");
 		}
-		if (response.status === 429) {
-			const retryAfter = response.headers.get("retry-after");
-			throw new Error(`websearch rate limited by provider${retryAfter ? `; retry after ${retryAfter}s` : ""}`);
+		if (/HTTP 429|rate limit/i.test(message)) {
+			throw new Error("websearch rate limited by provider");
 		}
-		if (response.status >= 500) {
-			throw new Error(`websearch provider unavailable (HTTP ${response.status})`);
-		}
-
-		let body: ExaSearchResponse;
-		try {
-			body = (await response.json()) as ExaSearchResponse;
-		} catch {
-			throw new Error("websearch provider returned an invalid JSON response");
-		}
-
-		if (!response.ok) {
-			const message =
-				body && typeof body === "object" && "error" in body && typeof (body as { error?: unknown }).error === "string"
-					? (body as { error: string }).error
-					: undefined;
-			throw new Error(`websearch provider error (HTTP ${response.status})${message ? `: ${message}` : ""}`);
-		}
-
-		return { response, body };
-	} finally {
-		timedSignal.cleanup();
+		throw new Error(`websearch failed: ${message}`);
 	}
 }
 
@@ -272,18 +273,18 @@ export async function executeWebsearch(
 	const domains = normalizeDomainFilters(params.domains);
 	const warnings: string[] = [];
 
-	const { response, body } = await callExaSearch({ query, limit: appliedLimit, domains, mode }, options);
-	const rawResults = Array.isArray(body.results) ? body.results : [];
-	const normalizedResults = rawResults
-		.map((item) => normalizeResult(item as ExaResultCandidate))
+	const { response, requestId, text, endpoint } = await callExaMcpSearch({ query, limit: appliedLimit, domains, mode }, options);
+	const parsedBlocks = parseMcpSearchText(text);
+	const normalizedResults = parsedBlocks
+		.map((block) => normalizeResult(block))
 		.filter((item): item is WebsearchResultItem => Boolean(item))
 		.slice(0, appliedLimit);
 
-	if (!Array.isArray(body.results)) {
-		warnings.push("Provider response did not include a results array.");
+	if (parsedBlocks.length === 0 && text.trim().length > 0) {
+		warnings.push("MCP search response did not match the expected result block format.");
 	}
-	if (rawResults.length > normalizedResults.length) {
-		warnings.push(`${rawResults.length - normalizedResults.length} malformed result(s) were discarded during normalization.`);
+	if (parsedBlocks.length > normalizedResults.length) {
+		warnings.push(`${parsedBlocks.length - normalizedResults.length} malformed result(s) were discarded during normalization.`);
 	}
 
 	const rendered = renderResults(query, mode, domains, normalizedResults);
@@ -302,6 +303,7 @@ export async function executeWebsearch(
 
 	const details: WebsearchDetails = {
 		provider: "exa",
+		transport: "mcp",
 		query,
 		mode,
 		requestedLimit: params.limit,
@@ -313,7 +315,8 @@ export async function executeWebsearch(
 		warnings,
 		response: {
 			status: response.status,
-			requestId: typeof body.requestId === "string" ? body.requestId : undefined,
+			requestId,
+			endpoint,
 			rateLimit: {
 				retryAfterSeconds: parseHeaderNumber(response.headers.get("retry-after")),
 				remaining: parseHeaderNumber(response.headers.get("x-ratelimit-remaining")),
