@@ -17,6 +17,7 @@ import {
 	truncateToolText,
 	validateHttpUrl,
 	normalizeWhitespace,
+	clipText,
 	DEFAULT_TIMEOUT_SECONDS,
 	MAX_TIMEOUT_SECONDS,
 } from "./shared";
@@ -278,6 +279,15 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 		parameters: WebfetchParams,
 		async execute(_toolCallId, params, signal) {
 			return executeWebfetch(params, { signal });
+		},
+		renderCall(args, theme) {
+			const rawUrl = typeof (args as { url?: unknown })?.url === "string" ? ((args as { url: string }).url ?? "") : "(missing url)";
+			const displayUrl = clipText(rawUrl, 100);
+			return new Text(
+				`${theme.fg("toolTitle", theme.bold("webfetch"))} ${theme.fg("accent", displayUrl)}`,
+				0,
+				0,
+			);
 		},
 		renderResult(result, { expanded, isPartial }, theme) {
 			const textOutput = result.content

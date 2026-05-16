@@ -349,6 +349,17 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal) {
 			return executeWebsearch(params, { signal });
 		},
+		renderCall(args, theme) {
+			const rawQuery = typeof (args as { query?: unknown })?.query === "string"
+				? ((args as { query: string }).query ?? "")
+				: "(missing query)";
+			const mode = typeof (args as { mode?: unknown })?.mode === "string" ? ` ${theme.fg("muted", `[${(args as { mode: string }).mode}]`)}` : "";
+			return new Text(
+				`${theme.fg("toolTitle", theme.bold("websearch"))} ${theme.fg("accent", `\"${clipText(rawQuery, 90)}\"`)}${mode}`,
+				0,
+				0,
+			);
+		},
 		renderResult(result, { expanded, isPartial }, theme) {
 			const textOutput = result.content
 				.filter((item) => item.type === "text")
