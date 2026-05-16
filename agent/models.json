@@ -1,0 +1,112 @@
+{
+  "providers": {
+    "github-copilot": {
+      "modelOverrides": {
+        "claude-haiku-4.5": {
+          "contextWindow": 144000,
+          "maxTokens": 32000
+        },
+        "claude-opus-4.5": {
+          "contextWindow": 160000,
+          "maxTokens": 32000
+        },
+        "claude-opus-4.6": {
+          "contextWindow": 144000,
+          "maxTokens": 64000
+        },
+        "claude-opus-4.7": {
+          "contextWindow": 144000,
+          "maxTokens": 64000
+        },
+        "claude-opus-41": {
+          "contextWindow": 80000,
+          "maxTokens": 16000
+        },
+        "claude-sonnet-4": {
+          "contextWindow": 216000,
+          "maxTokens": 16000
+        },
+        "claude-sonnet-4.5": {
+          "contextWindow": 144000,
+          "maxTokens": 32000
+        },
+        "claude-sonnet-4.6": {
+          "contextWindow": 200000,
+          "maxTokens": 32000
+        },
+        "gemini-2.5-pro": {
+          "contextWindow": 128000,
+          "maxTokens": 64000
+        },
+        "gemini-3-flash-preview": {
+          "contextWindow": 128000,
+          "maxTokens": 64000
+        },
+        "gemini-3-pro-preview": {
+          "contextWindow": 128000,
+          "maxTokens": 64000
+        },
+        "gemini-3.1-pro-preview": {
+          "contextWindow": 128000,
+          "maxTokens": 64000
+        },
+        "gpt-4.1": {
+          "contextWindow": 128000,
+          "maxTokens": 16384
+        },
+        "gpt-4o": {
+          "contextWindow": 128000,
+          "maxTokens": 4096
+        },
+        "gpt-5": {
+          "contextWindow": 128000,
+          "maxTokens": 128000
+        },
+        "gpt-5-mini": {
+          "contextWindow": 264000,
+          "maxTokens": 64000
+        },
+        "gpt-5.1": {
+          "contextWindow": 264000,
+          "maxTokens": 64000
+        },
+        "gpt-5.1-codex": {
+          "contextWindow": 400000,
+          "maxTokens": 128000
+        },
+        "gpt-5.1-codex-max": {
+          "contextWindow": 400000,
+          "maxTokens": 128000
+        },
+        "gpt-5.1-codex-mini": {
+          "contextWindow": 400000,
+          "maxTokens": 128000
+        },
+        "gpt-5.2": {
+          "contextWindow": 264000,
+          "maxTokens": 64000
+        },
+        "gpt-5.2-codex": {
+          "contextWindow": 400000,
+          "maxTokens": 128000
+        },
+        "gpt-5.3-codex": {
+          "contextWindow": 400000,
+          "maxTokens": 128000
+        },
+        "gpt-5.4": {
+          "contextWindow": 400000,
+          "maxTokens": 128000
+        },
+        "gpt-5.4-mini": {
+          "contextWindow": 400000,
+          "maxTokens": 128000
+        },
+        "grok-code-fast-1": {
+          "contextWindow": 128000,
+          "maxTokens": 64000
+        }
+      }
+    }
+  }
+}

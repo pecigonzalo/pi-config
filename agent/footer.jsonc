@@ -1,6 +1,5 @@
 {
   "$schema": "./extensions/footer/footer.schema.json",
-
   // Global overrides for the `footer` extension.
   // Shipped defaults live in: ./extensions/footer/footer.jsonc
   // Project-local overrides can live in: <project>/.pi/footer.jsonc

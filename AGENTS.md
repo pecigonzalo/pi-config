@@ -6,6 +6,8 @@ This is the personal Pi coding agent configuration directory (`~/.pi`).
 
 ### Tool Usage
 
-- **Prefer `typescript` over `bash`** for scripting, analysis, data processing, and automation tasks when possible.
-  - Use the `typescript` tool for file analysis, structured data extraction, batch operations, and anything that benefits from type safety or scripted logic.
-  - Reserve `bash` for simple one-liner lookups (e.g., `ls`, `find`, `rg`, `grep`) or when a shell command is clearly the simplest option.
+- **Prefer `typescript` for ad hoc scripting** and **prefer `bash` for shell-native commands**.
+  - Use the `typescript` tool for HTTP requests, JSON parsing, file analysis, structured data extraction, summarization, batch operations, and other tasks that look like a small program rather than a shell command.
+  - Use `bash` for shell-native operations such as `ls`, `find`, `rg`, `grep`, piping existing CLI tools, inspecting processes, or running project task runners.
+  - Avoid using `bash` mainly as a wrapper to run inline scripts in other languages (for example `python - <<'PY'`, `node -e`, or similar) when `typescript` can handle the task directly.
+  - `bash` is still appropriate when shell composition is the natural solution or when an existing external CLI is simpler than writing a script.

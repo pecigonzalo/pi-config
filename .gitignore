@@ -12,10 +12,6 @@ agent/sessions/
 agent/pi-debug.log
 .tmp/
 
-# Local pi config/model selections
-agent/settings.json
-agent/models.json
-
 # Extension local dependencies
 agent/extensions/**/node_modules/
 

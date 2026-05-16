@@ -1,0 +1,31 @@
+{
+  "lastChangelogVersion": "0.73.1",
+  "theme": "dracula",
+  "enabledModels": [
+    "github-copilot/claude-opus-4.6",
+    "github-copilot/claude-opus-4.7",
+    "github-copilot/claude-sonnet-4.6",
+    "github-copilot/gemini-3-flash-preview",
+    "github-copilot/gemini-3.1-pro-preview",
+    "github-copilot/gpt-5.4",
+    "github-copilot/gpt-5.5",
+    "github-copilot/gpt-5.4-mini",
+    "github-copilot/gpt-5.3-codex",
+    "github-copilot/claude-haiku-4.5"
+  ],
+  "defaultProvider": "github-copilot",
+  "defaultModel": "gpt-5.5",
+  "defaultThinkingLevel": "high",
+  "resources": {
+    "skills": [
+      "~/.config/opencode/skills"
+    ]
+  },
+  "compaction": {
+    "enabled": true
+  },
+  "hideThinkingBlock": false,
+  "treeFilterMode": "no-tools",
+  "collapseChangelog": true,
+  "quietStartup": true
+}
