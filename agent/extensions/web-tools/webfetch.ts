@@ -1,5 +1,6 @@
 import { StringEnum } from "@mariozechner/pi-ai";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { keyHint, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 import TurndownService from "turndown";
 import {
@@ -277,6 +278,33 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 		parameters: WebfetchParams,
 		async execute(_toolCallId, params, signal) {
 			return executeWebfetch(params, { signal });
+		},
+		renderResult(result, { expanded, isPartial }, theme) {
+			const textOutput = result.content
+				.filter((item) => item.type === "text")
+				.map((item) => item.text ?? "")
+				.join("\n")
+				.trim();
+			const details = result.details as WebfetchDetails | undefined;
+
+			if (isPartial) {
+				return new Text(theme.fg("warning", "Fetching URL content..."), 0, 0);
+			}
+
+			if (!expanded) {
+				const target = details?.title ?? details?.finalUrl ?? details?.url ?? "URL fetched";
+				const format = details?.appliedFormat ? ` (${details.appliedFormat})` : "";
+				const warnings = details?.warnings?.length
+					? theme.fg("warning", ` · ${details.warnings.length} warning${details.warnings.length === 1 ? "" : "s"}`)
+					: "";
+				return new Text(
+					`${theme.fg("success", "✓")} ${theme.fg("toolOutput", target)}${theme.fg("muted", format)}${warnings}${theme.fg("dim", ` (${keyHint("app.tools.expand", "to expand")})`)}`,
+					0,
+					0,
+				);
+			}
+
+			return new Text(theme.fg("toolOutput", textOutput || "(no output)"), 0, 0);
 		},
 	});
 }

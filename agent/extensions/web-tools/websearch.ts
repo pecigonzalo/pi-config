@@ -1,5 +1,6 @@
 import { StringEnum } from "@mariozechner/pi-ai";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { keyHint, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 import { callMcpTool } from "./mcp";
 import {
@@ -347,6 +348,33 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 		parameters: WebsearchParams,
 		async execute(_toolCallId, params, signal) {
 			return executeWebsearch(params, { signal });
+		},
+		renderResult(result, { expanded, isPartial }, theme) {
+			const textOutput = result.content
+				.filter((item) => item.type === "text")
+				.map((item) => item.text ?? "")
+				.join("\n")
+				.trim();
+			const details = result.details as WebsearchDetails | undefined;
+
+			if (isPartial) {
+				return new Text(theme.fg("warning", "Searching the web..."), 0, 0);
+			}
+
+			if (!expanded) {
+				const count = details?.resultCount ?? 0;
+				const query = details?.query ? ` for \"${details.query}\"` : "";
+				const warnings = details?.warnings?.length
+					? theme.fg("warning", ` · ${details.warnings.length} warning${details.warnings.length === 1 ? "" : "s"}`)
+					: "";
+				return new Text(
+					`${theme.fg("success", "✓")} ${theme.fg("toolOutput", `${count} result${count === 1 ? "" : "s"}${query}`)}${warnings}${theme.fg("dim", ` (${keyHint("app.tools.expand", "to expand")})`)}`,
+					0,
+					0,
+				);
+			}
+
+			return new Text(theme.fg("toolOutput", textOutput || "(no output)"), 0, 0);
 		},
 	});
 }
