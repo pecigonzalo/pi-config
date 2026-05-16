@@ -260,8 +260,12 @@ describe("tasks extension UI chrome", () => {
 		await commandHandlers.tasks.handler("toggle", ctx);
 		expect(widgetCalls[0]).toEqual([
 			"tasks.runs",
-			["Tasks widget active · no task runs · Ctrl+Shift+T browse · /tasks toggle hide"],
-			{ placement: "belowEditor" },
+			[
+				"Task runs in current session (0):",
+				"No task runs in current session.",
+				"Use /tasks or Ctrl+Shift+T to browse · /tasks toggle hide",
+			],
+			{ placement: "aboveEditor" },
 		]);
 		expect(statusCalls[0]).toEqual(["tasks.runs", undefined]);
 		expect(notifications[0]).toEqual({ message: "Tasks widget enabled for this session.", level: "info" });
@@ -877,6 +881,17 @@ describe("/tasks list formatting", () => {
 		const output = __test__.formatTaskRunList("current", [makeRun("alpha-run", "alpha-child")]);
 		expect(output).toContain("/tasks attach <selector>");
 		expect(output).toContain("/tasks attach 1");
+	});
+
+	it("uses the same run summary lines for the persistent task widget", () => {
+		const widgetLines = __test__.buildTaskWidgetLines({
+			totalRuns: 1,
+			runningRuns: 0,
+			runs: [makeRun("alpha-run", "alpha-child")],
+		});
+		expect(widgetLines[0]).toBe("Task runs in current session (1):");
+		expect(widgetLines[1]).toContain("1. succeeded alpha-run");
+		expect(widgetLines[2]).toBe("Use /tasks or Ctrl+Shift+T to interact · /tasks toggle hide");
 	});
 });
 

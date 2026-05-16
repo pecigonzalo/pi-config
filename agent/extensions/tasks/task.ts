@@ -116,8 +116,6 @@ const TASKS_COMMAND_USAGE = [
 ].join(" | ");
 
 const taskWidgetEnabledSessions = new Set<string>();
-const taskWidgetRelayNoticesBySession = new Map<string, TaskWidgetRelayNotice[]>();
-const TASK_WIDGET_RELAY_NOTICE_TTL_MS = 30_000;
 
 // Recursion depth guard
 const DEFAULT_MAX_SUBAGENT_DEPTH = 2;
@@ -467,7 +465,6 @@ interface TaskRpcUiContext {
 	ui?: TaskRpcUiMethods;
 	sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined };
 	refreshTaskUiChrome?: () => void;
-	taskWidgetEnabled?: boolean;
 }
 
 function getFinalOutput(messages: Message[]): string {
@@ -2607,11 +2604,15 @@ function formatTaskRunSummary(run: TaskRunView, index: number, includeSource: bo
 	return text;
 }
 
+function themeIndependentTaskBrowserHeading(runCount: number): string {
+	return `Task runs in current session (${runCount}):`;
+}
+
 function formatTaskRunList(scope: TasksScope, runs: TaskRunView[]): string {
 	if (runs.length === 0) {
 		return TASKS_NO_CURRENT_RUNS_MESSAGE;
 	}
-	const header = `Task runs in current session (${runs.length}):`;
+	const header = themeIndependentTaskBrowserHeading(runs.length);
 	const guidance = `Open a persisted task in a terminal window with /tasks attach <selector> (${getTaskAttachActionLabel()}). Running externally hosted tasks are focused instead.`;
 	return [header, guidance, ...runs.map((run, index) => formatTaskRunSummary(run, index + 1, false))].join("\n");
 }
@@ -2789,14 +2790,6 @@ interface TaskWidgetSummary {
 	runs: TaskRunView[];
 }
 
-interface TaskWidgetRelayNotice {
-	controllerKey: string;
-	label: string;
-	level: TaskExtensionUiNotifyType;
-	lines: string[];
-	updatedAt: number;
-}
-
 function getTaskWidgetSessionKey(ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } }): string | undefined {
 	const sessionFile = ctx.sessionManager?.getSessionFile?.();
 	if (typeof sessionFile === "string" && sessionFile.trim()) {
@@ -2825,57 +2818,6 @@ function setTaskWidgetEnabled(
 	return true;
 }
 
-function getTaskWidgetRelaySessionKey(ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } }): string | undefined {
-	return getTaskWidgetSessionKey(ctx);
-}
-
-function getTaskWidgetRelayNotices(ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } }): TaskWidgetRelayNotice[] {
-	const sessionKey = getTaskWidgetRelaySessionKey(ctx);
-	if (!sessionKey) return [];
-	const now = Date.now();
-	const active = (taskWidgetRelayNoticesBySession.get(sessionKey) ?? []).filter(
-		(entry) => now - entry.updatedAt <= TASK_WIDGET_RELAY_NOTICE_TTL_MS,
-	);
-	if (active.length > 0) taskWidgetRelayNoticesBySession.set(sessionKey, active);
-	else taskWidgetRelayNoticesBySession.delete(sessionKey);
-	return active;
-}
-
-function setTaskWidgetRelayNotice(
-	ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } },
-	notice: TaskWidgetRelayNotice,
-): void {
-	const sessionKey = getTaskWidgetRelaySessionKey(ctx);
-	if (!sessionKey) return;
-	const existing = taskWidgetRelayNoticesBySession.get(sessionKey) ?? [];
-	const next = [
-		notice,
-		...existing.filter((entry) => entry.controllerKey !== notice.controllerKey),
-	].sort((left, right) => right.updatedAt - left.updatedAt);
-	taskWidgetRelayNoticesBySession.set(sessionKey, next.slice(0, 5));
-}
-
-function clearTaskWidgetRelayNotice(
-	ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } },
-	controllerKey: string,
-): void {
-	const sessionKey = getTaskWidgetRelaySessionKey(ctx);
-	if (!sessionKey) return;
-	const existing = taskWidgetRelayNoticesBySession.get(sessionKey);
-	if (!existing || existing.length === 0) return;
-	const next = existing.filter((entry) => entry.controllerKey !== controllerKey);
-	if (next.length > 0) taskWidgetRelayNoticesBySession.set(sessionKey, next);
-	else taskWidgetRelayNoticesBySession.delete(sessionKey);
-}
-
-function clearTaskWidgetRelayNotices(
-	ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } },
-): void {
-	const sessionKey = getTaskWidgetRelaySessionKey(ctx);
-	if (!sessionKey) return;
-	taskWidgetRelayNoticesBySession.delete(sessionKey);
-}
-
 function buildTaskWidgetSummary(runs: TaskRunView[]): TaskWidgetSummary {
 	const runningRuns = runs.filter((run) => run.status === "running").length;
 	return {
@@ -2890,35 +2832,17 @@ function buildTaskWidgetSummary(runs: TaskRunView[]): TaskWidgetSummary {
 	};
 }
 
-function buildTaskWidgetNoticeLines(notices: TaskWidgetRelayNotice[]): string[] {
-	const lines: string[] = [];
-	for (const notice of notices.slice(0, 2)) {
-		const icon = notice.level === "error" ? "✗" : notice.level === "warning" ? "!" : "✓";
-		const [firstLine, ...restLines] = notice.lines;
-		if (!firstLine) continue;
-		lines.push(`↳ ${notice.label} ${icon} ${createTaskPreview(firstLine, 100)}`);
-		for (const line of restLines.slice(0, 1)) {
-			lines.push(`  ${createTaskPreview(line, 100)}`);
-		}
-	}
-	return lines;
-}
-
-function buildTaskWidgetLines(summary: TaskWidgetSummary, notices: TaskWidgetRelayNotice[] = []): string[] {
+function buildTaskWidgetLines(summary: TaskWidgetSummary): string[] {
+	const lines = [themeIndependentTaskBrowserHeading(summary.totalRuns)];
 	if (summary.totalRuns === 0) {
-		const lines = ["Tasks widget active · no task runs · Ctrl+Shift+T browse · /tasks toggle hide"];
-		if (notices.length > 0) lines.push(...buildTaskWidgetNoticeLines(notices));
+		lines.push(TASKS_NO_CURRENT_RUNS_MESSAGE);
+		lines.push("Use /tasks or Ctrl+Shift+T to browse · /tasks toggle hide");
 		return lines;
 	}
-	const lines = [
-		`Tasks widget active · ${summary.runningRuns} running · ${summary.totalRuns} total · Ctrl+Shift+T browse · /tasks toggle hide`,
-	];
-	if (notices.length > 0) lines.push(...buildTaskWidgetNoticeLines(notices));
-	for (const run of summary.runs.slice(0, 3)) {
-		const originPreview = resolveTaskRunOriginSnapshot(run)?.originPreview;
-		const preview = originPreview ?? run.steps.find((step) => step.snapshot.taskPreview)?.snapshot.taskPreview ?? "task";
-		lines.push(`• ${run.status} ${run.runId} · ${createTaskPreview(preview, 100)}`);
+	for (const [index, run] of summary.runs.entries()) {
+		lines.push(formatTaskRunSummary(run, index + 1, false));
 	}
+	lines.push("Use /tasks or Ctrl+Shift+T to interact · /tasks toggle hide");
 	return lines;
 }
 
@@ -2946,8 +2870,8 @@ function syncTaskUiChrome(ctx: TaskUiChromeContext): void {
 		extraLiveStepKeys: collectLiveTaskControllerStepKeys(ctx.sessionManager.getSessionFile?.()),
 	});
 	if (typeof ctx.ui.setWidget === "function") {
-		ctx.ui.setWidget("tasks.runs", buildTaskWidgetLines(buildTaskWidgetSummary(runs), getTaskWidgetRelayNotices(ctx)), {
-			placement: "belowEditor",
+		ctx.ui.setWidget("tasks.runs", buildTaskWidgetLines(buildTaskWidgetSummary(runs)), {
+			placement: "aboveEditor",
 		});
 	}
 	if (typeof ctx.ui.setStatus === "function") {
@@ -3702,7 +3626,6 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		ensureMainSessionBaseline(ctx, pi);
-		clearTaskWidgetRelayNotices(ctx);
 		syncTaskUiChrome(ctx);
 		startupCompositionError = undefined;
 		const rawCliAgent = pi.getFlag("agent");
@@ -3755,7 +3678,6 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		setTaskWidgetEnabled(ctx, false);
-		clearTaskWidgetRelayNotices(ctx);
 		clearTaskUiChrome(ctx);
 		for (const controller of listLiveTaskControllers()) {
 			try {
@@ -4229,7 +4151,6 @@ export default function (pi: ExtensionAPI) {
 							ui: ctx.ui,
 							sessionManager: ctx.sessionManager,
 							refreshTaskUiChrome: () => syncTaskUiChrome(ctx),
-							taskWidgetEnabled: isTaskWidgetEnabled(ctx),
 						},
 					});
 					results.push(result);
@@ -4322,7 +4243,6 @@ export default function (pi: ExtensionAPI) {
 								ui: ctx.ui,
 								sessionManager: ctx.sessionManager,
 								refreshTaskUiChrome: () => syncTaskUiChrome(ctx),
-								taskWidgetEnabled: isTaskWidgetEnabled(ctx),
 							},
 						});
 						allResults[index] = result;
@@ -4369,7 +4289,6 @@ export default function (pi: ExtensionAPI) {
 						ui: ctx.ui,
 						sessionManager: ctx.sessionManager,
 						refreshTaskUiChrome: () => syncTaskUiChrome(ctx),
-						taskWidgetEnabled: isTaskWidgetEnabled(ctx),
 					},
 				});
 				const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
@@ -4685,7 +4604,6 @@ export const __test__ = {
 	buildTaskInlineNoticeLines,
 	hasRuntimePersistOverride,
 	formatTaskRunList,
-	getTaskWidgetRelayNotices,
 	buildTaskWidgetLines,
 	normalizeChildSessionSnapshot: (data: unknown) => normalizeChildSessionSnapshot(data, TASK_CHILD_SESSION_METADATA_VERSION),
 	parseTaskTerminalBackendPreference,
