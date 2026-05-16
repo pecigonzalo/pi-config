@@ -2588,19 +2588,52 @@ function describeTaskRunAccess(run: TaskRunView, selectedStep?: TaskRunStepView)
 	return labels;
 }
 
-function formatTaskRunSummary(run: TaskRunView, index: number, includeSource: boolean): string {
+interface TaskRunSummaryData {
+	index: number;
+	status: string;
+	hasLiveController: boolean;
+	runId: string;
+	mode: TaskExecutionMode;
+	stepCount: number;
+	stepLabel: string;
+	updatedAt: string;
+	access: string[];
+	attachHint?: string;
+	sourceFileName?: string;
+	originPreview?: string;
+	warningCount: number;
+}
+
+function getTaskRunSummaryData(run: TaskRunView, index: number, includeSource: boolean): TaskRunSummaryData {
 	const stepLabel = run.stepCount === 1 ? "step" : "steps";
 	const hasLiveController = run.steps.some((step) => Boolean(getLiveTaskController(makeTaskRunStepKey(run.runId, step.step))));
 	const access = describeTaskRunAccess(run);
-	const originPreview = resolveTaskRunOriginSnapshot(run)?.originPreview;
-	let text = `${index}. ${run.status}${hasLiveController ? "/live" : ""} ${run.runId} · ${run.mode} · ${run.stepCount} ${stepLabel} · ${formatTimestampCompact(run.updatedAt)}`;
-	if (access.length > 0) text += ` · ${access.join(",")}`;
-	if (access.includes("attach")) text += ` · /tasks attach ${index}`;
-	if (includeSource && run.sourceSessionFile) {
-		text += ` · ${path.basename(run.sourceSessionFile)}`;
-	}
-	if (originPreview) text += ` · ${originPreview}`;
-	if (run.warnings.length > 0) text += ` · warnings:${run.warnings.length}`;
+	const attachHint = access.includes("attach") ? `/tasks attach ${index}` : undefined;
+	return {
+		index,
+		status: run.status,
+		hasLiveController,
+		runId: run.runId,
+		mode: run.mode,
+		stepCount: run.stepCount,
+		stepLabel,
+		updatedAt: formatTimestampCompact(run.updatedAt),
+		access,
+		attachHint,
+		sourceFileName: includeSource && run.sourceSessionFile ? path.basename(run.sourceSessionFile) : undefined,
+		originPreview: resolveTaskRunOriginSnapshot(run)?.originPreview,
+		warningCount: run.warnings.length,
+	};
+}
+
+function formatTaskRunSummary(run: TaskRunView, index: number, includeSource: boolean): string {
+	const data = getTaskRunSummaryData(run, index, includeSource);
+	let text = `${data.index}. ${data.status}${data.hasLiveController ? "/live" : ""} ${data.runId} · ${data.mode} · ${data.stepCount} ${data.stepLabel} · ${data.updatedAt}`;
+	if (data.access.length > 0) text += ` · ${data.access.join(",")}`;
+	if (data.attachHint) text += ` · ${data.attachHint}`;
+	if (data.sourceFileName) text += ` · ${data.sourceFileName}`;
+	if (data.originPreview) text += ` · ${data.originPreview}`;
+	if (data.warningCount > 0) text += ` · warnings:${data.warningCount}`;
 	return text;
 }
 
@@ -2777,7 +2810,11 @@ async function readTaskTranscriptPreview(run: TaskRunView, selectedStep?: TaskRu
 
 interface TaskUiChromeSink {
 	hasUI?: boolean;
-	ui?: { setWidget?: (...args: unknown[]) => void; setStatus?: (...args: unknown[]) => void };
+	ui?: {
+		setWidget?: (...args: unknown[]) => void;
+		setStatus?: (...args: unknown[]) => void;
+		theme?: { fg?: (color: any, text: string) => string; bold?: (text: string) => string };
+	};
 }
 
 interface TaskUiChromeContext extends TaskUiChromeSink {
@@ -2832,17 +2869,39 @@ function buildTaskWidgetSummary(runs: TaskRunView[]): TaskWidgetSummary {
 	};
 }
 
-function buildTaskWidgetLines(summary: TaskWidgetSummary): string[] {
-	const lines = [themeIndependentTaskBrowserHeading(summary.totalRuns)];
+function buildTaskWidgetLines(
+	summary: TaskWidgetSummary,
+	style?: { fg?: (color: any, text: string) => string; bold?: (text: string) => string },
+): string[] {
+	const fg = style?.fg ?? ((_color: any, text: string) => text);
+	const bold = style?.bold ?? ((text: string) => text);
+	const lines = [fg("toolTitle", bold(themeIndependentTaskBrowserHeading(summary.totalRuns)))];
 	if (summary.totalRuns === 0) {
-		lines.push(TASKS_NO_CURRENT_RUNS_MESSAGE);
-		lines.push("Use /tasks or Ctrl+Shift+T to browse · /tasks toggle hide");
+		lines.push(fg("muted", TASKS_NO_CURRENT_RUNS_MESSAGE));
+		lines.push(fg("dim", "Use /tasks or Ctrl+Shift+T to browse · /tasks toggle hide"));
 		return lines;
 	}
 	for (const [index, run] of summary.runs.entries()) {
-		lines.push(formatTaskRunSummary(run, index + 1, false));
+		const data = getTaskRunSummaryData(run, index + 1, false);
+		const statusColor = data.status === "running" ? "warning" : data.status === "succeeded" ? "success" : "error";
+		const parts = [
+			fg("muted", `${data.index}.`),
+			fg(statusColor, `${data.status}${data.hasLiveController ? "/live" : ""}`),
+			fg("accent", data.runId),
+			fg("muted", "·"),
+			fg("dim", data.mode),
+			fg("muted", "·"),
+			fg("dim", `${data.stepCount} ${data.stepLabel}`),
+			fg("muted", "·"),
+			fg("dim", data.updatedAt),
+		];
+		if (data.access.length > 0) parts.push(fg("muted", `· ${data.access.join(",")}`));
+		if (data.attachHint) parts.push(fg("dim", `· ${data.attachHint}`));
+		if (data.originPreview) parts.push(fg("dim", `· ${createTaskPreview(data.originPreview, 80)}`));
+		if (data.warningCount > 0) parts.push(fg("warning", `· warnings:${data.warningCount}`));
+		lines.push(parts.join(" "));
 	}
-	lines.push("Use /tasks or Ctrl+Shift+T to interact · /tasks toggle hide");
+	lines.push(fg("dim", "Use /tasks or Ctrl+Shift+T to interact · /tasks toggle hide"));
 	return lines;
 }
 
@@ -2870,7 +2929,7 @@ function syncTaskUiChrome(ctx: TaskUiChromeContext): void {
 		extraLiveStepKeys: collectLiveTaskControllerStepKeys(ctx.sessionManager.getSessionFile?.()),
 	});
 	if (typeof ctx.ui.setWidget === "function") {
-		ctx.ui.setWidget("tasks.runs", buildTaskWidgetLines(buildTaskWidgetSummary(runs)), {
+		ctx.ui.setWidget("tasks.runs", buildTaskWidgetLines(buildTaskWidgetSummary(runs), ctx.ui.theme), {
 			placement: "aboveEditor",
 		});
 	}
