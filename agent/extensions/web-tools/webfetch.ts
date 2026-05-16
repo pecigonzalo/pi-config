@@ -268,11 +268,11 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 		label: "Web Fetch",
 		description:
 			"Fetch and normalize a single HTTP(S) URL in read-only mode. Supports markdown/text/html output with timeout and size limits.",
-		promptSnippet: "Fetch one URL with webfetch and return model-friendly markdown/text/html output.",
+		promptSnippet: "Fetch and normalize a specific URL into readable markdown, text, or html.",
 		promptGuidelines: [
-			"Use webfetch when you need to read a specific URL instead of composing ad hoc bash + curl pipelines.",
+			"Use webfetch when you already have a specific URL and need to inspect its contents.",
 			'Use webfetch with format="markdown" or format="text" for readable extraction, and use format="html" only when raw markup is required.',
-			"Use webfetch for one URL at a time; webfetch is read-only and does not perform recursive browsing.",
+			"Use webfetch for one URL at a time; webfetch is read-only and does not perform search or recursive browsing.",
 		],
 		parameters: WebfetchParams,
 		async execute(_toolCallId, params, signal) {

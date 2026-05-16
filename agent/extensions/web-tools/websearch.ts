@@ -337,12 +337,12 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 		label: "Web Search",
 		description:
 			"Search the public web for relevant pages and return normalized result summaries. Best for discovering candidate URLs before using webfetch.",
-		promptSnippet: "Search the public web for candidate pages; returns titles, URLs, snippets, and compact metadata.",
+		promptSnippet: "Search the public web for relevant pages and return candidate URLs with snippets.",
 		promptGuidelines: [
-			"Use websearch when you need to discover relevant URLs across the public web rather than read a specific known page.",
-			"Use websearch before webfetch when you need candidate URLs first, then use webfetch to inspect the most relevant result pages.",
+			"Use websearch when you need to discover relevant URLs rather than read a known page.",
+			"Use websearch before webfetch when you need candidate pages first, then use webfetch to inspect the most relevant result.",
 			"Use websearch with domains when the user wants results constrained to specific documentation or company sites.",
-			'Use websearch with mode="exact" for exact identifiers, package names, quoted text, or error messages; use websearch with mode="semantic" for topic or concept discovery.',
+			'Use websearch with mode="exact" for exact identifiers, package names, quoted text, or error messages; use websearch with mode="semantic" for broader topic discovery.',
 		],
 		parameters: WebsearchParams,
 		async execute(_toolCallId, params, signal) {
