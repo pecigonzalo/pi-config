@@ -2873,8 +2873,8 @@ function buildTaskWidgetLines(
 	summary: TaskWidgetSummary,
 	style?: { fg?: (color: any, text: string) => string; bold?: (text: string) => string },
 ): string[] {
-	const fg = style?.fg ?? ((_color: any, text: string) => text);
-	const bold = style?.bold ?? ((text: string) => text);
+	const fg = typeof style?.fg === "function" ? style.fg.bind(style) : ((_color: any, text: string) => text);
+	const bold = typeof style?.bold === "function" ? style.bold.bind(style) : ((text: string) => text);
 	const lines = [fg("toolTitle", bold(themeIndependentTaskBrowserHeading(summary.totalRuns)))];
 	if (summary.totalRuns === 0) {
 		lines.push(fg("muted", TASKS_NO_CURRENT_RUNS_MESSAGE));
