@@ -541,6 +541,183 @@ describe("main-session effort command", () => {
 	});
 });
 
+describe("tasks extension RPC UI relay", () => {
+	it("relays dialog requests to the parent UI and returns the selected value", async () => {
+		const selectCalls: Array<{ title: string; options: string[]; dialogOptions?: { timeout?: number; signal?: AbortSignal } }> = [];
+		const responses: Record<string, unknown>[] = [];
+
+		await __test__.relayTaskExtensionUiRequest({
+			request: {
+				type: "extension_ui_request",
+				id: "req-select",
+				method: "select",
+				title: "Permission required",
+				options: ["Allow once", "Block"],
+				timeout: 5000,
+			},
+			controller: { agent: "thinker", step: 1, key: "run-1:1" },
+			parentUi: {
+				hasUI: true,
+				ui: {
+					select: async (title: string, options: string[], dialogOptions?: { timeout?: number; signal?: AbortSignal }) => {
+						selectCalls.push({ title, options, dialogOptions });
+						return "Allow once";
+					},
+				},
+			},
+			sendResponse: async (payload: Record<string, unknown>) => {
+				responses.push(payload);
+			},
+		});
+
+		expect(selectCalls).toHaveLength(1);
+		expect(selectCalls[0]?.title).toBe("Task thinker step 1 · Permission required");
+		expect(selectCalls[0]?.options).toEqual(["Allow once", "Block"]);
+		expect(selectCalls[0]?.dialogOptions?.timeout).toBe(5000);
+		expect(responses).toEqual([{ type: "extension_ui_response", id: "req-select", value: "Allow once" }]);
+	});
+
+	it("cancels dialog requests when no parent UI is available", async () => {
+		const responses: Record<string, unknown>[] = [];
+
+		await __test__.relayTaskExtensionUiRequest({
+			request: {
+				type: "extension_ui_request",
+				id: "req-missing-ui",
+				method: "select",
+				title: "Permission required",
+				options: ["Allow once", "Block"],
+			},
+			controller: { agent: "thinker", step: 1, key: "run-2:1" },
+			sendResponse: async (payload: Record<string, unknown>) => {
+				responses.push(payload);
+			},
+		});
+
+		expect(responses).toEqual([{ type: "extension_ui_response", id: "req-missing-ui", cancelled: true }]);
+	});
+
+	it("namespaces status and widget updates from child tasks", async () => {
+		const statusCalls: any[][] = [];
+		const widgetCalls: any[][] = [];
+		const trackedStatusKeys = new Set<string>();
+		const trackedWidgetKeys = new Set<string>();
+
+		await __test__.relayTaskExtensionUiRequest({
+			request: {
+				type: "extension_ui_request",
+				id: "req-status",
+				method: "setStatus",
+				statusKey: "permissions",
+				statusText: "Waiting for approval",
+			},
+			controller: { agent: "thinker", step: 2, key: "run-3:2" },
+			parentUi: {
+				hasUI: true,
+				ui: {
+					setStatus: (...args: any[]) => {
+						statusCalls.push(args);
+					},
+					setWidget: (...args: any[]) => {
+						widgetCalls.push(args);
+					},
+				},
+			},
+			sendResponse: async () => {},
+			trackedStatusKeys,
+			trackedWidgetKeys,
+		});
+
+		await __test__.relayTaskExtensionUiRequest({
+			request: {
+				type: "extension_ui_request",
+				id: "req-widget",
+				method: "setWidget",
+				widgetKey: "approval",
+				widgetLines: ["Choose an option", "Allow once", "Block"],
+				widgetPlacement: "belowEditor",
+			},
+			controller: { agent: "thinker", step: 2, key: "run-3:2" },
+			parentUi: {
+				hasUI: true,
+				ui: {
+					setStatus: (...args: any[]) => {
+						statusCalls.push(args);
+					},
+					setWidget: (...args: any[]) => {
+						widgetCalls.push(args);
+					},
+				},
+			},
+			sendResponse: async () => {},
+			trackedStatusKeys,
+			trackedWidgetKeys,
+		});
+
+		expect(statusCalls).toHaveLength(1);
+		expect(statusCalls[0]?.[0]).toContain("tasks.rpc.run-3-2.status.permissions");
+		expect(statusCalls[0]?.[1]).toBe("[Task thinker step 2] Waiting for approval");
+		expect([...trackedStatusKeys]).toEqual([statusCalls[0]?.[0]]);
+
+		expect(widgetCalls).toHaveLength(1);
+		expect(widgetCalls[0]?.[0]).toContain("tasks.rpc.run-3-2.widget.approval");
+		expect(widgetCalls[0]?.[1]).toEqual([
+			"[Task thinker step 2] Choose an option",
+			"Allow once",
+			"Block",
+		]);
+		expect(widgetCalls[0]?.[2]).toEqual({ placement: "belowEditor" });
+		expect([...trackedWidgetKeys]).toEqual([widgetCalls[0]?.[0]]);
+	});
+
+	it("does not emit out-of-band notifications for child notify requests", async () => {
+		const notifyCalls: Array<{ message: string; level?: string }> = [];
+
+		await __test__.relayTaskExtensionUiRequest({
+			request: {
+				type: "extension_ui_request",
+				id: "req-notify",
+				method: "notify",
+				message: "Bash sandbox active (mode=workspace-write)",
+				notifyType: "info",
+			},
+			controller: { agent: "implementer", step: 1, key: "run-notify:1" },
+			parentUi: {
+				hasUI: true,
+				ui: {
+					notify: (message: string, level?: string) => {
+						notifyCalls.push({ message, level });
+					},
+				},
+			},
+			sendResponse: async () => {},
+		});
+
+		expect(notifyCalls).toEqual([]);
+	});
+
+	it("formats inline task notices for session-history rendering", () => {
+		const result = {
+			agent: "implementer",
+			agentSource: "user",
+			task: "test",
+			exitCode: 0,
+			messages: [],
+			stderr: "",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		} as any;
+
+		__test__.addTaskInlineNotice(result, "Bash sandbox active (mode=workspace-write)", "info");
+		__test__.addTaskInlineNotice(result, "Parent folder approved for this session:\n/private/tmp/pi-docs", "info");
+
+		expect(__test__.buildTaskInlineNoticeLines(result.uiNotices ?? [])).toEqual([
+			"ℹ Bash sandbox active (mode=workspace-write)",
+			"ℹ Parent folder approved for this session:",
+			"  /private/tmp/pi-docs",
+		]);
+	});
+});
+
 describe("/tasks command parsing", () => {
 	it("parses steer commands with selector and message", () => {
 		const parsed = __test__.parseTasksCommand("steer task-1 focus only on auth");

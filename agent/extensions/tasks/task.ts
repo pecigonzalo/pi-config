@@ -116,6 +116,8 @@ const TASKS_COMMAND_USAGE = [
 ].join(" | ");
 
 const taskWidgetEnabledSessions = new Set<string>();
+const taskWidgetRelayNoticesBySession = new Map<string, TaskWidgetRelayNotice[]>();
+const TASK_WIDGET_RELAY_NOTICE_TTL_MS = 30_000;
 
 // Recursion depth guard
 const DEFAULT_MAX_SUBAGENT_DEPTH = 2;
@@ -388,6 +390,12 @@ interface TaskStepConfig {
 	context?: ContextMode;
 }
 
+interface TaskInlineNotice {
+	level: TaskExtensionUiNotifyType;
+	lines: string[];
+	updatedAt: number;
+}
+
 interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
@@ -406,6 +414,7 @@ interface SingleResult {
 	sessionPersist?: boolean;
 	sessionFile?: string;
 	childSession?: ChildSessionSnapshot;
+	uiNotices?: TaskInlineNotice[];
 }
 
 interface TaskDetails {
@@ -417,6 +426,48 @@ interface TaskDetails {
 	sessionRunRoot?: string;
 	toolCallId?: string;
 	childSessions?: ChildSessionSnapshot[];
+}
+
+type TaskExtensionUiNotifyType = "info" | "warning" | "error";
+type TaskExtensionUiWidgetPlacement = "aboveEditor" | "belowEditor";
+
+interface TaskExtensionUiRequest {
+	type: "extension_ui_request";
+	id: string;
+	method: string;
+	title?: string;
+	message?: string;
+	options?: string[];
+	placeholder?: string;
+	prefill?: string;
+	timeout?: number;
+	notifyType?: TaskExtensionUiNotifyType;
+	statusKey?: string;
+	statusText?: string;
+	widgetKey?: string;
+	widgetLines?: string[];
+	widgetPlacement?: TaskExtensionUiWidgetPlacement;
+	text?: string;
+}
+
+interface TaskRpcUiMethods {
+	select?: (title: string, options: string[], dialogOptions?: { timeout?: number; signal?: AbortSignal }) => Promise<string | undefined>;
+	confirm?: (title: string, message: string, dialogOptions?: { timeout?: number; signal?: AbortSignal }) => Promise<boolean>;
+	input?: (title: string, placeholder?: string, dialogOptions?: { timeout?: number; signal?: AbortSignal }) => Promise<string | undefined>;
+	editor?: (title: string, prefill?: string, dialogOptions?: { timeout?: number; signal?: AbortSignal }) => Promise<string | undefined>;
+	notify?: (message: string, level?: TaskExtensionUiNotifyType) => void;
+	setStatus?: (key: string, text?: string) => void;
+	setWidget?: (key: string, lines?: string[], options?: { placement?: TaskExtensionUiWidgetPlacement }) => void;
+	setTitle?: (title: string) => void;
+	setEditorText?: (text: string) => void;
+}
+
+interface TaskRpcUiContext {
+	hasUI?: boolean;
+	ui?: TaskRpcUiMethods;
+	sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined };
+	refreshTaskUiChrome?: () => void;
+	taskWidgetEnabled?: boolean;
 }
 
 function getFinalOutput(messages: Message[]): string {
@@ -450,6 +501,187 @@ function createTaskPreview(task: string, maxLength = 120): string {
 	const compact = task.replace(/\s+/g, " ").trim();
 	if (!compact) return "(empty task)";
 	return compact.length > maxLength ? `${compact.slice(0, maxLength - 3)}...` : compact;
+}
+
+function addTaskInlineNotice(result: SingleResult, message: string, level: TaskExtensionUiNotifyType): void {
+	const lines = message
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+	if (lines.length === 0) return;
+	const nextNotice: TaskInlineNotice = { level, lines, updatedAt: Date.now() };
+	const existing = result.uiNotices ?? [];
+	const deduped = existing.filter((notice) => notice.lines.join("\n") !== nextNotice.lines.join("\n") || notice.level !== nextNotice.level);
+	result.uiNotices = [...deduped, nextNotice].slice(-5);
+}
+
+function buildTaskInlineNoticeLines(notices: TaskInlineNotice[]): string[] {
+	const lines: string[] = [];
+	for (const notice of notices) {
+		const icon = notice.level === "error" ? "✗" : notice.level === "warning" ? "!" : "ℹ";
+		const [firstLine, ...rest] = notice.lines;
+		if (!firstLine) continue;
+		lines.push(`${icon} ${firstLine}`);
+		for (const line of rest) lines.push(`  ${line}`);
+	}
+	return lines;
+}
+
+function formatTaskInlineNoticeLines(notices: TaskInlineNotice[], themeFg: (color: any, text: string) => string): string {
+	return buildTaskInlineNoticeLines(notices)
+		.map((line) => themeFg("muted", line))
+		.join("\n");
+}
+
+function sanitizeTaskUiKeySegment(value: string | undefined, fallback: string): string {
+	const trimmed = (value ?? "").trim();
+	if (!trimmed) return fallback;
+	const sanitized = trimmed.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+	return sanitized || fallback;
+}
+
+function getTaskUiLabel(controller: Pick<LiveTaskController, "agent" | "step">): string {
+	return `Task ${controller.agent}${controller.step > 0 ? ` step ${controller.step}` : ""}`;
+}
+
+function getTaskUiPrefix(controller: Pick<LiveTaskController, "agent" | "step">): string {
+	return `[${getTaskUiLabel(controller)}]`;
+}
+
+function formatTaskExtensionUiTitle(
+	controller: Pick<LiveTaskController, "agent" | "step">,
+	title: string | undefined,
+): string {
+	const label = getTaskUiLabel(controller);
+	const trimmedTitle = title?.trim();
+	return trimmedTitle ? `${label} · ${trimmedTitle}` : label;
+}
+
+function getTaskExtensionUiDialogOptions(timeout: unknown, signal: AbortSignal | undefined): { timeout?: number; signal?: AbortSignal } | undefined {
+	const timeoutMs = typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0 ? timeout : undefined;
+	if (timeoutMs === undefined && !signal) return undefined;
+	return {
+		...(timeoutMs !== undefined ? { timeout: timeoutMs } : {}),
+		...(signal ? { signal } : {}),
+	};
+}
+
+function isTaskExtensionUiNotifyType(value: unknown): value is TaskExtensionUiNotifyType {
+	return value === "info" || value === "warning" || value === "error";
+}
+
+function getTaskStatusRelayKey(controller: Pick<LiveTaskController, "key">, statusKey: string | undefined): string {
+	return `tasks.rpc.${sanitizeTaskUiKeySegment(controller.key, "task")}.status.${sanitizeTaskUiKeySegment(statusKey, "status")}`;
+}
+
+function getTaskWidgetRelayKey(controller: Pick<LiveTaskController, "key">, widgetKey: string | undefined): string {
+	return `tasks.rpc.${sanitizeTaskUiKeySegment(controller.key, "task")}.widget.${sanitizeTaskUiKeySegment(widgetKey, "widget")}`;
+}
+
+async function relayTaskExtensionUiRequest(options: {
+	request: TaskExtensionUiRequest;
+	controller: Pick<LiveTaskController, "agent" | "step" | "key">;
+	parentUi?: TaskRpcUiContext;
+	dialogSignal?: AbortSignal;
+	sendResponse: (payload: Record<string, unknown>) => Promise<void>;
+	trackedStatusKeys?: Set<string>;
+	trackedWidgetKeys?: Set<string>;
+}): Promise<void> {
+	const { request, controller, parentUi, dialogSignal, sendResponse, trackedStatusKeys, trackedWidgetKeys } = options;
+	const hasParentUi = parentUi?.hasUI === true && parentUi.ui;
+	const ui = parentUi?.ui;
+	const title = formatTaskExtensionUiTitle(controller, request.title);
+	const prefix = getTaskUiPrefix(controller);
+	const dialogOptions = getTaskExtensionUiDialogOptions(request.timeout, dialogSignal);
+
+	switch (request.method) {
+		case "select": {
+			if (!hasParentUi || typeof ui?.select !== "function") {
+				await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+				return;
+			}
+			const relayOptions = Array.isArray(request.options) ? request.options.filter((value): value is string => typeof value === "string") : [];
+			const value = await ui.select(title, relayOptions, dialogOptions);
+			await sendResponse(
+				value !== undefined
+					? { type: "extension_ui_response", id: request.id, value }
+					: { type: "extension_ui_response", id: request.id, cancelled: true },
+			);
+			return;
+		}
+		case "confirm": {
+			if (!hasParentUi || typeof ui?.confirm !== "function") {
+				await sendResponse({ type: "extension_ui_response", id: request.id, confirmed: false });
+				return;
+			}
+			const confirmed = await ui.confirm(title, typeof request.message === "string" ? request.message : "", dialogOptions);
+			await sendResponse({ type: "extension_ui_response", id: request.id, confirmed });
+			return;
+		}
+		case "input": {
+			if (!hasParentUi || typeof ui?.input !== "function") {
+				await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+				return;
+			}
+			const value = await ui.input(title, request.placeholder, dialogOptions);
+			await sendResponse(
+				value !== undefined
+					? { type: "extension_ui_response", id: request.id, value }
+					: { type: "extension_ui_response", id: request.id, cancelled: true },
+			);
+			return;
+		}
+		case "editor": {
+			if (!hasParentUi || typeof ui?.editor !== "function") {
+				await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+				return;
+			}
+			const value = await ui.editor(title, request.prefill, dialogOptions);
+			await sendResponse(
+				value !== undefined
+					? { type: "extension_ui_response", id: request.id, value }
+					: { type: "extension_ui_response", id: request.id, cancelled: true },
+			);
+			return;
+		}
+		case "notify": {
+			return;
+		}
+		case "setStatus": {
+			if (hasParentUi && typeof ui?.setStatus === "function") {
+				const relayKey = getTaskStatusRelayKey(controller, request.statusKey);
+				trackedStatusKeys?.add(relayKey);
+				const statusText = typeof request.statusText === "string" && request.statusText.trim().length > 0
+					? `${prefix} ${request.statusText}`
+					: undefined;
+				ui.setStatus(relayKey, statusText);
+			}
+			return;
+		}
+		case "setWidget": {
+			if (hasParentUi && typeof ui?.setWidget === "function") {
+				const relayKey = getTaskWidgetRelayKey(controller, request.widgetKey);
+				trackedWidgetKeys?.add(relayKey);
+				const widgetLines = Array.isArray(request.widgetLines)
+					? request.widgetLines.filter((value): value is string => typeof value === "string")
+					: undefined;
+				const placement = request.widgetPlacement === "belowEditor" ? { placement: "belowEditor" as const } : undefined;
+				ui.setWidget(
+					relayKey,
+					widgetLines && widgetLines.length > 0 ? widgetLines.map((line, index) => (index === 0 ? `${prefix} ${line}` : line)) : undefined,
+					placement,
+				);
+			}
+			return;
+		}
+		case "setTitle":
+		case "set_editor_text": {
+			return;
+		}
+		default: {
+			await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+		}
+	}
 }
 
 function resolveChildSessionTerminalStatus(result: SingleResult): Exclude<ChildSessionStatus, "created"> {
@@ -1612,6 +1844,7 @@ async function runSingleAgentViaJson(
 		sessionPersist: preparedStep.session.persist,
 		sessionFile: preparedStep.session.sessionFile,
 		childSession: initialChildSession ? { ...initialChildSession } : undefined,
+		uiNotices: [],
 	};
 
 	const emitUpdate = () => {
@@ -1753,6 +1986,7 @@ async function runSingleAgentViaRpc(
 	makeDetails: (results: SingleResult[]) => TaskDetails,
 	initialChildSession: ChildSessionSnapshot,
 	toolCallId: string,
+	parentUiContext?: TaskRpcUiContext,
 ): Promise<SingleResult> {
 	const worker = preparedStep.worker;
 	const agent = worker.agent;
@@ -1831,6 +2065,7 @@ async function runSingleAgentViaRpc(
 		sessionPersist: preparedStep.session.persist,
 		sessionFile: preparedStep.session.sessionFile,
 		childSession: { ...initialChildSession },
+		uiNotices: [],
 	};
 	const emitUpdate = () => {
 		if (!onUpdate) return;
@@ -1863,6 +2098,9 @@ async function runSingleAgentViaRpc(
 			},
 		});
 		const controllerKey = makeTaskRunStepKey(initialChildSession.runId, step ?? initialChildSession.step);
+		const relayedStatusKeys = new Set<string>();
+		const relayedWidgetKeys = new Set<string>();
+		const uiRelayAbortController = new AbortController();
 		const controller: LiveTaskController = {
 			key: controllerKey,
 			toolCallId,
@@ -1894,10 +2132,32 @@ async function runSingleAgentViaRpc(
 		let sawAgentEnd = false;
 		let rpcAborted = false;
 		let closed = false;
+		let uiRelayQueue: Promise<void> = Promise.resolve();
+
+		const clearRelayedUi = () => {
+			if (!(parentUiContext?.hasUI === true && parentUiContext.ui)) return;
+			for (const statusKey of relayedStatusKeys) {
+				try {
+					parentUiContext.ui.setStatus?.(statusKey, undefined);
+				} catch {
+					// Ignore UI cleanup failures.
+				}
+			}
+			for (const widgetKey of relayedWidgetKeys) {
+				try {
+					parentUiContext.ui.setWidget?.(widgetKey, undefined);
+				} catch {
+					// Ignore UI cleanup failures.
+				}
+			}
+			parentUiContext.refreshTaskUiChrome?.();
+		};
 
 		const finishController = (exitCode: number) => {
 			if (closed) return;
 			closed = true;
+			uiRelayAbortController.abort();
+			clearRelayedUi();
 			controller.finishedAt = new Date().toISOString();
 			deleteLiveTaskController(controller.key);
 			rejectPendingRpcResponses(controller, new Error("Task controller closed"));
@@ -1978,6 +2238,46 @@ async function runSingleAgentViaRpc(
 				controller.lastActivity = "queue_update";
 				controller.pendingSteeringCount = Array.isArray(event.steering) ? event.steering.length : controller.pendingSteeringCount;
 				controller.pendingFollowUpCount = Array.isArray(event.followUp) ? event.followUp.length : controller.pendingFollowUpCount;
+				return;
+			}
+			if (event.type === "extension_ui_request" && typeof event.id === "string" && typeof event.method === "string") {
+				controller.lastActivity = `ui:${event.method}`;
+				const request = event as TaskExtensionUiRequest;
+				if (request.method === "notify" && typeof request.message === "string" && request.message.trim()) {
+					addTaskInlineNotice(
+						currentResult,
+						request.message,
+						isTaskExtensionUiNotifyType(request.notifyType) ? request.notifyType : "info",
+					);
+					emitUpdate();
+				}
+				const sendExtensionUiResponse = async (payload: Record<string, unknown>) => {
+					await new Promise<void>((resolve, reject) => {
+						proc.stdin.write(`${JSON.stringify(payload)}\n`, (error) => {
+							if (error) reject(error);
+							else resolve();
+						});
+					});
+				};
+				uiRelayQueue = uiRelayQueue
+					.then(async () => {
+						await relayTaskExtensionUiRequest({
+							request,
+							controller,
+							parentUi: parentUiContext,
+							dialogSignal: uiRelayAbortController.signal,
+							sendResponse: sendExtensionUiResponse,
+							trackedStatusKeys: relayedStatusKeys,
+							trackedWidgetKeys: relayedWidgetKeys,
+						});
+					})
+					.catch((error) => {
+						const message = error instanceof Error ? error.message : String(error);
+						currentResult.errorMessage = currentResult.errorMessage ?? `Failed to relay task UI request: ${message}`;
+						currentResult.stderr += currentResult.stderr ? `\n${message}` : message;
+						controller.status = rpcAborted ? "aborted" : "failed";
+						proc.kill("SIGTERM");
+					});
 			}
 		};
 
@@ -2061,9 +2361,20 @@ async function runSingleAgent(
 	initialChildSession?: ChildSessionSnapshot,
 	enableRpcControl = false,
 	toolCallId?: string,
+	parentUiContext?: TaskRpcUiContext,
 ): Promise<SingleResult> {
 	if (enableRpcControl && initialChildSession && preparedStep.session.persist && preparedStep.session.sessionFile && toolCallId) {
-		return runSingleAgentViaRpc(preparedStep, task, step, signal, onUpdate, makeDetails, initialChildSession, toolCallId);
+		return runSingleAgentViaRpc(
+			preparedStep,
+			task,
+			step,
+			signal,
+			onUpdate,
+			makeDetails,
+			initialChildSession,
+			toolCallId,
+			parentUiContext,
+		);
 	}
 	return runSingleAgentViaJson(preparedStep, task, step, signal, onUpdate, makeDetails, initialChildSession);
 }
@@ -2094,8 +2405,9 @@ async function runTaskStepWithMetadata(options: {
 	origin?: TaskOriginSnapshot;
 	refreshUi?: () => Promise<void> | void;
 	enableRpcControl?: boolean;
+	parentUiContext?: TaskRpcUiContext;
 }): Promise<SingleResult> {
-	const { preparedStep, task, mode, step, toolCallId, runId, signal, onUpdate, makeDetails, sessionManager, origin, refreshUi, enableRpcControl } = options;
+	const { preparedStep, task, mode, step, toolCallId, runId, signal, onUpdate, makeDetails, sessionManager, origin, refreshUi, enableRpcControl, parentUiContext } = options;
 	const metadataRunId = runId ?? `${toolCallId}-run`;
 
 	let createdSnapshot: ChildSessionSnapshot | undefined;
@@ -2170,6 +2482,7 @@ async function runTaskStepWithMetadata(options: {
 			createdSnapshot,
 			enableRpcControl === true,
 			toolCallId,
+			parentUiContext,
 		);
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error);
@@ -2476,6 +2789,14 @@ interface TaskWidgetSummary {
 	runs: TaskRunView[];
 }
 
+interface TaskWidgetRelayNotice {
+	controllerKey: string;
+	label: string;
+	level: TaskExtensionUiNotifyType;
+	lines: string[];
+	updatedAt: number;
+}
+
 function getTaskWidgetSessionKey(ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } }): string | undefined {
 	const sessionFile = ctx.sessionManager?.getSessionFile?.();
 	if (typeof sessionFile === "string" && sessionFile.trim()) {
@@ -2504,6 +2825,57 @@ function setTaskWidgetEnabled(
 	return true;
 }
 
+function getTaskWidgetRelaySessionKey(ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } }): string | undefined {
+	return getTaskWidgetSessionKey(ctx);
+}
+
+function getTaskWidgetRelayNotices(ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } }): TaskWidgetRelayNotice[] {
+	const sessionKey = getTaskWidgetRelaySessionKey(ctx);
+	if (!sessionKey) return [];
+	const now = Date.now();
+	const active = (taskWidgetRelayNoticesBySession.get(sessionKey) ?? []).filter(
+		(entry) => now - entry.updatedAt <= TASK_WIDGET_RELAY_NOTICE_TTL_MS,
+	);
+	if (active.length > 0) taskWidgetRelayNoticesBySession.set(sessionKey, active);
+	else taskWidgetRelayNoticesBySession.delete(sessionKey);
+	return active;
+}
+
+function setTaskWidgetRelayNotice(
+	ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } },
+	notice: TaskWidgetRelayNotice,
+): void {
+	const sessionKey = getTaskWidgetRelaySessionKey(ctx);
+	if (!sessionKey) return;
+	const existing = taskWidgetRelayNoticesBySession.get(sessionKey) ?? [];
+	const next = [
+		notice,
+		...existing.filter((entry) => entry.controllerKey !== notice.controllerKey),
+	].sort((left, right) => right.updatedAt - left.updatedAt);
+	taskWidgetRelayNoticesBySession.set(sessionKey, next.slice(0, 5));
+}
+
+function clearTaskWidgetRelayNotice(
+	ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } },
+	controllerKey: string,
+): void {
+	const sessionKey = getTaskWidgetRelaySessionKey(ctx);
+	if (!sessionKey) return;
+	const existing = taskWidgetRelayNoticesBySession.get(sessionKey);
+	if (!existing || existing.length === 0) return;
+	const next = existing.filter((entry) => entry.controllerKey !== controllerKey);
+	if (next.length > 0) taskWidgetRelayNoticesBySession.set(sessionKey, next);
+	else taskWidgetRelayNoticesBySession.delete(sessionKey);
+}
+
+function clearTaskWidgetRelayNotices(
+	ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } },
+): void {
+	const sessionKey = getTaskWidgetRelaySessionKey(ctx);
+	if (!sessionKey) return;
+	taskWidgetRelayNoticesBySession.delete(sessionKey);
+}
+
 function buildTaskWidgetSummary(runs: TaskRunView[]): TaskWidgetSummary {
 	const runningRuns = runs.filter((run) => run.status === "running").length;
 	return {
@@ -2518,13 +2890,30 @@ function buildTaskWidgetSummary(runs: TaskRunView[]): TaskWidgetSummary {
 	};
 }
 
-function buildTaskWidgetLines(summary: TaskWidgetSummary): string[] {
+function buildTaskWidgetNoticeLines(notices: TaskWidgetRelayNotice[]): string[] {
+	const lines: string[] = [];
+	for (const notice of notices.slice(0, 2)) {
+		const icon = notice.level === "error" ? "✗" : notice.level === "warning" ? "!" : "✓";
+		const [firstLine, ...restLines] = notice.lines;
+		if (!firstLine) continue;
+		lines.push(`↳ ${notice.label} ${icon} ${createTaskPreview(firstLine, 100)}`);
+		for (const line of restLines.slice(0, 1)) {
+			lines.push(`  ${createTaskPreview(line, 100)}`);
+		}
+	}
+	return lines;
+}
+
+function buildTaskWidgetLines(summary: TaskWidgetSummary, notices: TaskWidgetRelayNotice[] = []): string[] {
 	if (summary.totalRuns === 0) {
-		return ["Tasks widget active · no task runs · Ctrl+Shift+T browse · /tasks toggle hide"];
+		const lines = ["Tasks widget active · no task runs · Ctrl+Shift+T browse · /tasks toggle hide"];
+		if (notices.length > 0) lines.push(...buildTaskWidgetNoticeLines(notices));
+		return lines;
 	}
 	const lines = [
 		`Tasks widget active · ${summary.runningRuns} running · ${summary.totalRuns} total · Ctrl+Shift+T browse · /tasks toggle hide`,
 	];
+	if (notices.length > 0) lines.push(...buildTaskWidgetNoticeLines(notices));
 	for (const run of summary.runs.slice(0, 3)) {
 		const originPreview = resolveTaskRunOriginSnapshot(run)?.originPreview;
 		const preview = originPreview ?? run.steps.find((step) => step.snapshot.taskPreview)?.snapshot.taskPreview ?? "task";
@@ -2557,7 +2946,9 @@ function syncTaskUiChrome(ctx: TaskUiChromeContext): void {
 		extraLiveStepKeys: collectLiveTaskControllerStepKeys(ctx.sessionManager.getSessionFile?.()),
 	});
 	if (typeof ctx.ui.setWidget === "function") {
-		ctx.ui.setWidget("tasks.runs", buildTaskWidgetLines(buildTaskWidgetSummary(runs)), { placement: "belowEditor" });
+		ctx.ui.setWidget("tasks.runs", buildTaskWidgetLines(buildTaskWidgetSummary(runs), getTaskWidgetRelayNotices(ctx)), {
+			placement: "belowEditor",
+		});
 	}
 	if (typeof ctx.ui.setStatus === "function") {
 		ctx.ui.setStatus("tasks.runs", undefined);
@@ -3311,6 +3702,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		ensureMainSessionBaseline(ctx, pi);
+		clearTaskWidgetRelayNotices(ctx);
 		syncTaskUiChrome(ctx);
 		startupCompositionError = undefined;
 		const rawCliAgent = pi.getFlag("agent");
@@ -3363,6 +3755,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		setTaskWidgetEnabled(ctx, false);
+		clearTaskWidgetRelayNotices(ctx);
 		clearTaskUiChrome(ctx);
 		for (const controller of listLiveTaskControllers()) {
 			try {
@@ -3831,6 +4224,13 @@ export default function (pi: ExtensionAPI) {
 						origin: taskOrigin,
 						refreshUi: () => syncTaskUiChrome(ctx),
 						enableRpcControl: ctx.hasUI === true,
+						parentUiContext: {
+							hasUI: ctx.hasUI,
+							ui: ctx.ui,
+							sessionManager: ctx.sessionManager,
+							refreshTaskUiChrome: () => syncTaskUiChrome(ctx),
+							taskWidgetEnabled: isTaskWidgetEnabled(ctx),
+						},
 					});
 					results.push(result);
 
@@ -3877,6 +4277,7 @@ export default function (pi: ExtensionAPI) {
 						sessionMode: preparedStep.session.mode,
 						sessionPersist: preparedStep.session.persist,
 						sessionFile: preparedStep.session.sessionFile,
+						uiNotices: [],
 					};
 				}
 
@@ -3916,6 +4317,13 @@ export default function (pi: ExtensionAPI) {
 							origin: taskOrigin,
 							refreshUi: () => syncTaskUiChrome(ctx),
 							enableRpcControl: ctx.hasUI === true,
+							parentUiContext: {
+								hasUI: ctx.hasUI,
+								ui: ctx.ui,
+								sessionManager: ctx.sessionManager,
+								refreshTaskUiChrome: () => syncTaskUiChrome(ctx),
+								taskWidgetEnabled: isTaskWidgetEnabled(ctx),
+							},
 						});
 						allResults[index] = result;
 						emitParallelUpdate();
@@ -3956,6 +4364,13 @@ export default function (pi: ExtensionAPI) {
 					origin: taskOrigin,
 					refreshUi: () => syncTaskUiChrome(ctx),
 					enableRpcControl: ctx.hasUI === true,
+					parentUiContext: {
+						hasUI: ctx.hasUI,
+						ui: ctx.ui,
+						sessionManager: ctx.sessionManager,
+						refreshTaskUiChrome: () => syncTaskUiChrome(ctx),
+						taskWidgetEnabled: isTaskWidgetEnabled(ctx),
+					},
 				});
 				const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 				if (isError) {
@@ -4052,6 +4467,11 @@ export default function (pi: ExtensionAPI) {
 					if (r.childSession) {
 						container.addChild(new Text(formatChildSessionExpanded(r.childSession, theme.fg.bind(theme)), 0, 0));
 					}
+					if ((r.uiNotices?.length ?? 0) > 0) {
+						container.addChild(new Spacer(1));
+						container.addChild(new Text(theme.fg("muted", "─── Notices ───"), 0, 0));
+						container.addChild(new Text(formatTaskInlineNoticeLines(r.uiNotices ?? [], theme.fg.bind(theme)), 0, 0));
+					}
 					container.addChild(new Spacer(1));
 					container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
 					appendTaskOutputSection(container, displayItems, finalOutput, mdTheme, theme.fg.bind(theme));
@@ -4069,8 +4489,9 @@ export default function (pi: ExtensionAPI) {
 				);
 				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
 				if (r.childSession) text += `\n${formatChildSessionCompact(r.childSession, theme.fg.bind(theme))}`;
+				if ((r.uiNotices?.length ?? 0) > 0) text += `\n${formatTaskInlineNoticeLines(r.uiNotices ?? [], theme.fg.bind(theme))}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
-				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
+				else if (displayItems.length === 0 && (r.uiNotices?.length ?? 0) === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 				else {
 					text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
 					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
@@ -4130,6 +4551,9 @@ export default function (pi: ExtensionAPI) {
 						if (r.childSession) {
 							container.addChild(new Text(formatChildSessionExpanded(r.childSession, theme.fg.bind(theme)), 0, 0));
 						}
+						if ((r.uiNotices?.length ?? 0) > 0) {
+							container.addChild(new Text(formatTaskInlineNoticeLines(r.uiNotices ?? [], theme.fg.bind(theme)), 0, 0));
+						}
 						appendTaskOutputSection(container, displayItems, finalOutput, mdTheme, theme.fg.bind(theme));
 						const stepUsage = formatUsageStats(r.usage, r.model);
 						if (stepUsage) container.addChild(new Text(theme.fg("dim", stepUsage), 0, 0));
@@ -4157,7 +4581,8 @@ export default function (pi: ExtensionAPI) {
 						theme,
 					)}`;
 					if (r.childSession) text += `\n${formatChildSessionCompact(r.childSession, theme.fg.bind(theme))}`;
-					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
+					if ((r.uiNotices?.length ?? 0) > 0) text += `\n${formatTaskInlineNoticeLines(r.uiNotices ?? [], theme.fg.bind(theme))}`;
+					if (displayItems.length === 0 && (r.uiNotices?.length ?? 0) === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
 				const usageStr = formatUsageStats(aggregateUsage(details.results));
@@ -4205,6 +4630,9 @@ export default function (pi: ExtensionAPI) {
 						if (r.childSession) {
 							container.addChild(new Text(formatChildSessionExpanded(r.childSession, theme.fg.bind(theme)), 0, 0));
 						}
+						if ((r.uiNotices?.length ?? 0) > 0) {
+							container.addChild(new Text(formatTaskInlineNoticeLines(r.uiNotices ?? [], theme.fg.bind(theme)), 0, 0));
+						}
 						appendTaskOutputSection(container, displayItems, finalOutput, mdTheme, theme.fg.bind(theme));
 						const taskUsage = formatUsageStats(r.usage, r.model);
 						if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
@@ -4233,7 +4661,8 @@ export default function (pi: ExtensionAPI) {
 						theme,
 					)}`;
 					if (r.childSession) text += `\n${formatChildSessionCompact(r.childSession, theme.fg.bind(theme))}`;
-					if (displayItems.length === 0)
+					if ((r.uiNotices?.length ?? 0) > 0) text += `\n${formatTaskInlineNoticeLines(r.uiNotices ?? [], theme.fg.bind(theme))}`;
+					if (displayItems.length === 0 && (r.uiNotices?.length ?? 0) === 0)
 						text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
@@ -4252,16 +4681,22 @@ export default function (pi: ExtensionAPI) {
 }
 
 export const __test__ = {
+	addTaskInlineNotice,
+	buildTaskInlineNoticeLines,
 	hasRuntimePersistOverride,
 	formatTaskRunList,
+	getTaskWidgetRelayNotices,
+	buildTaskWidgetLines,
 	normalizeChildSessionSnapshot: (data: unknown) => normalizeChildSessionSnapshot(data, TASK_CHILD_SESSION_METADATA_VERSION),
 	parseTaskTerminalBackendPreference,
 	parseTasksCommand,
 	preflightTaskRun,
+	relayTaskExtensionUiRequest,
 	resolveModelFromEffort,
 	resolveParentSessionForCurrentSession,
 	resolvePersistedTaskSessionRoot,
 	resolveTaskOriginForBranch: (entries: readonly SessionEntry[], leafId?: string | null) =>
 		resolveTaskOriginForBranch(entries, createTaskPreview, leafId),
 	resolveTaskSelector,
+	setTaskWidgetEnabled,
 };
