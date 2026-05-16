@@ -51,6 +51,47 @@ describe("permissions config merge", () => {
 		expect(resolved.denyRead).toContain("(^|[/])secrets/");
 		expect(resolved.denyRead).not.toContain("\\.env(\\..+)?$");
 	});
+
+	it("interpolates environment variables in rule matches as regex literals", () => {
+		const old = process.env.PI_PACKAGE_DIR;
+		process.env.PI_PACKAGE_DIR = "/tmp/pi.package";
+		try {
+			const config = configModule.interpolateConfig({
+				default: {
+					rules: [
+						{
+							tool: "read",
+							match: "^${PI_PACKAGE_DIR}/docs(/|$)",
+							action: "allow",
+						},
+					],
+				},
+			});
+			const rule = config.default?.rules?.[0];
+			expect(rule?.match).toBe("^/tmp/pi\\.package/docs(/|$)");
+			expect(ruleMatch(rule!, "read", "/tmp/pi.package/docs/settings.md")).toBe(true);
+			expect(ruleMatch(rule!, "read", "/tmp/piXpackage/docs/settings.md")).toBe(false);
+		} finally {
+			if (old === undefined) delete process.env.PI_PACKAGE_DIR;
+			else process.env.PI_PACKAGE_DIR = old;
+		}
+	});
+
+	it("interpolates environment variables in sandbox paths as raw paths", () => {
+		const old = process.env.PI_PACKAGE_DIR;
+		process.env.PI_PACKAGE_DIR = "/tmp/pi.package";
+		try {
+			const config = configModule.interpolateConfig({
+				sandbox: {
+					allowWrite: ["${PI_PACKAGE_DIR}/cache"],
+				},
+			});
+			expect(config.sandbox?.allowWrite).toEqual(["/tmp/pi.package/cache"]);
+		} finally {
+			if (old === undefined) delete process.env.PI_PACKAGE_DIR;
+			else process.env.PI_PACKAGE_DIR = old;
+		}
+	});
 });
 
 describe("external path canonicalization", () => {

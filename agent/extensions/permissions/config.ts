@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import {
@@ -108,6 +109,107 @@ export function readJsonFile(filePath: string): unknown | undefined {
 	}
 }
 
+export function escapeRegexLiteral(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function expandHome(value: string): string {
+	if (value === "~") return os.homedir();
+	if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
+	return value;
+}
+
+function findPiPackageDirFrom(candidate: string | undefined): string | undefined {
+	if (!candidate) return undefined;
+	let dir = candidate;
+	try {
+		dir = fs.statSync(candidate).isDirectory() ? candidate : path.dirname(candidate);
+	} catch {
+		dir = path.dirname(candidate);
+	}
+
+	while (dir !== path.dirname(dir)) {
+		const packageJsonPath = path.join(dir, "package.json");
+		try {
+			const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")) as { name?: string };
+			if (pkg.name === "@mariozechner/pi-coding-agent") return dir;
+		} catch {
+			// Keep walking upward.
+		}
+		dir = path.dirname(dir);
+	}
+
+	return undefined;
+}
+
+export function getInterpolationVariables(): Record<string, string | undefined> {
+	const vars: Record<string, string | undefined> = { ...process.env };
+	vars.HOME ??= os.homedir();
+	vars.PI_PACKAGE_DIR ??= findPiPackageDirFrom(process.argv[1]) ?? findPiPackageDirFrom(process.execPath);
+	return vars;
+}
+
+export function interpolateEnvString(value: string, options: { regex?: boolean } = {}): string {
+	const vars = getInterpolationVariables();
+	return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (match, braced, bare) => {
+		const name = braced ?? bare;
+		const raw = vars[name];
+		if (raw === undefined || raw === "") return match;
+		const expanded = expandHome(raw);
+		return options.regex ? escapeRegexLiteral(expanded) : expanded;
+	});
+}
+
+function interpolateStringArray(values: string[] | undefined, options?: { regex?: boolean }): string[] | undefined {
+	return values?.map((value) => interpolateEnvString(value, options));
+}
+
+export function interpolateConfig(config: PermissionsConfig): PermissionsConfig {
+	const interpolateRules = (rules: Rule[] | undefined): Rule[] | undefined =>
+		rules?.map((rule) => ({
+			...rule,
+			match: rule.match === undefined ? undefined : interpolateEnvString(rule.match, { regex: true }),
+		}));
+	const interpolateProfile = <T extends { rules?: Rule[]; tmpDir?: string }>(profile: T | undefined): T | undefined => {
+		if (!profile) return undefined;
+		return {
+			...profile,
+			rules: interpolateRules(profile.rules),
+			tmpDir: profile.tmpDir === undefined ? undefined : interpolateEnvString(profile.tmpDir),
+		};
+	};
+	const interpolateProfileMap = (profiles: PermissionsConfig["profiles"]): PermissionsConfig["profiles"] | undefined => {
+		if (!profiles) return undefined;
+		return Object.fromEntries(Object.entries(profiles).map(([name, profile]) => [name, interpolateProfile(profile)]));
+	};
+
+	return {
+		...config,
+		default: interpolateProfile(config.default),
+		profiles: interpolateProfileMap(config.profiles),
+		agents: interpolateProfileMap(config.agents),
+		sandbox: config.sandbox
+			? {
+				...config.sandbox,
+				tmpDir: config.sandbox.tmpDir === undefined ? undefined : interpolateEnvString(config.sandbox.tmpDir),
+				allowUnixSockets: interpolateStringArray(config.sandbox.allowUnixSockets),
+				allowWrite: interpolateStringArray(config.sandbox.allowWrite),
+				denyRead: interpolateStringArray(config.sandbox.denyRead),
+				denyWrite: interpolateStringArray(config.sandbox.denyWrite),
+			}
+			: undefined,
+		protectedResources: config.protectedResources
+			? {
+				...config.protectedResources,
+				addDenyRead: interpolateStringArray(config.protectedResources.addDenyRead, { regex: true }),
+				addDenyWrite: interpolateStringArray(config.protectedResources.addDenyWrite, { regex: true }),
+				unprotectRead: interpolateStringArray(config.protectedResources.unprotectRead, { regex: true }),
+				unprotectWrite: interpolateStringArray(config.protectedResources.unprotectWrite, { regex: true }),
+			}
+			: undefined,
+	};
+}
+
 export function mergeDefaultConfig(
 	globalDefault: PermissionsConfig["default"] | undefined,
 	projectDefault: PermissionsConfig["default"] | undefined,
@@ -127,7 +229,7 @@ export function loadConfig(cwd: string): PermissionsConfig {
 	const global = readJsonFile(globalPath) as PermissionsConfig | undefined;
 	const project = readJsonFile(projectPath) as PermissionsConfig | undefined;
 
-	return {
+	return interpolateConfig({
 		default: mergeDefaultConfig(global?.default, project?.default),
 		profiles: {
 			...(global?.profiles ?? {}),
@@ -149,7 +251,7 @@ export function loadConfig(cwd: string): PermissionsConfig {
 			...(global?.protectedResources ?? {}),
 			...(project?.protectedResources ?? {}),
 		},
-	};
+	});
 }
 
 const BUILTIN_PROTECTED_DENY_READ = [

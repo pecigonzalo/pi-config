@@ -4,6 +4,31 @@
     "mode": "workspace-write",
     "rules": [
       // ── Read: protect secrets and credentials ───────────────────────────────
+      // Allow Pi's own shipped docs/examples without approving the changing bunx path.
+      {
+        "tool": "read",
+        "match": "^${PI_PACKAGE_DIR}/(README\\.md|CHANGELOG\\.md|docs(/|$)|examples(/|$))",
+        "action": "allow",
+        "externalPathAction": "allow",
+      },
+      {
+        "tool": "grep",
+        "match": "^${PI_PACKAGE_DIR}/(docs(/|$)|examples(/|$))",
+        "action": "allow",
+        "externalPathAction": "allow",
+      },
+      {
+        "tool": "find",
+        "match": "^${PI_PACKAGE_DIR}/(docs(/|$)|examples(/|$))",
+        "action": "allow",
+        "externalPathAction": "allow",
+      },
+      {
+        "tool": "ls",
+        "match": "^${PI_PACKAGE_DIR}(/(docs|examples)(/|$)?)?$",
+        "action": "allow",
+        "externalPathAction": "allow",
+      },
       // .env.example is safe to read — allow it before the broader .env block
       {
         "tool": "read",
