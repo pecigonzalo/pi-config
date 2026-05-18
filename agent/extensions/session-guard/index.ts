@@ -217,6 +217,31 @@ function shouldCaptureCheckpoints(settings: SessionGuardSettings): boolean {
   );
 }
 
+function isNoSessionInvocation(): boolean {
+  return process.argv.includes("--no-session");
+}
+
+function shouldCaptureCheckpointsForContext(
+  settings: SessionGuardSettings,
+  ctx: ExtensionContext,
+): boolean {
+  if (!shouldCaptureCheckpoints(settings)) return false;
+  // Checkpoints are stored as custom session entries. In --no-session runs there
+  // is no durable session to restore from, so capturing only risks stale writes
+  // during teardown/reload.
+  if (isNoSessionInvocation()) return false;
+  return ctx.sessionManager.getSessionFile() !== undefined;
+}
+
+function isStaleSessionError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /ctx is stale|session replacement or reload|captured pi or command ctx/.test(
+      error.message,
+    )
+  );
+}
+
 function parseStoredCheckpoint(data: unknown): StoredCheckpoint | undefined {
   if (!data || typeof data !== "object") return undefined;
 
@@ -417,15 +442,29 @@ async function captureCheckpoint(
   if (uniqueTargetIds.length === 0) return;
   if (uniqueTargetIds.every((entryId) => checkpoints.has(entryId))) return;
 
+  const sessionFile = ctx.sessionManager.getSessionFile();
+  if (!sessionFile) return;
+  const cwd = ctx.cwd;
+
   const checkpoint = await createCheckpoint(
     pi,
-    ctx.cwd,
+    cwd,
     capture,
     uniqueTargetIds,
   );
   if (!checkpoint) return;
 
-  pi.appendEntry(CHECKPOINT_ENTRY_TYPE, checkpoint);
+  try {
+    // A reload/session replacement can happen while createCheckpoint awaits git.
+    // In that case this checkpoint belongs to the old runtime and must be
+    // discarded rather than appended through stale session-bound APIs.
+    if (ctx.sessionManager.getSessionFile() !== sessionFile) return;
+    pi.appendEntry(CHECKPOINT_ENTRY_TYPE, checkpoint);
+  } catch (error) {
+    if (isStaleSessionError(error)) return;
+    throw error;
+  }
+
   for (const entryId of checkpoint.entryIds) {
     checkpoints.set(entryId, checkpoint);
   }
@@ -660,7 +699,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_tree", async (_event, ctx) => reload(ctx));
 
   pi.on("turn_start", async (_event, ctx) => {
-    if (!shouldCaptureCheckpoints(settings)) return;
+    if (!shouldCaptureCheckpointsForContext(settings, ctx)) return;
     const leafId = ctx.sessionManager.getLeafEntry()?.id;
     const targetEntryIds = collectPreTurnEntryIds(
       ctx.sessionManager.getEntries(),
@@ -670,7 +709,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("turn_end", async (_event, ctx) => {
-    if (!shouldCaptureCheckpoints(settings)) return;
+    if (!shouldCaptureCheckpointsForContext(settings, ctx)) return;
     const leafId = ctx.sessionManager.getLeafEntry()?.id;
     const targetEntryIds = collectPostTurnEntryIds(
       ctx.sessionManager.getEntries(),
