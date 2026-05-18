@@ -4,10 +4,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import { approvalsCoverBash, approvalsCoverPaths, getApprovalsSettings } from "./approvals";
+import { approvalsCoverBash, approvalsCoverPaths, extractApprovalRecords, getApprovalsSettings } from "./approvals";
 import { resolveCodemodePolicy } from "./codemode";
 import { findGitRepoRoot, getFilesystemApprovalTargets, isPathOutsideCwd, ruleMatch } from "./matching";
 import {
+	canAutoApproveParsedBash,
 	detectDangerousBashPattern,
 	getFirstUnapprovedParsedCommand,
 	isAllParsedCommandsAllowed,
@@ -112,6 +113,36 @@ describe("permissions config merge", () => {
 
 		try {
 			expect(configModule.inferPiPackageDirFrom(path.join(root, "dist", "cli.js"))).toBe(await fs.realpath(root));
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("surfaces JSON parse errors for malformed files", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-config-parse-"));
+		const filePath = path.join(tmp, "permissions.jsonc");
+		await fs.writeFile(filePath, "{ invalid json", "utf8");
+		const warnings: string[] = [];
+
+		try {
+			expect(configModule.readJsonFile(filePath, { onWarning: (message) => warnings.push(message) })).toBeUndefined();
+			expect(warnings.some((message) => message.includes(filePath))).toBe(true);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("warns on malformed config roots instead of silently accepting them", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-config-root-"));
+		const configDir = path.join(tmp, ".pi");
+		const configPath = path.join(configDir, "permissions.jsonc");
+		await fs.mkdir(configDir, { recursive: true });
+		await fs.writeFile(configPath, "[]", "utf8");
+		const warnings: string[] = [];
+
+		try {
+			configModule.loadConfig(tmp, { onWarning: (message) => warnings.push(message) });
+			expect(warnings.some((message) => message.includes(configPath) && message.includes("expected object root"))).toBe(true);
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
 		}
@@ -238,6 +269,23 @@ describe("scoped approvals", () => {
 		expect(approvalsCoverBash(approvals, "npm run test", "/repo-a", "reviewer", settings)).toBe(false);
 	});
 
+	it("enforces token boundaries for bash-prefix approvals", () => {
+		const settings = getApprovalsSettings({ approvals: { scopeByProject: true, scopeByAgent: true } });
+		const approvals = [
+			{
+				tool: "bash",
+				scopeType: "bash-prefix" as const,
+				scopeValue: "rm",
+				projectRoot: "/repo-a",
+				agentName: "default",
+				createdAt: Date.now(),
+			},
+		];
+
+		expect(approvalsCoverBash(approvals, "rm -rf build", "/repo-a", "default", settings)).toBe(true);
+		expect(approvalsCoverBash(approvals, "rmdir build", "/repo-a", "default", settings)).toBe(false);
+	});
+
 	it("lets approvals cover a compound segment when evaluated separately", () => {
 		const settings = getApprovalsSettings({ approvals: { scopeByProject: true, scopeByAgent: true } });
 		const approvals = [
@@ -253,6 +301,26 @@ describe("scoped approvals", () => {
 
 		expect(approvalsCoverBash(approvals, "sed -n '1,200p'", "/repo-a", "default", settings)).toBe(true);
 		expect(approvalsCoverBash(approvals, "rg foo | sed -n '1,200p'", "/repo-a", "default", settings)).toBe(false);
+	});
+});
+
+describe("approval file parsing", () => {
+	it("warns and drops malformed approval entries", () => {
+		const warnings: string[] = [];
+		const records = extractApprovalRecords(
+			{
+				approvals: [
+					{ tool: "bash", scopeType: "bash-prefix", scopeValue: "git", createdAt: Date.now() },
+					{ tool: "bash", scopeType: "bash-prefix", createdAt: Date.now() },
+				],
+			},
+			(message) => warnings.push(message),
+			"/tmp/permissions-approvals.json",
+		);
+
+		expect(records).toHaveLength(1);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("Ignoring malformed approval entry #2");
 	});
 });
 
@@ -369,25 +437,33 @@ describe("sandboxed command runner", () => {
 	});
 
 	it("uses runtime tmpdir overrides without mutating process env", async () => {
-		const runtimeTmpDir = path.join(os.tmpdir(), "pi-runtime-tmpdir-test");
+		const runtimeTmpDir = path.join(os.tmpdir(), "pi-runtime-tmp");
 		const oldTmpDir = process.env.TMPDIR;
 		const oldClaudeTmpDir = process.env.CLAUDE_TMPDIR;
 		const chunks: string[] = [];
+		let wrapTmpDir: string | undefined;
+		let wrapClaudeTmpDir: string | undefined;
 
 		const ops = createSandboxedBashOps(
 			{
 				initialize: async () => {},
 				reset: async () => {},
-				wrapWithSandbox: async (command) => command,
+				wrapWithSandbox: async (command) => {
+					wrapTmpDir = process.env.TMPDIR;
+					wrapClaudeTmpDir = process.env.CLAUDE_TMPDIR;
+					return command;
+				},
 			},
 			runtimeTmpDir,
 		);
 
-		await ops.exec("printf '%s\n%s\n' \"$TMPDIR\" \"$CLAUDE_TMPDIR\"", process.cwd(), {
+		await ops.exec("printf '%s\n%s\n' \"$TMPDIR\" \"${CLAUDE_TMPDIR-unset}\"", process.cwd(), {
 			onData: (chunk) => chunks.push(chunk.toString("utf8")),
 		});
 
-		expect(chunks.join("")).toBe([runtimeTmpDir, runtimeTmpDir, ""].join("\n"));
+		expect(wrapTmpDir).toBe(runtimeTmpDir);
+		expect(wrapClaudeTmpDir).toBe(runtimeTmpDir);
+		expect(chunks.join("")).toBe([runtimeTmpDir, oldClaudeTmpDir ?? "unset", ""].join("\n"));
 		expect(process.env.TMPDIR).toBe(oldTmpDir);
 		expect(process.env.CLAUDE_TMPDIR).toBe(oldClaudeTmpDir);
 	});
@@ -444,6 +520,38 @@ describe("sandbox network config", () => {
 	it("includes configured tmpDir in allowWrite", () => {
 		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
 		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/custom-pi");
+	});
+
+	it("uses sandbox path globs rather than permission regexes for protected resources", () => {
+		const protectedPolicy = {
+			...policy,
+			protectedResources: {
+				denyRead: ["\\.env(\\..+)?$", "(^|[/])(\\.aws[/]|\\.ssh[/]|\\.gnupg[/])"],
+				denyWrite: ["(^|[/])\\.git/(hooks/|config$)"],
+			},
+		};
+		const compiled = compileSandboxConfig(protectedPolicy, "/repo", { enabled: true });
+		const denyRead = compiled.config.filesystem?.denyRead ?? [];
+		const denyWrite = compiled.config.filesystem?.denyWrite ?? [];
+
+		expect(denyRead).toContain("/repo/**/.env");
+		expect(denyRead).toContain("/repo/**/.ssh/**");
+		expect(denyRead).not.toContain("\\.env(\\..+)?$");
+		expect(denyWrite).toContain("/repo/**/.git/config");
+		expect(denyWrite).not.toContain("(^|[/])\\.git/(hooks/|config$)");
+	});
+
+	it("resolves configured sandbox paths relative to the command cwd", () => {
+		const compiled = compileSandboxConfig(policy, "/repo/packages/app", {
+			enabled: true,
+			allowWrite: ["dist"],
+			denyRead: ["secrets"],
+			denyWrite: ["generated/locked"],
+		});
+
+		expect(compiled.config.filesystem?.allowWrite).toContain("/repo/packages/app/dist");
+		expect(compiled.config.filesystem?.denyRead).toContain("/repo/packages/app/secrets");
+		expect(compiled.config.filesystem?.denyWrite).toContain("/repo/packages/app/generated/locked");
 	});
 
 	it("allows git metadata writes when cwd is below the repo root", async () => {
@@ -587,6 +695,7 @@ describe("tree-sitter policy integration", () => {
 	it("allows all parsed commands when rules match", async () => {
 		const parsed = await parseBashCommand("cd /path && bun test 2>&1");
 		expect(isAllParsedCommandsAllowed(parsed, allowRules)).toBe(true);
+		expect(canAutoApproveParsedBash(parsed, allowRules)).toBe(true);
 	});
 
 	it("finds first unapproved parsed command", async () => {
@@ -603,10 +712,10 @@ describe("tree-sitter policy integration", () => {
 		expect(unapproved).toBeUndefined();
 	});
 
-	it("reports complex commands as not fully allowed even when rules match", async () => {
+	it("does not auto-approve complex commands even when parsed segments are allowed", async () => {
 		const parsed = await parseBashCommand("for f in *.txt; do echo $f; done");
-		// The inner echo is allowed by rules, but isComplex should be checked separately
 		expect(parsed.isComplex).toBe(true);
 		expect(isAllParsedCommandsAllowed(parsed, allowRules)).toBe(true);
+		expect(canAutoApproveParsedBash(parsed, allowRules)).toBe(false);
 	});
 });

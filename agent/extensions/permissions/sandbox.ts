@@ -20,7 +20,7 @@ import { resolveToken } from "./matching";
 const REAL_SYSTEM_TMPDIR = os.tmpdir();
 
 export function getEffectiveSandboxTmpDir(cwd: string, overrides: SandboxSettings | undefined): string {
-	const configured = overrides?.tmpDir ?? process.env.PI_SANDBOX_TMPDIR ?? process.env.CLAUDE_TMPDIR;
+	const configured = overrides?.tmpDir ?? process.env.PI_SANDBOX_TMPDIR;
 	if (configured && configured.trim().length > 0) return resolveToken(configured, cwd);
 	return path.join(os.tmpdir(), "pi");
 }
@@ -61,6 +61,29 @@ function getDarwinUserCacheDir(): string | undefined {
 function getPlatformCacheWritePaths(): string[] {
 	const darwinCacheDir = getDarwinUserCacheDir();
 	return darwinCacheDir ? [darwinCacheDir] : [];
+}
+
+const PROTECTED_RESOURCE_SANDBOX_DENY_READ = new Map<string, string[]>([
+	["\\.env(\\..+)?$", ["**/.env", "**/.env.*"]],
+	["\\.(pem|key|p12|pfx|crt|ca-bundle)$", ["**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.crt", "**/*.ca-bundle"]],
+	["(^|[/])(\\.aws[/]|\\.ssh[/]|\\.gnupg[/])", ["**/.aws", "**/.aws/**", "**/.ssh", "**/.ssh/**", "**/.gnupg", "**/.gnupg/**"]],
+]);
+
+const PROTECTED_RESOURCE_SANDBOX_DENY_WRITE = new Map<string, string[]>([
+	...PROTECTED_RESOURCE_SANDBOX_DENY_READ,
+	["(^|[/])\\.git/(hooks/|config$)", ["**/.git/hooks", "**/.git/hooks/**", "**/.git/config"]],
+	["(^|[/])(\\.bashrc|\\.bash_profile|\\.zshrc|\\.zprofile|\\.profile)$", ["**/.bashrc", "**/.bash_profile", "**/.zshrc", "**/.zprofile", "**/.profile"]],
+	["(^|[/])\\.(gitconfig|gitmodules|ripgreprc|mcp\\.json)$", ["**/.gitconfig", "**/.gitmodules", "**/.ripgreprc", "**/.mcp.json"]],
+	["(^|[/])(\\.vscode/|\\.idea/)", ["**/.vscode", "**/.vscode/**", "**/.idea", "**/.idea/**"]],
+	["(^|[/])\\.claude/(commands/|agents/)", ["**/.claude/commands", "**/.claude/commands/**", "**/.claude/agents", "**/.claude/agents/**"]],
+]);
+
+function resolveSandboxPathTokens(values: string[], cwd: string): string[] {
+	return values.map((value) => resolveToken(value, cwd));
+}
+
+function getProtectedSandboxDenyPaths(patterns: string[] | undefined, mappings: Map<string, string[]>, cwd: string): string[] {
+	return resolveSandboxPathTokens((patterns ?? []).flatMap((pattern) => mappings.get(pattern) ?? []), cwd);
 }
 
 function existingPathAliases(candidate: string): string[] {
@@ -115,7 +138,6 @@ function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): No
 	return {
 		...mergedEnv,
 		TMPDIR: effectiveTmpDir,
-		CLAUDE_TMPDIR: overrides.CLAUDE_TMPDIR ?? effectiveTmpDir,
 		XDG_CACHE_HOME: xdgCacheHome,
 		XDG_STATE_HOME: xdgStateHome,
 		BUN_INSTALL_CACHE_DIR: overrides.BUN_INSTALL_CACHE_DIR ?? path.join(effectiveTmpDir, "bun-cache"),
@@ -147,9 +169,18 @@ export function compileSandboxConfig(
 	const compatWritePaths = (overrides?.compatWritePaths ?? true) ? getCompatWritePaths() : [];
 	const platformCachePaths = getPlatformCacheWritePaths();
 	const defaultAllowWrite = dedupeStrings([...modeDefault.allowWrite, ...compatWritePaths, ...platformCachePaths, effectiveTmpDir]);
-	const allowWrite = dedupeStrings([...(overrides?.allowWrite ?? defaultAllowWrite), ...compatWritePaths, ...platformCachePaths, effectiveTmpDir]);
-	const denyRead = dedupeStrings([...(policy.protectedResources.denyRead ?? []), ...(overrides?.denyRead ?? [])]);
-	const denyWrite = dedupeStrings([...(policy.protectedResources.denyWrite ?? []), ...(overrides?.denyWrite ?? [])]);
+	const configuredAllowWrite = overrides?.allowWrite
+		? resolveSandboxPathTokens(overrides.allowWrite, cwd)
+		: defaultAllowWrite;
+	const allowWrite = dedupeStrings([...configuredAllowWrite, ...compatWritePaths, ...platformCachePaths, effectiveTmpDir]);
+	const denyRead = dedupeStrings([
+		...getProtectedSandboxDenyPaths(policy.protectedResources.denyRead, PROTECTED_RESOURCE_SANDBOX_DENY_READ, cwd),
+		...resolveSandboxPathTokens(overrides?.denyRead ?? [], cwd),
+	]);
+	const denyWrite = dedupeStrings([
+		...getProtectedSandboxDenyPaths(policy.protectedResources.denyWrite, PROTECTED_RESOURCE_SANDBOX_DENY_WRITE, cwd),
+		...resolveSandboxPathTokens(overrides?.denyWrite ?? [], cwd),
+	]);
 	const socketSet = new Set<string>(overrides?.allowUnixSockets ?? []);
 	if (overrides?.allowSshAuthSock && process.env.SSH_AUTH_SOCK) socketSet.add(process.env.SSH_AUTH_SOCK);
 	const allowUnixSockets = [...socketSet];
@@ -232,12 +263,32 @@ export async function runSandboxedCommand(
 		onSpawn,
 	}: SandboxedCommandOptions,
 ): Promise<SandboxedCommandResult> {
-	const wrappedCommand = await sandboxManager.wrapWithSandbox(command);
+	const sandboxEnv = getSandboxCacheEnv(cwd, env);
+	const effectiveTmpDir = sandboxEnv.TMPDIR;
+	if (effectiveTmpDir) fs.mkdirSync(effectiveTmpDir, { recursive: true });
+
+	const previousTmpDir = process.env.TMPDIR;
+	const previousClaudeTmpDir = process.env.CLAUDE_TMPDIR;
+	let wrappedCommand: string;
+	try {
+		// sandbox-runtime currently bakes TMPDIR into the generated wrapper by
+		// reading process.env.CLAUDE_TMPDIR during wrapWithSandbox(). Keep that
+		// upstream compatibility variable private to this call; the spawned
+		// command receives Pi's normal TMPDIR instead.
+		if (sandboxEnv.TMPDIR) process.env.TMPDIR = sandboxEnv.TMPDIR;
+		if (effectiveTmpDir) process.env.CLAUDE_TMPDIR = effectiveTmpDir;
+		wrappedCommand = await sandboxManager.wrapWithSandbox(command);
+	} finally {
+		if (previousTmpDir === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = previousTmpDir;
+		if (previousClaudeTmpDir === undefined) delete process.env.CLAUDE_TMPDIR;
+		else process.env.CLAUDE_TMPDIR = previousClaudeTmpDir;
+	}
 
 	return new Promise((resolve, reject) => {
 		const child = spawn("bash", ["-c", wrappedCommand], {
 			cwd,
-			env: getSandboxCacheEnv(cwd, env),
+			env: sandboxEnv,
 			detached: true,
 			stdio: [stdinMode ?? "ignore", "pipe", "pipe"],
 		});
@@ -294,7 +345,6 @@ export function createSandboxedBashOps(
 				env: runtimeTmpDir
 					? {
 						TMPDIR: runtimeTmpDir,
-						CLAUDE_TMPDIR: runtimeTmpDir,
 					}
 					: undefined,
 				timeout,
