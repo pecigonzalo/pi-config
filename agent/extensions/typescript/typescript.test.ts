@@ -92,26 +92,4 @@ describe("typescript tool helpers", () => {
 		expect(__test__.sanitizeArtifactName("../unsafe name?.md")).toBe("unsafe-name-.md");
 	});
 
-	it("detects sandbox launch failures", () => {
-		expect(__test__.isSandboxLaunchFailure("sandbox-exec: sandbox_apply: Operation not permitted\n")).toBe(true);
-		expect(__test__.isSandboxLaunchFailure("normal output")).toBe(false);
-	});
-
-	it("detects inherited sandbox from env", () => {
-		process.env.PI_SANDBOX_ACTIVE = "1";
-		process.env.PI_SANDBOX_REASON = "session sandbox";
-		const info = __test__.getInheritedSandboxInfo();
-		expect(info.active).toBe(true);
-		expect(info.reason).toBe("session sandbox");
-		delete process.env.PI_SANDBOX_ACTIVE;
-		delete process.env.PI_SANDBOX_REASON;
-	});
-
-	it("requires explicit env opt-in for unsandboxed fallback", () => {
-		delete process.env.PI_CODEMODE_ALLOW_UNSANDBOXED;
-		expect(__test__.allowUnsandboxedFallback()).toBe(false);
-		process.env.PI_CODEMODE_ALLOW_UNSANDBOXED = "1";
-		expect(__test__.allowUnsandboxedFallback()).toBe(true);
-		delete process.env.PI_CODEMODE_ALLOW_UNSANDBOXED;
-	});
 });

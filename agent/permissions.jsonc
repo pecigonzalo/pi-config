@@ -113,7 +113,29 @@
       // - "rg *" => command-prefix match ("rg" or "rg ...")
       {
         "tool": "bash",
-        "match": "^(cd|cat|rg|find|wc|grep|head|uniq|ls|sort|tail|tee|echo|pwd|which|file|diff|stat|du|df|date|uname|env|printenv|type|true|false|pwd)\\b",
+        "match": "(^|[;&|()\\s])g?sed\\b[^;&|\\n]*\\s(-[A-Za-z]*i[A-Za-z]*|--in-place(?:=|\\s|$))",
+        "action": "ask",
+        "reason": "sed in-place edit may modify files",
+      },
+      {
+        "tool": "bash",
+        "match": "(^|[;&|()\\s])g?sed\\b[^;&|\\n]*(^|\\s)(?:[0-9]*>>?|&>)\\s*(?!&)",
+        "action": "ask",
+        "reason": "sed output redirection may write files",
+      },
+      {
+        "tool": "bash",
+        "match": "sed *",
+        "action": "allow",
+      },
+      {
+        "tool": "bash",
+        "match": "gsed *",
+        "action": "allow",
+      },
+      {
+        "tool": "bash",
+        "match": "^(cd|cat|rg|find|wc|grep|head|uniq|ls|sort|tail|tee|echo|printf|pwd|which|file|diff|stat|du|df|date|uname|env|printenv|type|true|false|pwd)\\b",
         "action": "allow",
       },
       {
@@ -399,6 +421,9 @@
   "sandbox": {
     "enabled": true,
     "allowSshAuthSock": true,
+    // Allow normal workspace writes plus Git index/object updates needed for staging and committing.
+    // Sandbox-runtime still blocks sensitive Git internals such as .git/config and .git/hooks/.
+    "allowWrite": [".", ".git"],
     "denyRead": ["~/.aws", "~/.gnupg"],
   },
 }

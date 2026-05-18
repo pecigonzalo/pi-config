@@ -204,34 +204,9 @@ return {
 
 ## Sandbox behavior
 
-The tool supports three sandbox modes in its result details:
+The tool always uses a dedicated sandbox for code execution. It does not infer sandbox coverage from session environment variables, and it does not fall back to unsandboxed execution.
 
-- `dedicated` — the tool applied its own sandbox
-- `inherited` — Pi was already sandboxed, so the tool reused the outer session sandbox
-- `none` — unsandboxed fallback (development only)
-
-### Inherited sandbox mode
-
-If Pi is already running in a sandboxed session, the tool does **not** try to nest another macOS sandbox.
-Instead, it inherits the outer session sandbox.
-
-This is tracked via environment variables set by the permissions extension:
-
-- `PI_SANDBOX_ACTIVE=1`
-- `PI_SANDBOX_REASON=...`
-- `PI_SANDBOX_TMPDIR=...`
-
-### Unsandboxed fallback
-
-Implicit unsandboxed fallback is disabled.
-
-If dedicated sandboxing fails and there is no inherited sandbox, the tool fails closed unless this explicit opt-in is set:
-
-```bash
-PI_CODEMODE_ALLOW_UNSANDBOXED=1
-```
-
-That fallback is for development only.
+If dedicated sandboxing is disabled or cannot be initialized, the tool fails closed.
 
 ## Audit trail
 
@@ -274,7 +249,7 @@ Implemented:
 
 - one-shot Bun execution
 - `analysis` and `orchestrator` profiles
-- inherited sandbox mode
+- dedicated sandboxed execution
 - `host.message.*`
 - `host.artifact.write()`
 - `host.task.run()`

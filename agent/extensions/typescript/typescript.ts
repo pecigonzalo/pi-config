@@ -18,7 +18,6 @@ const BRIDGE_REQUEST_PREFIX = "__PI_CODEMODE_BRIDGE_REQUEST__";
 const BRIDGE_RESPONSE_PREFIX = "__PI_CODEMODE_BRIDGE_RESPONSE__";
 const MAX_LOG_LINES = 200;
 const MAX_RESULT_PREVIEW = 8_000;
-const SANDBOX_APPLY_ERROR = "sandbox_apply: Operation not permitted";
 
 type ProtocolLog = {
 	level?: string;
@@ -85,21 +84,9 @@ type CodemodeDetails = {
 	sandbox: {
 		enabled: boolean;
 		reason: string;
-		mode: "dedicated" | "inherited" | "none";
+		mode: "dedicated";
 	};
 };
-
-interface LocalCommandOptions {
-	command: string;
-	cwd: string;
-	env?: NodeJS.ProcessEnv;
-	timeout?: number;
-	signal?: AbortSignal;
-	onStdoutData?: (chunk: Buffer) => void;
-	onStderrData?: (chunk: Buffer) => void;
-	stdinMode?: "ignore" | "pipe";
-	onSpawn?: (child: ReturnType<typeof spawn>) => void;
-}
 
 interface BridgeRuntimeState {
 	capabilities: CodemodeCapability[];
@@ -110,20 +97,6 @@ interface BridgeRuntimeState {
 	signal?: AbortSignal;
 	cwd: string;
 	allowProjectAgents: boolean;
-}
-
-function getInheritedSandboxInfo(): { active: boolean; reason?: string; tmpDir?: string } {
-	return {
-		active: process.env.PI_SANDBOX_ACTIVE === "1",
-		reason: process.env.PI_SANDBOX_REASON,
-		tmpDir: process.env.PI_SANDBOX_TMPDIR,
-	};
-}
-
-function allowUnsandboxedFallback(): boolean {
-	const value = process.env.PI_CODEMODE_ALLOW_UNSANDBOXED;
-	if (!value) return false;
-	return /^(1|true|yes)$/i.test(value);
 }
 
 const CodemodeParams = Type.Object({
@@ -163,74 +136,6 @@ async function resolveExecutionCwd(baseCwd: string, requested: string | undefine
 	if (!stat) throw new Error(`CodeMode cwd does not exist: ${requested ?? baseCwd}`);
 	if (!stat.isDirectory()) throw new Error(`CodeMode cwd is not a directory: ${requested ?? baseCwd}`);
 	return resolved;
-}
-
-function runLocalCommand({
-	command,
-	cwd,
-	env,
-	timeout,
-	signal,
-	onStdoutData,
-	onStderrData,
-	stdinMode,
-	onSpawn,
-}: LocalCommandOptions): Promise<{ exitCode: number | null }> {
-	return new Promise((resolve, reject) => {
-		const child = spawn("bash", ["-lc", command], {
-			cwd,
-			env,
-			detached: true,
-			stdio: [stdinMode ?? "ignore", "pipe", "pipe"],
-		});
-		onSpawn?.(child);
-
-		let timedOut = false;
-		let timeoutHandle: NodeJS.Timeout | undefined;
-		if (timeout !== undefined && timeout > 0) {
-			timeoutHandle = setTimeout(() => {
-				timedOut = true;
-				if (child.pid) {
-					try {
-						process.kill(-child.pid, "SIGKILL");
-					} catch {
-						child.kill("SIGKILL");
-					}
-				}
-			}, timeout * 1000);
-		}
-
-		child.stdout?.on("data", (chunk) => onStdoutData?.(chunk));
-		child.stderr?.on("data", (chunk) => onStderrData?.(chunk));
-
-		child.on("error", (error) => {
-			if (timeoutHandle) clearTimeout(timeoutHandle);
-			reject(error);
-		});
-
-		const onAbort = () => {
-			if (child.pid) {
-				try {
-					process.kill(-child.pid, "SIGKILL");
-				} catch {
-					child.kill("SIGKILL");
-				}
-			}
-		};
-		signal?.addEventListener("abort", onAbort, { once: true });
-
-		child.on("close", (code) => {
-			if (timeoutHandle) clearTimeout(timeoutHandle);
-			signal?.removeEventListener("abort", onAbort);
-			if (signal?.aborted) reject(new Error("aborted"));
-			else if (timedOut) reject(new Error(`timeout:${timeout}`));
-			else resolve({ exitCode: code });
-		});
-	});
-}
-
-function isSandboxLaunchFailure(rawOutput: string): boolean {
-	return rawOutput.includes(SANDBOX_APPLY_ERROR);
 }
 
 function serializeForDisplay(value: unknown): string {
@@ -847,16 +752,16 @@ export default function (pi: ExtensionAPI) {
 			const artifactsDir = path.join(runtimeDir, "artifacts");
 			const resolvedPolicy = resolveCodemodePolicy(policy, cwd, config.sandbox, profile, runtimeDir);
 
-			const inheritedSandbox = getInheritedSandboxInfo();
-			if (!resolvedPolicy.sandbox.enabled && !inheritedSandbox.active) {
-				throw new Error(`TypeScript requires sandboxing, but no dedicated or inherited sandbox is available: ${resolvedPolicy.sandbox.reason}`);
+			if (!resolvedPolicy.sandbox.enabled) {
+				await fs.rm(runtimeDir, { recursive: true, force: true }).catch(() => {});
+				throw new Error(`TypeScript requires sandboxing, but sandboxing is disabled: ${resolvedPolicy.sandbox.reason}`);
 			}
 
 			onUpdate?.({ content: [{ type: "text", text: `Starting TypeScript (${profile})...` }] });
 
 			let exitCode: number | null = null;
 			let rawOutput = "";
-			let sandboxMode: "dedicated" | "inherited" | "none" = "dedicated";
+			const sandboxMode: "dedicated" = "dedicated";
 			let protocolResult: ProtocolResult | undefined;
 			const logs: string[] = [];
 			const artifacts: CodemodeArtifact[] = [];
@@ -968,9 +873,9 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			try {
-				if (inheritedSandbox.active) {
-					sandboxMode = "inherited";
-					const result = await runLocalCommand({
+				const sandboxManager = await initializeSandboxManager(resolvedPolicy.sandbox.config);
+				try {
+					const result = await runSandboxedCommand(sandboxManager, {
 						command,
 						cwd,
 						timeout,
@@ -984,58 +889,8 @@ export default function (pi: ExtensionAPI) {
 						onStderrData: handleStderrData,
 					});
 					exitCode = result.exitCode;
-				} else {
-					const sandboxManager = await initializeSandboxManager(resolvedPolicy.sandbox.config);
-					try {
-						const result = await runSandboxedCommand(sandboxManager, {
-							command,
-							cwd,
-							timeout,
-							signal,
-							env: runtimeEnv,
-							stdinMode: "pipe",
-							onSpawn: (child) => {
-								stdinWriter = child.stdin ?? undefined;
-							},
-							onStdoutData: handleStdoutData,
-							onStderrData: handleStderrData,
-						});
-						exitCode = result.exitCode;
-					} finally {
-						await sandboxManager.reset().catch(() => {});
-					}
-
-					if (isSandboxLaunchFailure(rawOutput)) {
-						if (!allowUnsandboxedFallback()) {
-							throw new Error(
-								`Dedicated TypeScript sandbox failed to apply. ${rawOutput.trim() || "No sandbox backend output."} ` +
-									"If Pi is already sandboxed, enable inherited sandbox mode by running TypeScript inside that session. " +
-									"Otherwise set PI_CODEMODE_ALLOW_UNSANDBOXED=1 to allow an explicit development-only fallback.",
-							);
-						}
-						sandboxMode = "none";
-						rawOutput = "";
-						stdoutBuffer = "";
-						stdinWriter = undefined;
-						protocolResult = undefined;
-						logs.length = 0;
-						bridgeCalls.length = 0;
-						artifacts.length = 0;
-						const fallbackResult = await runLocalCommand({
-							command,
-							cwd,
-							timeout,
-							signal,
-							env: runtimeEnv,
-							stdinMode: "pipe",
-							onSpawn: (child) => {
-								stdinWriter = child.stdin ?? undefined;
-							},
-							onStdoutData: handleStdoutData,
-							onStderrData: handleStderrData,
-						});
-						exitCode = fallbackResult.exitCode;
-					}
+				} finally {
+					await sandboxManager.reset().catch(() => {});
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -1055,10 +910,8 @@ export default function (pi: ExtensionAPI) {
 					artifacts,
 					bridgeCalls,
 					sandbox: {
-						enabled: resolvedPolicy.sandbox.enabled || inheritedSandbox.active,
-						reason: inheritedSandbox.active
-							? inheritedSandbox.reason ?? "Inherited outer session sandbox"
-							: resolvedPolicy.sandbox.reason,
+						enabled: resolvedPolicy.sandbox.enabled,
+						reason: resolvedPolicy.sandbox.reason,
 						mode: sandboxMode,
 					},
 				};
@@ -1093,10 +946,8 @@ export default function (pi: ExtensionAPI) {
 				artifacts,
 				bridgeCalls,
 				sandbox: {
-					enabled: resolvedPolicy.sandbox.enabled || inheritedSandbox.active,
-					reason: inheritedSandbox.active
-						? inheritedSandbox.reason ?? "Inherited outer session sandbox"
-						: resolvedPolicy.sandbox.reason,
+					enabled: resolvedPolicy.sandbox.enabled,
+					reason: resolvedPolicy.sandbox.reason,
 					mode: sandboxMode,
 				},
 			};
@@ -1116,8 +967,5 @@ export const __test__ = {
 	buildUserModule,
 	resolveExecutionCwd,
 	clampTimeout,
-	isSandboxLaunchFailure,
 	sanitizeArtifactName,
-	getInheritedSandboxInfo,
-	allowUnsandboxedFallback,
 };
