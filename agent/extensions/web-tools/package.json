@@ -10,6 +10,10 @@
     "test": "bun test"
   },
   "dependencies": {
-    "turndown": "^7.2.0"
+    "@mariozechner/pi-ai": "0.73.1",
+    "@mariozechner/pi-coding-agent": "0.73.1",
+    "@mariozechner/pi-tui": "0.73.1",
+    "turndown": "^7.2.0",
+    "typebox": "^1.1.24"
   }
 }

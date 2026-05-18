@@ -1,16 +1,16 @@
 {
-  "name": "tasks",
+  "name": "todo",
+  "private": true,
   "scripts": {
     "test": "bun test"
   },
   "dependencies": {
-    "@mariozechner/pi-agent-core": "0.73.1",
     "@mariozechner/pi-ai": "0.73.1",
     "@mariozechner/pi-coding-agent": "0.73.1",
     "@mariozechner/pi-tui": "0.73.1",
     "typebox": "^1.1.24"
   },
   "pi": {
-    "extensions": ["./task.ts"]
+    "extensions": ["./todo.ts"]
   }
 }

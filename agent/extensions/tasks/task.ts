@@ -29,7 +29,7 @@ import {
 	withFileMutationQueue,
 } from "@mariozechner/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { MAIN_SESSION_AGENT_CUSTOM_TYPE } from "../agent-state";
 import {
 	type AgentConfig,

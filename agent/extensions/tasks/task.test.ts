@@ -17,7 +17,7 @@ beforeAll(async () => {
 		StringEnum: (values: readonly string[]) => ({ type: "string", enum: [...values] }),
 	}));
 
-	mock.module("@sinclair/typebox", () => ({
+	mock.module("typebox", () => ({
 		Type: {
 			Object: (value: unknown) => value,
 			String: (value?: unknown) => value,

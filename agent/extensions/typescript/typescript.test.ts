@@ -15,7 +15,7 @@ beforeAll(async () => {
 			constructor(_text: string) {}
 		},
 	}));
-	mock.module("@sinclair/typebox", () => ({
+	mock.module("typebox", () => ({
 		Type: {
 			Object: (value: unknown) => value,
 			String: (value?: unknown) => value,

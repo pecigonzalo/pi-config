@@ -1,8 +1,9 @@
 {
+  "workspaces": ["agent/extensions/*"],
   "scripts": {
     "generate:footer-schema": "cd agent/extensions/footer && bun run generate:footer-schema",
     "prepare": "lefthook install",
-    "test": "bun run scripts/test-extensions.ts"
+    "test": "bun run --filter './agent/extensions/*' test"
   },
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "v0.73.1",

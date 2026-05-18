@@ -5,7 +5,7 @@ import type { Message } from "@mariozechner/pi-ai";
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { activePolicy, loadConfig } from "../permissions/config";
 import { resolveCodemodePolicy } from "../permissions/codemode";
 import { getEffectiveSandboxTmpDir, runSandboxedCommand } from "../permissions/sandbox";

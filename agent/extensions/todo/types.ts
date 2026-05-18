@@ -1,5 +1,5 @@
 import { StringEnum } from "@mariozechner/pi-ai";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 export type TodoStatus = "todo" | "in-progress" | "done";
 export type TodoPriority = "low" | "med" | "high";
