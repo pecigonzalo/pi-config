@@ -471,12 +471,47 @@ function getFinalOutput(messages: Message[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (msg.role === "assistant") {
-			for (const part of msg.content) {
-				if (part.type === "text") return part.text;
-			}
+			const textParts = msg.content
+				.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
+				.map((part) => part.text)
+				.filter((text) => text.length > 0);
+			if (textParts.length > 0) return textParts.join("\n");
 		}
 	}
 	return "";
+}
+
+function getTaskResultOutput(result: SingleResult): string {
+	const finalOutput = getFinalOutput(result.messages).trim();
+	if (finalOutput) return finalOutput;
+	const errorMessage = result.errorMessage?.trim();
+	if (errorMessage) return errorMessage;
+	const stderr = result.stderr.trim();
+	if (stderr) return stderr;
+	return "";
+}
+
+function formatTaskResultSection(result: SingleResult): string {
+	const status = result.exitCode === -1 ? "running" : result.exitCode === 0 ? "completed" : "failed";
+	const step = result.step !== undefined ? `Step ${result.step}` : "Task";
+	const lines = [`### ${step} — ${result.agent} (${status})`];
+	if (result.task) lines.push(`Task: ${createTaskPreview(result.task, 240)}`);
+	const output = getTaskResultOutput(result);
+	lines.push(output ? truncateOutput(output) : "(no output)");
+	return lines.join("\n");
+}
+
+function formatParallelResults(results: SingleResult[]): string {
+	const successCount = results.filter((result) => result.exitCode === 0).length;
+	const sections = results.map(formatTaskResultSection);
+	return [`Parallel: ${successCount}/${results.length} succeeded`, ...sections].join("\n\n");
+}
+
+function formatChainResults(results: SingleResult[]): string {
+	if (results.length === 0) return "Chain: 0/0 succeeded";
+	const successCount = results.filter((result) => result.exitCode === 0).length;
+	const sections = results.map(formatTaskResultSection);
+	return [`Chain: ${successCount}/${results.length} succeeded`, ...sections].join("\n\n");
 }
 
 type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
@@ -4246,7 +4281,7 @@ export default function (pi: ExtensionAPI) {
 							content: [
 								{
 									type: "text",
-									text: `Chain stopped at step ${preparedStep.step} (${preparedStep.rawStep.agent ?? preparedStep.rawStep.profile ?? "generic"}): ${errorMsg}`,
+									text: `Chain stopped at step ${preparedStep.step} (${preparedStep.rawStep.agent ?? preparedStep.rawStep.profile ?? "generic"}): ${errorMsg}\n\n${formatChainResults(results)}`,
 								},
 							],
 							details: makeDetails("chain")(results),
@@ -4256,7 +4291,7 @@ export default function (pi: ExtensionAPI) {
 					previousOutput = truncateOutput(getFinalOutput(result.messages));
 				}
 				return {
-					content: [{ type: "text", text: truncateOutput(getFinalOutput(results[results.length - 1].messages)) || "(no output)" }],
+					content: [{ type: "text", text: formatChainResults(results) }],
 					details: makeDetails("chain")(results),
 				};
 			}
@@ -4333,17 +4368,11 @@ export default function (pi: ExtensionAPI) {
 					},
 				);
 
-				const successCount = results.filter((r) => r.exitCode === 0).length;
-				const summaries = results.map((r) => {
-					const output = truncateOutput(getFinalOutput(r.messages));
-					const preview = output.slice(0, 100) + (output.length > 100 ? "..." : "");
-					return `[${r.agent}] ${r.exitCode === 0 ? "completed" : "failed"}: ${preview || "(no output)"}`;
-				});
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n")}`,
+							text: formatParallelResults(results),
 						},
 					],
 					details: makeDetails("parallel")(results),
@@ -4686,6 +4715,9 @@ export const __test__ = {
 	buildTaskInlineNoticeLines,
 	hasRuntimePersistOverride,
 	formatTaskRunList,
+	formatParallelResults,
+	formatChainResults,
+	getFinalOutput,
 	buildTaskWidgetLines,
 	normalizeChildSessionSnapshot: (data: unknown) => normalizeChildSessionSnapshot(data, TASK_CHILD_SESSION_METADATA_VERSION),
 	parseTaskTerminalBackendPreference,

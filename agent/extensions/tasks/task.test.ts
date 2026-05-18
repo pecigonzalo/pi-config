@@ -724,6 +724,65 @@ describe("tasks extension RPC UI relay", () => {
 	});
 });
 
+describe("task result formatting", () => {
+	function assistantResult(agent: string, step: number, text: string): any {
+		return {
+			agent,
+			agentSource: "user",
+			task: `review step ${step}`,
+			exitCode: 0,
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "text", text }],
+				},
+			],
+			stderr: "",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+			step,
+		};
+	}
+
+	it("returns full parallel child outputs instead of previews", () => {
+		const output = __test__.formatParallelResults([
+			assistantResult("gpt-reviewer", 1, "first full review line\nsecond full review line"),
+			assistantResult("claude-reviewer", 2, "another full review body with actionable detail"),
+		]);
+
+		expect(output).toContain("Parallel: 2/2 succeeded");
+		expect(output).toContain("### Step 1 — gpt-reviewer (completed)");
+		expect(output).toContain("first full review line\nsecond full review line");
+		expect(output).toContain("### Step 2 — claude-reviewer (completed)");
+		expect(output).toContain("another full review body with actionable detail");
+		expect(output).not.toContain("...");
+	});
+
+	it("returns every chain step output, not only the final step", () => {
+		const output = __test__.formatChainResults([
+			assistantResult("step-one", 1, "first step analysis"),
+			assistantResult("step-two", 2, "second step synthesis"),
+		]);
+
+		expect(output).toContain("Chain: 2/2 succeeded");
+		expect(output).toContain("first step analysis");
+		expect(output).toContain("second step synthesis");
+	});
+
+	it("joins multiple text parts in the final assistant message", () => {
+		const output = __test__.getFinalOutput([
+			{
+				role: "assistant",
+				content: [
+					{ type: "text", text: "part one" },
+					{ type: "text", text: "part two" },
+				],
+			},
+		] as any);
+
+		expect(output).toBe("part one\npart two");
+	});
+});
+
 describe("/tasks command parsing", () => {
 	it("parses steer commands with selector and message", () => {
 		const parsed = __test__.parseTasksCommand("steer task-1 focus only on auth");
