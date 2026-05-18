@@ -32,7 +32,12 @@ export const WebfetchParams = Type.Object({
 		}),
 	),
 	timeout: Type.Optional(
-		Type.Number({ description: `Timeout in seconds (1..${MAX_TIMEOUT_SECONDS}, default ${DEFAULT_TIMEOUT_SECONDS})` }),
+		Type.Number({
+			description: `Timeout in seconds (1..${MAX_TIMEOUT_SECONDS}, default ${DEFAULT_TIMEOUT_SECONDS})`,
+			minimum: 1,
+			maximum: MAX_TIMEOUT_SECONDS,
+			multipleOf: 1,
+		}),
 	),
 });
 
@@ -80,6 +85,15 @@ function cleanHtml(html: string): string {
 		.replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, "");
 }
 
+function safeCodePointToString(code: number): string | undefined {
+	if (!Number.isInteger(code) || code < 0 || code > 0x10FFFF) return undefined;
+	try {
+		return String.fromCodePoint(code);
+	} catch {
+		return undefined;
+	}
+}
+
 function decodeHtmlEntities(input: string): string {
 	const named: Record<string, string> = {
 		amp: "&",
@@ -93,11 +107,11 @@ function decodeHtmlEntities(input: string): string {
 	return input.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (match, entity: string) => {
 		if (entity.startsWith("#x") || entity.startsWith("#X")) {
 			const code = Number.parseInt(entity.slice(2), 16);
-			return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+			return safeCodePointToString(code) ?? match;
 		}
 		if (entity.startsWith("#")) {
 			const code = Number.parseInt(entity.slice(1), 10);
-			return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+			return safeCodePointToString(code) ?? match;
 		}
 		const lower = entity.toLowerCase();
 		return named[lower] ?? match;

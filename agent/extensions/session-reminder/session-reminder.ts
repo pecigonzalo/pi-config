@@ -47,14 +47,19 @@ function writeTerminalMessage(message: string): void {
   process.stderr.write(`${message}\n`);
 }
 
+function shouldWriteSessionReminder(reason: string): boolean {
+  return reason === "quit";
+}
+
 export const __test__ = {
   formatSessionReminder,
   getSessionTitle,
+  shouldWriteSessionReminder,
 };
 
 export default function sessionReminder(pi: ExtensionAPI) {
   pi.on("session_shutdown", async (event, ctx) => {
-    if (event.reason === "reload") {
+    if (!shouldWriteSessionReminder(event.reason)) {
       return;
     }
 

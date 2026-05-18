@@ -58,14 +58,21 @@ interface GitState {
   ts: number;
 }
 
-let gitCache: GitState | null = null;
-let gitPending = false;
-let gitGeneration = 0;
+const gitCache = new Map<string, GitState>();
+const gitPending = new Set<string>();
+const gitGeneration = new Map<string, number>();
+let gitEpoch = 0;
 const gitTtlMs = 1_000;
 
-function gitRun(args: string[], timeoutMs = 300): Promise<string | null> {
+function nextGitGeneration(cwd: string): number {
+  const next = (gitGeneration.get(cwd) ?? 0) + 1;
+  gitGeneration.set(cwd, next);
+  return next;
+}
+
+function gitRun(cwd: string, args: string[], timeoutMs = 300): Promise<string | null> {
   return new Promise((resolve) => {
-    const process = spawn("git", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const process = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     let finished = false;
 
@@ -89,14 +96,14 @@ function gitRun(args: string[], timeoutMs = 300): Promise<string | null> {
   });
 }
 
-async function gitFetch(): Promise<GitState> {
-  let branch = await gitRun(["branch", "--show-current"]);
+async function gitFetch(cwd: string): Promise<GitState> {
+  let branch = await gitRun(cwd, ["branch", "--show-current"]);
   if (branch === "") {
-    const sha = await gitRun(["rev-parse", "--short", "HEAD"]);
+    const sha = await gitRun(cwd, ["rev-parse", "--short", "HEAD"]);
     branch = sha ? `${sha} (detached)` : "detached";
   }
 
-  const raw = (await gitRun(["status", "--porcelain"], 500)) ?? "";
+  const raw = (await gitRun(cwd, ["status", "--porcelain"], 500)) ?? "";
   let staged = 0;
   let unstaged = 0;
   let untracked = 0;
@@ -116,31 +123,40 @@ async function gitFetch(): Promise<GitState> {
   return { branch, staged, unstaged, untracked, ts: Date.now() };
 }
 
-function gitGet(onRefresh: () => void): GitState {
+function gitGet(cwd: string, onRefresh: () => void): GitState {
   const now = Date.now();
-  if (gitCache && now - gitCache.ts < gitTtlMs) return gitCache;
+  const cached = gitCache.get(cwd);
+  if (cached && now - cached.ts < gitTtlMs) return cached;
 
-  if (!gitPending) {
-    gitPending = true;
-    const generation = ++gitGeneration;
-    void gitFetch()
+  if (!gitPending.has(cwd)) {
+    gitPending.add(cwd);
+    const generation = nextGitGeneration(cwd);
+    const epoch = gitEpoch;
+    void gitFetch(cwd)
       .then((state) => {
-        if (generation === gitGeneration) {
-          gitCache = state;
+        if (epoch === gitEpoch && generation === gitGeneration.get(cwd)) {
+          gitCache.set(cwd, state);
           onRefresh();
         }
       })
       .finally(() => {
-        gitPending = false;
+        gitPending.delete(cwd);
       });
   }
 
-  return gitCache ?? { branch: null, staged: 0, unstaged: 0, untracked: 0, ts: 0 };
+  return cached ?? { branch: null, staged: 0, unstaged: 0, untracked: 0, ts: 0 };
 }
 
-function gitInvalidate(): void {
-  gitCache = null;
-  gitGeneration++;
+function gitInvalidate(cwd?: string): void {
+  if (cwd) {
+    gitCache.delete(cwd);
+    gitPending.delete(cwd);
+    nextGitGeneration(cwd);
+  } else {
+    gitCache.clear();
+    gitPending.clear();
+    gitEpoch++;
+  }
 }
 
 function fmtNum(value: number): string {
@@ -281,7 +297,7 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
       const ctxMax = ctx.model?.contextWindow;
       const ctxPct = usage && ctxMax ? Math.min(100, (usage.tokens / ctxMax) * 100) : null;
       const thinkingLevel = pi.getThinkingLevel();
-      const git = gitGet(() => requestRender?.());
+      const git = gitGet(ctx.cwd, () => requestRender?.());
 
       switch (segment) {
         case "path": {

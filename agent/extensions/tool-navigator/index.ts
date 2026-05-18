@@ -1,5 +1,5 @@
 import type { Message, ToolCall } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
@@ -49,6 +49,31 @@ function formatTimestamp(timestamp: number): string {
 
 function shortId(value: string): string {
 	return value.length > 8 ? value.slice(0, 8) : value;
+}
+
+function formatKeyLabel(key: string): string {
+	return key
+		.split("+")
+		.map((part) => {
+			const token = part.trim().toLowerCase();
+			if (token === "ctrl") return "Ctrl";
+			if (token === "shift") return "Shift";
+			if (token === "alt") return "Alt";
+			if (token === "super") return "Super";
+			if (token === "escape" || token === "esc") return "Esc";
+			if (token === "return") return "Enter";
+			if (token === "pageup") return "PgUp";
+			if (token === "pagedown") return "PgDn";
+			if (token.length === 1) return token.toUpperCase();
+			return token.charAt(0).toUpperCase() + token.slice(1);
+		})
+		.join("+");
+}
+
+function getBindingHint(keybindings: KeybindingsManager, binding: string, fallback: string): string {
+	const keys = keybindings.getKeys(binding as any);
+	if (!Array.isArray(keys) || keys.length === 0) return fallback;
+	return keys.map((key) => formatKeyLabel(key)).join("/");
 }
 
 function stringifyCompact(value: unknown, maxLength = 240): string {
@@ -285,6 +310,7 @@ class ToolOutputViewerComponent {
 		startIndex: number,
 		private readonly tui: { terminal: { rows: number } },
 		private readonly theme: ExtensionContext["ui"]["theme"],
+		private readonly keybindings: KeybindingsManager,
 		private readonly onClose: () => void,
 	) {
 		this.index = Math.max(0, Math.min(startIndex, records.length - 1));
@@ -300,6 +326,11 @@ class ToolOutputViewerComponent {
 		this.cachedBodyLines = undefined;
 	}
 
+	private matchesBinding(data: string, binding: string, fallbackKeys: string[]): boolean {
+		if (this.keybindings.matches(data, binding as any)) return true;
+		return fallbackKeys.some((key) => matchesKey(data, key as any));
+	}
+
 	private setIndex(nextIndex: number): void {
 		if (this.records.length === 0) return;
 		const normalized = (nextIndex + this.records.length) % this.records.length;
@@ -310,20 +341,21 @@ class ToolOutputViewerComponent {
 	}
 
 	private getBodyLines(width: number): string[] {
-		const key = `${this.current.toolCallId}:${width}`;
+		const safeWidth = Math.max(1, width);
+		const key = `${this.current.toolCallId}:${safeWidth}`;
 		if (this.cachedBodyKey === key && this.cachedBodyLines) return this.cachedBodyLines;
 
 		const outputColor = this.theme.fg.bind(this.theme, "toolOutput");
 		const bodyText = outputColor(this.current.body);
-		const wrapped = wrapTextWithAnsi(bodyText, Math.max(20, width));
-		this.cachedWidth = width;
+		const wrapped = wrapTextWithAnsi(bodyText, safeWidth);
+		this.cachedWidth = safeWidth;
 		this.cachedBodyKey = key;
 		this.cachedBodyLines = wrapped.length > 0 ? wrapped : [outputColor("(no output)")];
 		return this.cachedBodyLines;
 	}
 
 	handleInput(data: string): void {
-		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+		if (this.matchesBinding(data, "tui.select.cancel", [Key.escape, Key.ctrl("c")])) {
 			this.onClose();
 			return;
 		}
@@ -341,19 +373,19 @@ class ToolOutputViewerComponent {
 		const viewportHeight = Math.max(8, Math.floor(this.tui.terminal.rows * 0.55));
 		const maxScroll = Math.max(0, this.getBodyLines(this.cachedWidth ?? 80).length - viewportHeight);
 
-		if (matchesKey(data, Key.up) || data === "k") {
+		if (this.matchesBinding(data, "tui.select.up", [Key.up]) || data === "k") {
 			this.scrollOffset = Math.max(0, this.scrollOffset - 1);
 			return;
 		}
-		if (matchesKey(data, Key.down) || data === "j") {
+		if (this.matchesBinding(data, "tui.select.down", [Key.down]) || data === "j") {
 			this.scrollOffset = Math.min(maxScroll, this.scrollOffset + 1);
 			return;
 		}
-		if (matchesKey(data, Key.pageUp)) {
+		if (this.matchesBinding(data, "tui.select.pageUp", [Key.pageUp])) {
 			this.scrollOffset = Math.max(0, this.scrollOffset - viewportHeight + 2);
 			return;
 		}
-		if (matchesKey(data, Key.pageDown) || matchesKey(data, Key.space)) {
+		if (this.matchesBinding(data, "tui.select.pageDown", [Key.pageDown]) || matchesKey(data, Key.space)) {
 			this.scrollOffset = Math.min(maxScroll, this.scrollOffset + viewportHeight - 2);
 			return;
 		}
@@ -367,31 +399,32 @@ class ToolOutputViewerComponent {
 	}
 
 	render(width: number): string[] {
+		const safeWidth = Math.max(1, width);
 		const record = this.current;
-		const bodyLines = this.getBodyLines(width);
+		const bodyLines = this.getBodyLines(safeWidth);
 		const headerLines: string[] = [];
 		const statusIcon = record.status === "error" ? this.theme.fg("error", "✗") : this.theme.fg("success", "✓");
 		const header = `${statusIcon} ${this.theme.fg("toolTitle", this.theme.bold(record.toolName))} ${this.theme.fg("muted", `${this.index + 1}/${this.records.length}`)}`;
-		headerLines.push(truncateToWidth(header, width));
+		headerLines.push(truncateToWidth(header, safeWidth));
 		headerLines.push(
 			truncateToWidth(
 				this.theme.fg("dim", `${formatTimestamp(record.timestamp)} · ${record.lineCount} line(s) · ${shortId(record.toolCallId)}`),
-				width,
+				safeWidth,
 			),
 		);
 		if (record.argsSummary) {
-			headerLines.push(...wrapTextWithAnsi(this.theme.fg("muted", `Call: `) + this.theme.fg("dim", record.argsSummary), width));
+			headerLines.push(...wrapTextWithAnsi(this.theme.fg("muted", `Call: `) + this.theme.fg("dim", record.argsSummary), safeWidth));
 		}
-		headerLines.push(truncateToWidth(this.theme.fg("borderMuted", "─".repeat(width)), width));
+		headerLines.push(truncateToWidth(this.theme.fg("borderMuted", "─".repeat(safeWidth)), safeWidth));
 
+		const scrollHint = `${getBindingHint(this.keybindings, "tui.select.up", "↑")}/${getBindingHint(this.keybindings, "tui.select.down", "↓")}`;
+		const pageHint = `${getBindingHint(this.keybindings, "tui.select.pageUp", "PgUp")}/${getBindingHint(this.keybindings, "tui.select.pageDown", "PgDn")}`;
+		const cancelHint = getBindingHint(this.keybindings, "tui.select.cancel", "Esc");
 		const footerLines: string[] = [
-			truncateToWidth(this.theme.fg("borderMuted", "─".repeat(width)), width),
+			truncateToWidth(this.theme.fg("borderMuted", "─".repeat(safeWidth)), safeWidth),
 			truncateToWidth(
-				this.theme.fg(
-					"dim",
-					"↑↓/PgUp/PgDn scroll • n/p or ←/→ switch • Home/End jump • Esc close",
-				),
-				width,
+				this.theme.fg("dim", `${scrollHint}/${pageHint} scroll • n/p or ←/→ switch • Home/End jump • ${cancelHint} close`),
+				safeWidth,
 			),
 		];
 
@@ -404,12 +437,7 @@ class ToolOutputViewerComponent {
 				? this.theme.fg("dim", `[scroll ${this.scrollOffset + 1}-${Math.min(this.scrollOffset + viewportHeight, bodyLines.length)} of ${bodyLines.length}]`)
 				: this.theme.fg("dim", `[${bodyLines.length} line(s)]`);
 
-		return [
-			...headerLines,
-			truncateToWidth(scrollInfo, width),
-			...visibleBody,
-			...footerLines,
-		];
+		return [...headerLines, truncateToWidth(scrollInfo, safeWidth), ...visibleBody, ...footerLines];
 	}
 
 	invalidate(): void {
@@ -430,12 +458,8 @@ async function showPicker(ctx: ExtensionContext, records: ToolOutputRecord[]): P
 		};
 	});
 
-	return ctx.ui.custom<number | null>((tui, theme, _keybindings, done) => {
+	return ctx.ui.custom<number | null>((tui, theme, keybindings, done) => {
 		const container = new Container();
-		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-		container.addChild(new Text(theme.fg("accent", theme.bold("Tool Navigator")), 1, 0));
-		container.addChild(new Text(theme.fg("muted", `Recent tool outputs on the current branch (${records.length})`), 1, 0));
-
 		const selectList = new SelectList(items, Math.min(Math.max(items.length, 1), 12), {
 			selectedPrefix: (text) => theme.fg("accent", text),
 			selectedText: (text) => theme.fg("accent", text),
@@ -445,15 +469,27 @@ async function showPicker(ctx: ExtensionContext, records: ToolOutputRecord[]): P
 		});
 		selectList.onSelect = (item) => done(Number(item.value));
 		selectList.onCancel = () => done(null);
-		container.addChild(selectList);
-		container.addChild(new Text(theme.fg("dim", "Type to filter • enter open • esc cancel"), 1, 0));
-		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+
+		const rebuild = () => {
+			container.clear();
+			container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+			container.addChild(new Text(theme.fg("accent", theme.bold("Tool Navigator")), 1, 0));
+			container.addChild(new Text(theme.fg("muted", `Recent tool outputs on the current branch (${records.length})`), 1, 0));
+			container.addChild(selectList);
+			const confirmHint = getBindingHint(keybindings, "tui.select.confirm", "Enter");
+			const cancelHint = getBindingHint(keybindings, "tui.select.cancel", "Esc");
+			container.addChild(new Text(theme.fg("dim", `Type to filter • ${confirmHint} open • ${cancelHint} cancel`), 1, 0));
+			container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+		};
+
+		rebuild();
 
 		return {
 			render(width: number) {
 				return container.render(width);
 			},
 			invalidate() {
+				rebuild();
 				container.invalidate();
 			},
 			handleInput(data: string) {
@@ -468,8 +504,8 @@ async function showPicker(ctx: ExtensionContext, records: ToolOutputRecord[]): P
 }
 
 async function showViewer(ctx: ExtensionContext, records: ToolOutputRecord[], startIndex: number): Promise<void> {
-	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-		return new ToolOutputViewerComponent(records, startIndex, tui, theme, () => done());
+	await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
+		return new ToolOutputViewerComponent(records, startIndex, tui, theme, keybindings, () => done());
 	}, {
 		overlay: true,
 		overlayOptions: { width: "82%", maxHeight: "85%", anchor: "center" },

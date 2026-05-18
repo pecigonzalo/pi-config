@@ -26,11 +26,12 @@ import {
 	SessionManager,
 	getAgentDir,
 	getMarkdownTheme,
+	keyHint,
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { MAIN_SESSION_AGENT_CUSTOM_TYPE } from "../agent-state";
+import { MAIN_SESSION_AGENT_CUSTOM_TYPE } from "../shared/agent-state";
 import {
 	type AgentConfig,
 	type AgentScope,
@@ -102,6 +103,7 @@ const TASKS_PARENT_SESSION_ROOT = path.join(getAgentDir(), "sessions");
 const TASKS_CHILD_SESSION_RUNS_DIR = "task-runs";
 const TASKS_CHILD_SESSION_FALLBACK_PARENT = "detached";
 const TASKS_NO_CURRENT_RUNS_MESSAGE = "No task runs in current session.";
+const TASKS_BROWSER_SHORTCUT = "ctrl+shift+t";
 const TASKS_COMMAND_USAGE = [
 	"/tasks",
 	"/tasks list",
@@ -117,6 +119,27 @@ const TASKS_COMMAND_USAGE = [
 
 const taskWidgetEnabledSessions = new Set<string>();
 const SUBPROCESS_SIGKILL_TIMEOUT_MS = 5000;
+
+function formatShortcutLabel(shortcut: string): string {
+	return shortcut
+		.split("+")
+		.map((part) => {
+			const token = part.trim().toLowerCase();
+			if (token === "ctrl") return "Ctrl";
+			if (token === "shift") return "Shift";
+			if (token === "alt") return "Alt";
+			if (token === "super") return "Super";
+			if (token === "escape" || token === "esc") return "Esc";
+			if (token === "return") return "Enter";
+			if (token === "pageup") return "PgUp";
+			if (token === "pagedown") return "PgDn";
+			if (token.length === 1) return token.toUpperCase();
+			return token.charAt(0).toUpperCase() + token.slice(1);
+		})
+		.join("+");
+}
+
+const TASKS_BROWSER_SHORTCUT_LABEL = formatShortcutLabel(TASKS_BROWSER_SHORTCUT);
 
 function terminateProcessWithEscalation(
 	proc: Pick<ChildProcessWithoutNullStreams, "kill" | "once" | "exitCode" | "signalCode">,
@@ -2940,13 +2963,13 @@ function buildTaskWidgetLines(
 	const lines = [fg("toolTitle", bold(themeIndependentTaskBrowserHeading(summary.runningRuns)))];
 	if (summary.totalRuns === 0) {
 		lines.push(fg("muted", TASKS_NO_CURRENT_RUNS_MESSAGE));
-		lines.push(fg("dim", "Use /tasks or Ctrl+Shift+T to browse · /tasks toggle hide"));
+		lines.push(fg("dim", `Use /tasks or ${TASKS_BROWSER_SHORTCUT_LABEL} to browse · /tasks toggle hide`));
 		return lines;
 	}
 	if (summary.runningRuns === 0) {
 		lines.push(fg("muted", "No active task runs in current session."));
 		lines.push(fg("dim", `Hidden non-active runs: ${summary.totalRuns}`));
-		lines.push(fg("dim", "Use /tasks or Ctrl+Shift+T to browse · /tasks toggle hide"));
+		lines.push(fg("dim", `Use /tasks or ${TASKS_BROWSER_SHORTCUT_LABEL} to browse · /tasks toggle hide`));
 		return lines;
 	}
 	for (const [index, run] of summary.runs.entries()) {
@@ -2972,7 +2995,7 @@ function buildTaskWidgetLines(
 	if (summary.totalRuns > summary.runningRuns) {
 		lines.push(fg("dim", `Hidden non-active runs: ${summary.totalRuns - summary.runningRuns}`));
 	}
-	lines.push(fg("dim", "Use /tasks or Ctrl+Shift+T to interact · /tasks toggle hide"));
+	lines.push(fg("dim", `Use /tasks or ${TASKS_BROWSER_SHORTCUT_LABEL} to interact · /tasks toggle hide`));
 	return lines;
 }
 
@@ -3298,8 +3321,8 @@ async function openTaskViewerOverlay(
 	}
 	const state = await buildTaskViewerOverlayState(scope, run, preferredStep);
 	const result = await ctx.ui.custom<TaskViewerOverlayResult | undefined>(
-		(_tui: unknown, theme: unknown, _keybindings: unknown, done: (value: TaskViewerOverlayResult | undefined) => void) =>
-			new TaskViewerOverlay(theme, state.overlayState, done),
+		(_tui: unknown, theme: unknown, keybindings: unknown, done: (value: TaskViewerOverlayResult | undefined) => void) =>
+			new TaskViewerOverlay(theme, state.overlayState, keybindings as any, done),
 		{
 			overlay: true,
 			overlayOptions: { anchor: "right-center", width: "55%", maxHeight: "85%", margin: 1 },
@@ -4069,7 +4092,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerShortcut("ctrl+shift+t", {
+	pi.registerShortcut(TASKS_BROWSER_SHORTCUT, {
 		description: "Browse task runs in the current session",
 		handler: async (ctx) => {
 			const runs = reconstructCurrentTaskRuns({
@@ -4532,7 +4555,7 @@ export default function (pi: ExtensionAPI) {
 				else if (displayItems.length === 0 && (r.uiNotices?.length ?? 0) === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 				else {
 					text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
-					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`)}`;
 				}
 				const usageStr = formatUsageStats(r.usage, r.model);
 				if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
@@ -4625,7 +4648,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				const usageStr = formatUsageStats(aggregateUsage(details.results));
 				if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
-				text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+				text += `\n${theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`)}`;
 				return new Text(text, 0, 0);
 			}
 
@@ -4708,7 +4731,7 @@ export default function (pi: ExtensionAPI) {
 					const usageStr = formatUsageStats(aggregateUsage(details.results));
 					if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
 				}
-				if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+				if (!expanded) text += `\n${theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`)}`;
 				return new Text(text, 0, 0);
 			}
 

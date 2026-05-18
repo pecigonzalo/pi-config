@@ -25,6 +25,21 @@ export type {
   FooterStarshipSettings,
 } from "./schema";
 
+export interface FooterConfigDiagnostic {
+  key: string;
+  message: string;
+}
+
+interface FooterConfigLoadResult {
+  config: FooterConfig;
+  diagnostics: FooterConfigDiagnostic[];
+}
+
+function formatErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  return String(error);
+}
+
 function parseJsonc(text: string): unknown {
   let noComments = "";
   let inString = false;
@@ -113,11 +128,17 @@ function parseJsonc(text: string): unknown {
   return JSON.parse(cleaned);
 }
 
-function readJsonFile(filePath: string): FooterConfigFile {
+function readJsonFile(filePath: string, diagnostics: FooterConfigDiagnostic[]): FooterConfigFile {
   try {
     const parsed = parseJsonc(fs.readFileSync(filePath, "utf-8"));
     return footerConfigFileSchema.parse(parsed);
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return {};
+
+    diagnostics.push({
+      key: `footer-config:${filePath}`,
+      message: `Footer config ignored (${filePath}): ${formatErrorMessage(error)}`,
+    });
     return {};
   }
 }
@@ -196,20 +217,38 @@ function mergeFooterConfig(base: FooterConfig, override: FooterConfigFile): Foot
   });
 }
 
-export function loadFooterConfig(cwd: string): FooterConfig {
+export function loadFooterConfig(cwd: string): FooterConfigLoadResult {
+  const diagnostics: FooterConfigDiagnostic[] = [];
+
   const extensionConfig = mergeFooterConfig(
     DEFAULT_FOOTER_CONFIG,
-    readJsonFile(path.join(getAgentDir(), "extensions", "footer", "footer.jsonc")),
+    readJsonFile(path.join(getAgentDir(), "extensions", "footer", "footer.jsonc"), diagnostics),
   );
-  const globalConfig = mergeFooterConfig(extensionConfig, readJsonFile(path.join(getAgentDir(), "footer.jsonc")));
-  return mergeFooterConfig(globalConfig, readJsonFile(path.join(cwd, ".pi", "footer.jsonc")));
+  const globalConfig = mergeFooterConfig(
+    extensionConfig,
+    readJsonFile(path.join(getAgentDir(), "footer.jsonc"), diagnostics),
+  );
+
+  return {
+    config: mergeFooterConfig(globalConfig, readJsonFile(path.join(cwd, ".pi", "footer.jsonc"), diagnostics)),
+    diagnostics,
+  };
 }
 
 export class FooterConfigController {
   private config: FooterConfig = DEFAULT_FOOTER_CONFIG;
+  private readonly reportedDiagnosticKeys = new Set<string>();
 
   onSessionStart(ctx: ExtensionContext): void {
-    this.config = loadFooterConfig(ctx.cwd);
+    const { config, diagnostics } = loadFooterConfig(ctx.cwd);
+    this.config = config;
+
+    if (!ctx.hasUI) return;
+    for (const diagnostic of diagnostics) {
+      if (this.reportedDiagnosticKeys.has(diagnostic.key)) continue;
+      this.reportedDiagnosticKeys.add(diagnostic.key);
+      ctx.ui.notify(diagnostic.message, "warning");
+    }
   }
 
   getActiveLayoutName(): FooterLayoutName {

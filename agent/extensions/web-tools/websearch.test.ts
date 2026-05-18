@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { executeWebsearch } from "./websearch";
+import { executeWebsearch, WebsearchParams } from "./websearch";
 
 const originalExaApiKey = process.env.EXA_API_KEY;
 const originalExaMcpUrl = process.env.EXA_MCP_URL;
@@ -14,6 +14,15 @@ function restoreEnv() {
 
 afterEach(() => {
 	restoreEnv();
+});
+
+describe("WebsearchParams", () => {
+	test("constrains limit schema to whole numbers in the supported range", () => {
+		const limit = (WebsearchParams as { properties: { limit: { minimum?: number; maximum?: number; multipleOf?: number } } }).properties.limit;
+		expect(limit.minimum).toBe(1);
+		expect(limit.maximum).toBe(10);
+		expect(limit.multipleOf).toBe(1);
+	});
 });
 
 describe("executeWebsearch", () => {

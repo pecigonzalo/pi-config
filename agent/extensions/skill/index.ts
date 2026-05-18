@@ -3,7 +3,6 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { resolveSkillPaths } from "../tasks/agents.js";
 
 const MAX_SKILL_BYTES = 50 * 1024;
 
@@ -30,8 +29,21 @@ interface SkillToolDetails {
 	truncated?: boolean;
 }
 
+interface SkillLookup {
+	byCanonicalName: Map<string, LoadedSkillRecord>;
+	byLookupKey: Map<string, LoadedSkillRecord>;
+}
+
 function normalizeSkillName(name: string): string {
 	return name.trim().replace(/^skill:/i, "").trim().toLowerCase();
+}
+
+function normalizePathKey(filePath: string): string {
+	return path.resolve(filePath).replace(/\\/g, "/").toLowerCase();
+}
+
+function isPathLike(value: string): boolean {
+	return value.includes("/") || value.includes("\\") || value.endsWith(".md") || value.endsWith(".MD");
 }
 
 function inferSkillName(filePath: string): string {
@@ -41,23 +53,43 @@ function inferSkillName(filePath: string): string {
 	return path.basename(filePath, path.extname(filePath));
 }
 
-async function normalizeResolvedSkillPath(resolvedPath: string): Promise<{ filePath: string; baseDir: string }> {
-	try {
-		const stat = await fs.stat(resolvedPath);
-		if (stat.isDirectory()) {
-			return {
-				filePath: path.join(resolvedPath, "SKILL.md"),
-				baseDir: resolvedPath,
-			};
-		}
-	} catch {
-		// Fall back to treating the resolved path as a file.
+function makeNameLookupKey(name: string): string {
+	return `name:${normalizeSkillName(name)}`;
+}
+
+function makePathLookupKey(filePath: string): string {
+	return `path:${normalizePathKey(filePath)}`;
+}
+
+function addLookupEntry(
+	lookup: SkillLookup,
+	key: string,
+	skill: LoadedSkillRecord,
+	mode: "force" | "if-missing" = "if-missing",
+): void {
+	if (mode === "if-missing" && lookup.byLookupKey.has(key)) return;
+	lookup.byLookupKey.set(key, skill);
+}
+
+function createSkillLookup(records: LoadedSkillRecord[]): SkillLookup {
+	const lookup: SkillLookup = {
+		byCanonicalName: new Map<string, LoadedSkillRecord>(),
+		byLookupKey: new Map<string, LoadedSkillRecord>(),
+	};
+
+	for (const record of records) {
+		const canonicalName = makeNameLookupKey(record.name);
+		lookup.byCanonicalName.set(canonicalName, record);
+		addLookupEntry(lookup, canonicalName, record, "force");
 	}
 
-	return {
-		filePath: resolvedPath,
-		baseDir: path.dirname(resolvedPath),
-	};
+	for (const record of records) {
+		addLookupEntry(lookup, makeNameLookupKey(inferSkillName(record.filePath)), record);
+		addLookupEntry(lookup, makePathLookupKey(record.filePath), record);
+		addLookupEntry(lookup, makePathLookupKey(record.baseDir), record);
+	}
+
+	return lookup;
 }
 
 function truncateUtf8(text: string, maxBytes: number): { text: string; truncated: boolean } {
@@ -96,18 +128,10 @@ function formatSkillContent(skill: LoadedSkillRecord, content: string, truncated
 
 	if (truncated) {
 		parts.push("");
-		parts.push(`[Output truncated at ${MAX_SKILL_BYTES / 1024}KB. Use read(path: \"${skill.filePath}\", offset: ...) if you need more.]`);
+		parts.push(`[Output truncated at ${MAX_SKILL_BYTES / 1024}KB. Use read(path: "${skill.filePath}", offset: ...) if you need more.]`);
 	}
 
 	return parts.join("\n");
-}
-
-function getSkillFromPromptState(
-	loadedSkills: Map<string, LoadedSkillRecord>,
-	requestedName: string,
-): LoadedSkillRecord | null {
-	const normalized = normalizeSkillName(requestedName);
-	return loadedSkills.get(normalized) ?? null;
 }
 
 function shortenPath(filePath: string | undefined): string {
@@ -131,53 +155,56 @@ function getSummaryText(result: { details?: SkillToolDetails }, fallbackName?: s
 	return summary;
 }
 
-async function resolveSkillRecord(
-	loadedSkills: Map<string, LoadedSkillRecord>,
-	requestedName: string,
-	cwd: string,
-): Promise<LoadedSkillRecord | null> {
-	const fromPrompt = getSkillFromPromptState(loadedSkills, requestedName);
-	if (fromPrompt) {
-		return fromPrompt;
-	}
+function resolveSkillRecord(lookup: SkillLookup, requestedName: string, cwd: string): LoadedSkillRecord | null {
+	const byName = lookup.byLookupKey.get(makeNameLookupKey(requestedName));
+	if (byName) return byName;
 
-	const normalizedName = normalizeSkillName(requestedName);
-	const { paths, missing } = resolveSkillPaths([normalizedName], cwd);
-	if (missing.length > 0 || paths.length === 0) {
-		return null;
-	}
+	if (!isPathLike(requestedName)) return null;
+	const requestedPath = path.isAbsolute(requestedName) ? requestedName : path.resolve(cwd, requestedName);
 
-	const normalizedPath = await normalizeResolvedSkillPath(paths[0]);
-	return {
-		name: inferSkillName(normalizedPath.filePath),
-		filePath: normalizedPath.filePath,
-		baseDir: normalizedPath.baseDir,
-	};
+	return (
+		lookup.byLookupKey.get(makePathLookupKey(requestedPath)) ??
+		lookup.byLookupKey.get(makePathLookupKey(requestedName)) ??
+		null
+	);
 }
 
+function extractLoadedSkills(skills: unknown[] | undefined): LoadedSkillRecord[] {
+	const result: LoadedSkillRecord[] = [];
+
+	for (const skill of skills ?? []) {
+		if (!skill || typeof skill !== "object") continue;
+		const candidate = skill as Partial<LoadedSkillRecord>;
+		if (typeof candidate.name !== "string") continue;
+		if (typeof candidate.filePath !== "string") continue;
+		if (typeof candidate.baseDir !== "string") continue;
+
+		result.push({
+			name: candidate.name,
+			description: typeof candidate.description === "string" ? candidate.description : undefined,
+			filePath: candidate.filePath,
+			baseDir: candidate.baseDir,
+			disableModelInvocation:
+				typeof candidate.disableModelInvocation === "boolean" ? candidate.disableModelInvocation : undefined,
+		});
+	}
+
+	return result;
+}
+
+export const __test__ = {
+	createSkillLookup,
+	resolveSkillRecord,
+	extractLoadedSkills,
+	inferSkillName,
+	normalizeSkillName,
+};
+
 export default function skillExtension(pi: ExtensionAPI) {
-	const loadedSkills = new Map<string, LoadedSkillRecord>();
+	let skillLookup: SkillLookup = createSkillLookup([]);
 
 	pi.on("before_agent_start", async (event) => {
-		loadedSkills.clear();
-		for (const skill of event.systemPromptOptions.skills ?? []) {
-			if (!skill || typeof skill !== "object") continue;
-			const candidate = skill as Partial<LoadedSkillRecord>;
-			if (typeof candidate.name !== "string") continue;
-			if (typeof candidate.filePath !== "string") continue;
-			if (typeof candidate.baseDir !== "string") continue;
-
-			loadedSkills.set(normalizeSkillName(candidate.name), {
-				name: candidate.name,
-				description: typeof candidate.description === "string" ? candidate.description : undefined,
-				filePath: candidate.filePath,
-				baseDir: candidate.baseDir,
-				disableModelInvocation:
-					typeof candidate.disableModelInvocation === "boolean"
-						? candidate.disableModelInvocation
-						: undefined,
-			});
-		}
+		skillLookup = createSkillLookup(extractLoadedSkills(event.systemPromptOptions.skills));
 	});
 
 	pi.registerTool({
@@ -199,9 +226,9 @@ export default function skillExtension(pi: ExtensionAPI) {
 				throw new Error("Skill name is required.");
 			}
 
-			const skill = await resolveSkillRecord(loadedSkills, requestedName, ctx.cwd);
+			const skill = resolveSkillRecord(skillLookup, requestedName, ctx.cwd);
 			if (!skill) {
-				const available = Array.from(loadedSkills.values())
+				const available = Array.from(skillLookup.byCanonicalName.values())
 					.map((entry) => entry.name)
 					.sort((a, b) => a.localeCompare(b));
 				const suffix = available.length > 0 ? ` Available loaded skills: ${available.join(", ")}.` : "";
@@ -241,10 +268,7 @@ export default function skillExtension(pi: ExtensionAPI) {
 		renderResult(result, _options, theme) {
 			const details = result.details as SkillToolDetails | undefined;
 			const text = result.content[0];
-			const fallbackName =
-				text?.type === "text"
-					? text.text.match(/^Loaded skill: (.+)$/m)?.[1]?.trim()
-					: undefined;
+			const fallbackName = text?.type === "text" ? text.text.match(/^Loaded skill: (.+)$/m)?.[1]?.trim() : undefined;
 			return new Text(theme.fg("success", getSummaryText({ details }, fallbackName)), 0, 0);
 		},
 	});

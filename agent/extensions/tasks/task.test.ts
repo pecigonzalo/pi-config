@@ -51,6 +51,7 @@ beforeAll(async () => {
 	mock.module("@earendil-works/pi-coding-agent", () => ({
 		getAgentDir: () => testAgentDir,
 		getMarkdownTheme: () => ({}),
+		keyHint: (_binding: string, description: string) => `Ctrl+O ${description}`,
 		withFileMutationQueue: async (_filePath: string, mutation: () => Promise<void>) => mutation(),
 		SessionManager: {
 			create: (cwd: string) => {

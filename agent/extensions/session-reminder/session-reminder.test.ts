@@ -82,4 +82,11 @@ describe("session reminder", () => {
       );
     });
   });
+
+  it("only writes reminders for process quit shutdowns", () => {
+    expect(__test__.shouldWriteSessionReminder("quit")).toBe(true);
+    for (const reason of ["reload", "new", "resume", "fork"]) {
+      expect(__test__.shouldWriteSessionReminder(reason)).toBe(false);
+    }
+  });
 });
