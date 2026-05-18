@@ -322,8 +322,8 @@
           "tool": "bash",
           "action": "block",
           "reason": "read-only profile uses structured read tools only",
-        }
-      ]
+        },
+      ],
     },
     "isolated": {
       "inherit": false,
@@ -367,9 +367,9 @@
           "tool": "bash",
           "action": "block",
           "reason": "isolated profile",
-        }
-      ]
-    }
+        },
+      ],
+    },
   },
   "agents": {
     "orchestrator": {
@@ -388,9 +388,9 @@
           "tool": "edit",
           "action": "block",
           "reason": "Orchestrator should delegate file mutation",
-        }
-      ]
-    }
+        },
+      ],
+    },
   },
   // Optional bash sandbox backend. If the sandbox runtime is installed,
   // workspace-write and plan modes enable it automatically unless disabled.
