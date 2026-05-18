@@ -421,9 +421,6 @@
   "sandbox": {
     "enabled": true,
     "allowSshAuthSock": true,
-    // Allow normal workspace writes plus Git index/object updates needed for staging and committing.
-    // Sandbox-runtime still blocks sensitive Git internals such as .git/config and .git/hooks/.
-    "allowWrite": [".", ".git"],
     "denyRead": ["~/.aws", "~/.gnupg"],
   },
 }
