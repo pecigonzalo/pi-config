@@ -389,6 +389,30 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Ask helper ────────────────────────────────────────────────────────────
 
+	const blockOption = "Block";
+	const blockAndSteerOption = "Block and steer agent";
+
+	async function promptForBlockReason(ctx: ExtensionContext): Promise<string | undefined> {
+		const message = await ctx.ui.input(
+			"Reject permission request",
+			"Optional: tell the agent what to do instead",
+		);
+		return message?.trim() || undefined;
+	}
+
+	async function handleBlockChoice(
+		choice: string | undefined,
+		ctx: ExtensionContext,
+		reason = "Blocked by user",
+	): Promise<{ block: true; reason: string } | undefined> {
+		if (choice === blockAndSteerOption) {
+			const steeringReason = await promptForBlockReason(ctx);
+			return { block: true, reason: steeringReason ?? reason };
+		}
+		if (choice === blockOption || choice === undefined) return { block: true, reason };
+		return undefined;
+	}
+
 	async function askPermission(
 		toolName: PermissionToolName,
 		input: PermissionToolInput,
@@ -446,12 +470,19 @@ export default function (pi: ExtensionAPI) {
 			const saveExactLabel = approvalTarget === command
 				? `Save exact command permanently (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`
 				: `Save exact segment permanently (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`;
-			const options = ["Allow once", allowExactLabel, saveExactLabel, ...prefixSessionToValue.keys(), ...prefixPermanentToValue.keys(), "Block"];
+			const options = [
+				"Allow once",
+				allowExactLabel,
+				saveExactLabel,
+				...prefixSessionToValue.keys(),
+				...prefixPermanentToValue.keys(),
+				blockAndSteerOption,
+				blockOption,
+			];
 			const choice = await ctx.ui.select(`⚠️  Permission required\n\n${bashLines.join("\n")}`, options);
 
-			if (choice === "Block" || choice === undefined) {
-				return { block: true, reason: "Blocked by user" };
-			}
+			const block = await handleBlockChoice(choice, ctx);
+			if (block) return block;
 
 			if (choice === allowExactLabel) {
 				sessionBashApprovals.push({
@@ -549,14 +580,14 @@ export default function (pi: ExtensionAPI) {
 			...(allowParentFolderPermanentLabel ? [allowParentFolderPermanentLabel] : []),
 			...(allowGitRepoSessionLabel ? [allowGitRepoSessionLabel] : []),
 			...(allowGitRepoPermanentLabel ? [allowGitRepoPermanentLabel] : []),
-			"Block",
+			blockAndSteerOption,
+			blockOption,
 		];
 
 		const choice = await ctx.ui.select(`⚠️  Permission required\n\n${lines.join("\n")}`, options);
 
-		if (choice === "Block" || choice === undefined) {
-			return { block: true, reason: "Blocked by user" };
-		}
+		const block = await handleBlockChoice(choice, ctx);
+		if (block) return block;
 
 		if (choice === "Allow tool for this session") {
 			sessionAllows.add(toolName);
@@ -674,12 +705,12 @@ export default function (pi: ExtensionAPI) {
 			...(allowParentFolderPermanentLabel ? [allowParentFolderPermanentLabel] : []),
 			...(allowGitRepoSessionLabel ? [allowGitRepoSessionLabel] : []),
 			...(allowGitRepoPermanentLabel ? [allowGitRepoPermanentLabel] : []),
-			"Block",
+			blockAndSteerOption,
+			blockOption,
 		]);
 
-		if (choice === "Block" || choice === undefined) {
-			return { block: true, reason: "Blocked by user" };
-		}
+		const block = await handleBlockChoice(choice, ctx);
+		if (block) return block;
 
 		if (choice === allowPathSessionLabel) {
 			addSessionPathApprovals(toolName, approvalTargets ? [approvalTargets.targetPath] : externalPaths, projectRoot);
