@@ -4,7 +4,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@mariozechner/pi-coding-agent": "0.73.1"
+    "@earendil-works/pi-coding-agent": "0.75.1"
   },
   "pi": {
     "extensions": [

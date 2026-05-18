@@ -5,7 +5,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 
 export interface TaskTranscriptPreview {
 	lines: string[];

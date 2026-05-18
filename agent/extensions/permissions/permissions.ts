@@ -73,9 +73,9 @@
  *                  (structured filesystem tools only)
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { createBashTool, getAgentDir } from "@mariozechner/pi-coding-agent";
-import { matchesKey, Key, Text } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createBashTool, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { matchesKey, Key, Text } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {

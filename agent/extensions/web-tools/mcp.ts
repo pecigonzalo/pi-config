@@ -1,4 +1,4 @@
-import { createTimedSignal } from "./shared";
+import { createTimedSignal, decodeBuffer, parseContentType, readBodyWithLimit } from "./shared";
 
 export interface McpToolCallOptions {
 	url: string;
@@ -9,6 +9,8 @@ export interface McpToolCallOptions {
 	fetchImpl?: typeof fetch;
 	headers?: Record<string, string>;
 }
+
+export const MCP_MAX_RESPONSE_BYTES = 512 * 1024;
 
 interface McpPayload {
 	result?: {
@@ -63,7 +65,7 @@ export function extractMcpTextResponse(body: string): string | undefined {
 
 export async function callMcpTool(
 	options: McpToolCallOptions,
-): Promise<{ response: Response; text: string }> {
+): Promise<{ response: Response; text: string; bodyTruncated: boolean }> {
 	const fetchImpl = options.fetchImpl ?? fetch;
 	const timedSignal = createTimedSignal(options.signal, options.timeoutSeconds);
 
@@ -95,16 +97,22 @@ export async function callMcpTool(
 			throw error;
 		}
 
-		const body = await response.text();
+		const bodyRead = await readBodyWithLimit(response.body, MCP_MAX_RESPONSE_BYTES, timedSignal.signal);
+		const contentType = parseContentType(response.headers.get("content-type"));
+		const body = decodeBuffer(bodyRead.buffer, contentType.charset);
 		const text = extractMcpTextResponse(body);
 		if (!response.ok) {
-			throw new Error(`MCP endpoint returned HTTP ${response.status}${text ? `: ${text}` : ""}`);
+			const truncationHint = bodyRead.truncated ? ` (response body truncated at ${Math.round(MCP_MAX_RESPONSE_BYTES / 1024)}KB)` : "";
+			throw new Error(`MCP endpoint returned HTTP ${response.status}${text ? `: ${text}` : ""}${truncationHint}`);
 		}
 		if (!text) {
+			if (bodyRead.truncated) {
+				throw new Error(`MCP response exceeded ${Math.round(MCP_MAX_RESPONSE_BYTES / 1024)}KB and was truncated before text extraction`);
+			}
 			throw new Error("MCP response did not contain any text output");
 		}
 
-		return { response, text };
+		return { response, text, bodyTruncated: bodyRead.truncated };
 	} finally {
 		timedSignal.cleanup();
 	}

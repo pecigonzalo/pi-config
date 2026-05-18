@@ -4,7 +4,7 @@ import {
 	formatSize,
 	type TruncationResult,
 	truncateHead,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 export const DEFAULT_TIMEOUT_SECONDS = 15;
 export const MAX_TIMEOUT_SECONDS = 120;

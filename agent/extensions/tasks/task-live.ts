@@ -1,6 +1,6 @@
 import { type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import type { Message } from "@mariozechner/pi-ai";
+import type { Message } from "@earendil-works/pi-ai";
 
 export type TaskTransport = "json" | "rpc";
 

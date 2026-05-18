@@ -2,6 +2,7 @@
  * @fileoverview Todo action engine, validation rules, and selectors.
  */
 
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import { cloneTodos, createSnapshot, pruneTodoHistory, type TodoState } from "./state";
 import { filteredTodoPool, listText, statusLabel, unfinishedBlockers } from "./presenters";
 export { filteredTodoPool, listText, statusLabel, unfinishedBlockers } from "./presenters";
@@ -52,6 +53,22 @@ const allowedParams: Record<TodoAction, Set<string>> = {
 	clear: new Set([]),
 	set_wip_limit: new Set(["limit"]),
 };
+
+const TODO_OUTPUT_MAX_LINES = Math.min(DEFAULT_MAX_LINES, 700);
+const TODO_OUTPUT_MAX_BYTES = Math.min(DEFAULT_MAX_BYTES, 30 * 1024);
+
+function truncateTodoOutput(text: string): string {
+	const truncation = truncateHead(text, {
+		maxLines: TODO_OUTPUT_MAX_LINES,
+		maxBytes: TODO_OUTPUT_MAX_BYTES,
+	});
+	if (!truncation.truncated) return truncation.content;
+
+	const omittedLines = truncation.totalLines - truncation.outputLines;
+	const omittedBytes = truncation.totalBytes - truncation.outputBytes;
+	const notice = `[Output truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}). ${omittedLines} lines (${formatSize(omittedBytes)}) omitted.]`;
+	return `${truncation.content}\n\n${notice}`;
+}
 
 function now(): string {
 	return new Date().toISOString();
@@ -249,7 +266,7 @@ export function executeTodoAction(
 			const includeArchived = params.includeArchived ?? false;
 			return {
 				state: nextState,
-				result: ok(nextState, "list", listText(nextState, view, includeArchived, params.status, params.tag)),
+				result: ok(nextState, "list", truncateTodoOutput(listText(nextState, view, includeArchived, params.status, params.tag))),
 			};
 		}
 
@@ -460,7 +477,7 @@ export function executeTodoAction(
 			}
 
 			addHistory(todo, "read");
-			return { state: nextState, result: ok(nextState, "read", readTodoText(todo)) };
+			return { state: nextState, result: ok(nextState, "read", truncateTodoOutput(readTodoText(todo))) };
 		}
 
 		case "history": {
@@ -473,7 +490,8 @@ export function executeTodoAction(
 				const lines = todo.history
 					.slice(-limit)
 					.map((entry) => `${entry.timestamp} ${entry.type}${entry.meta ? ` ${JSON.stringify(entry.meta)}` : ""}`);
-				return { state: nextState, result: ok(nextState, "history", lines.length ? lines.join("\n") : `No history for #${todo.id}`) };
+				const historyText = lines.length ? lines.join("\n") : `No history for #${todo.id}`;
+				return { state: nextState, result: ok(nextState, "history", truncateTodoOutput(historyText)) };
 			}
 
 			const all = nextState.todos
@@ -481,7 +499,8 @@ export function executeTodoAction(
 				.sort((left, right) => left.timestamp.localeCompare(right.timestamp))
 				.slice(-limit)
 				.map((entry) => `${entry.timestamp} #${entry.todoId} ${entry.type} (${entry.title})`);
-			return { state: nextState, result: ok(nextState, "history", all.length ? all.join("\n") : "No history yet") };
+			const historyText = all.length ? all.join("\n") : "No history yet";
+			return { state: nextState, result: ok(nextState, "history", truncateTodoOutput(historyText)) };
 		}
 
 		case "archive": {

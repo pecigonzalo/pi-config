@@ -2,7 +2,7 @@
  * @fileoverview Todo presentation helpers for text and interactive views.
  */
 
-import type { Theme } from "@mariozechner/pi-coding-agent";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TodoBrowserRow, TodoPanelRow } from "./components";
 import type { TodoState } from "./state";
 import type { TodoEffort, TodoItem, TodoPriority, TodoStatus, TodoView } from "./types";

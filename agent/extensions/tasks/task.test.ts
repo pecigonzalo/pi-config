@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as syncFs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { EventEmitter } from "node:events";
 
 let taskExtension: Awaited<ReturnType<typeof import("./task")>>["default"];
 let __test__: Awaited<ReturnType<typeof import("./task")>>["__test"];
@@ -13,7 +14,7 @@ let mockResources: any;
 beforeAll(async () => {
 	testAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tasks-ext-test-"));
 
-	mock.module("@mariozechner/pi-ai", () => ({
+	mock.module("@earendil-works/pi-ai", () => ({
 		StringEnum: (values: readonly string[]) => ({ type: "string", enum: [...values] }),
 	}));
 
@@ -27,7 +28,7 @@ beforeAll(async () => {
 		},
 	}));
 
-	mock.module("@mariozechner/pi-tui", () => ({
+	mock.module("@earendil-works/pi-tui", () => ({
 		CURSOR_MARKER: "",
 		Container: class {
 			addChild(_child: unknown) {}
@@ -47,7 +48,7 @@ beforeAll(async () => {
 		wrapTextWithAnsi: (text: string, _width: number) => [text],
 	}));
 
-	mock.module("@mariozechner/pi-coding-agent", () => ({
+	mock.module("@earendil-works/pi-coding-agent", () => ({
 		getAgentDir: () => testAgentDir,
 		getMarkdownTheme: () => ({}),
 		withFileMutationQueue: async (_filePath: string, mutation: () => Promise<void>) => mutation(),
@@ -977,5 +978,37 @@ describe("/tasks selector precedence", () => {
 		expect(byChildSession.error).toBeUndefined();
 		expect(byChildSession.resolution?.matchedBy).toBe("childSession");
 		expect(byChildSession.resolution?.step?.snapshot.childSessionId).toBe("focus-child");
+	});
+});
+
+describe("tasks process termination escalation", () => {
+	class FakeProcess extends EventEmitter {
+		exitCode: number | null = null;
+		signalCode: NodeJS.Signals | null = null;
+		signals: string[] = [];
+
+		kill(signal: NodeJS.Signals): boolean {
+			this.signals.push(signal);
+			if (signal === "SIGKILL") this.signalCode = signal;
+			return true;
+		}
+	}
+
+	it("escalates to SIGKILL when the process stays running", async () => {
+		const proc = new FakeProcess();
+		__test__.terminateProcessWithEscalation(proc as any, { timeoutMs: 10 });
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(proc.signals).toEqual(["SIGTERM", "SIGKILL"]);
+	});
+
+	it("does not escalate once close is observed", async () => {
+		const proc = new FakeProcess();
+		__test__.terminateProcessWithEscalation(proc as any, { timeoutMs: 20 });
+		setTimeout(() => {
+			proc.exitCode = 0;
+			proc.emit("close", 0);
+		}, 5);
+		await new Promise((resolve) => setTimeout(resolve, 40));
+		expect(proc.signals).toEqual(["SIGTERM"]);
 	});
 });

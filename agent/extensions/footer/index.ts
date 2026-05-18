@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createSessionContextItems } from "./builtins/context-items";
 import { createStarshipItems } from "./builtins/starship-item";
 import { createLegacyChromeController } from "./compat/legacy-chrome";

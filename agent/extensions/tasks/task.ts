@@ -17,9 +17,9 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { Message } from "@mariozechner/pi-ai";
-import { StringEnum } from "@mariozechner/pi-ai";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { Message } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	type ExtensionAPI,
 	type SessionEntry,
@@ -27,8 +27,8 @@ import {
 	getAgentDir,
 	getMarkdownTheme,
 	withFileMutationQueue,
-} from "@mariozechner/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { MAIN_SESSION_AGENT_CUSTOM_TYPE } from "../agent-state";
 import {
@@ -116,6 +116,39 @@ const TASKS_COMMAND_USAGE = [
 ].join(" | ");
 
 const taskWidgetEnabledSessions = new Set<string>();
+const SUBPROCESS_SIGKILL_TIMEOUT_MS = 5000;
+
+function terminateProcessWithEscalation(
+	proc: Pick<ChildProcessWithoutNullStreams, "kill" | "once" | "exitCode" | "signalCode">,
+	options?: { timeoutMs?: number; isExited?: () => boolean },
+): void {
+	let exited = options?.isExited?.() ?? (proc.exitCode !== null || proc.signalCode !== null);
+	if (exited) return;
+
+	let killTimer: ReturnType<typeof setTimeout> | undefined;
+	const markExited = () => {
+		exited = true;
+		if (killTimer) clearTimeout(killTimer);
+	};
+	proc.once("exit", markExited);
+	proc.once("close", markExited);
+
+	try {
+		proc.kill("SIGTERM");
+	} catch {
+		return;
+	}
+
+	killTimer = setTimeout(() => {
+		if (exited || options?.isExited?.()) return;
+		try {
+			proc.kill("SIGKILL");
+		} catch {
+			// Ignore best-effort cleanup failures.
+		}
+	}, options?.timeoutMs ?? SUBPROCESS_SIGKILL_TIMEOUT_MS);
+	killTimer.unref?.();
+}
 
 // Recursion depth guard
 const DEFAULT_MAX_SUBAGENT_DEPTH = 2;
@@ -1915,6 +1948,7 @@ async function runSingleAgentViaJson(
 				},
 			});
 			let buffer = "";
+			let procClosed = false;
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
@@ -1965,21 +1999,21 @@ async function runSingleAgentViaJson(
 			});
 
 			proc.on("close", (code) => {
+				procClosed = true;
 				if (buffer.trim()) processLine(buffer);
 				resolve(code ?? 0);
 			});
 
 			proc.on("error", () => {
+				procClosed = true;
 				resolve(1);
 			});
 
 			if (signal) {
 				const killProc = () => {
+					if (wasAborted) return;
 					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
+					terminateProcessWithEscalation(proc, { isExited: () => procClosed });
 				};
 				if (signal.aborted) killProc();
 				else signal.addEventListener("abort", killProc, { once: true });
@@ -2334,12 +2368,10 @@ async function runSingleAgentViaRpc(
 
 		if (signal) {
 			const killProc = () => {
+				if (rpcAborted) return;
 				rpcAborted = true;
 				controller.status = "aborted";
-				proc.kill("SIGTERM");
-				setTimeout(() => {
-					if (!proc.killed) proc.kill("SIGKILL");
-				}, 5000);
+				terminateProcessWithEscalation(proc, { isExited: () => closed });
 			};
 			if (signal.aborted) killProc();
 			else signal.addEventListener("abort", killProc, { once: true });
@@ -3797,11 +3829,7 @@ export default function (pi: ExtensionAPI) {
 		setTaskWidgetEnabled(ctx, false);
 		clearTaskUiChrome(ctx);
 		for (const controller of listLiveTaskControllers()) {
-			try {
-				controller.proc.kill("SIGTERM");
-			} catch {
-				// Ignore best-effort cleanup failures.
-			}
+			terminateProcessWithEscalation(controller.proc);
 		}
 		clearLiveTaskControllers();
 	});
@@ -4711,4 +4739,5 @@ export const __test__ = {
 		resolveTaskOriginForBranch(entries, createTaskPreview, leafId),
 	resolveTaskSelector,
 	setTaskWidgetEnabled,
+	terminateProcessWithEscalation,
 };

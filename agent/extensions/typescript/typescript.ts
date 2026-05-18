@@ -1,23 +1,69 @@
-import { spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { Message } from "@mariozechner/pi-ai";
-import { StringEnum } from "@mariozechner/pi-ai";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import type { Message } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	type ExtensionAPI,
+	type TruncationResult,
+	truncateHead,
+} from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { activePolicy, loadConfig } from "../permissions/config";
 import { resolveCodemodePolicy } from "../permissions/codemode";
 import { getEffectiveSandboxTmpDir, runSandboxedCommand } from "../permissions/sandbox";
 import type { CodemodeCapability, CodemodeProfileName, SandboxManagerLike } from "../permissions/shared";
-import { discoverAgents, type AgentScope } from "../tasks/agents";
+import * as taskAgents from "../tasks/agents.js";
+import type { AgentScope } from "../tasks/agents.js";
 
 const LOG_PREFIX = "__PI_CODEMODE_LOG__";
 const RESULT_PREFIX = "__PI_CODEMODE_RESULT__";
 const BRIDGE_REQUEST_PREFIX = "__PI_CODEMODE_BRIDGE_REQUEST__";
 const BRIDGE_RESPONSE_PREFIX = "__PI_CODEMODE_BRIDGE_RESPONSE__";
 const MAX_LOG_LINES = 200;
+const MAX_LOG_BYTES = 32 * 1024;
+const MAX_LOG_LINE_CHARS = 2_000;
+const MAX_RAW_OUTPUT_BYTES = 256 * 1024;
 const MAX_RESULT_PREVIEW = 8_000;
+const TOOL_OUTPUT_MAX_LINES = Math.min(DEFAULT_MAX_LINES, 700);
+const TOOL_OUTPUT_MAX_BYTES = Math.min(DEFAULT_MAX_BYTES, 30 * 1024);
+const SUBPROCESS_SIGKILL_TIMEOUT_MS = 5000;
+
+function terminateProcessWithEscalation(
+	proc: Pick<ChildProcessWithoutNullStreams, "kill" | "once" | "exitCode" | "signalCode">,
+	options?: { timeoutMs?: number; isExited?: () => boolean },
+): void {
+	let exited = options?.isExited?.() ?? (proc.exitCode !== null || proc.signalCode !== null);
+	if (exited) return;
+
+	let killTimer: ReturnType<typeof setTimeout> | undefined;
+	const markExited = () => {
+		exited = true;
+		if (killTimer) clearTimeout(killTimer);
+	};
+	proc.once("exit", markExited);
+	proc.once("close", markExited);
+
+	try {
+		proc.kill("SIGTERM");
+	} catch {
+		return;
+	}
+
+	killTimer = setTimeout(() => {
+		if (exited || options?.isExited?.()) return;
+		try {
+			proc.kill("SIGKILL");
+		} catch {
+			// Ignore best-effort cleanup failures.
+		}
+	}, options?.timeoutMs ?? SUBPROCESS_SIGKILL_TIMEOUT_MS);
+	killTimer.unref?.();
+}
 
 type ProtocolLog = {
 	level?: string;
@@ -78,7 +124,10 @@ type CodemodeDetails = {
 	result?: unknown;
 	error?: ProtocolResult extends infer R ? R extends { ok: false; error: infer E } ? E : never : never;
 	logs: string[];
+	logNotice?: string;
 	rawOutput: string;
+	rawOutputNotice?: string;
+	outputTruncation?: TruncationResult;
 	artifacts: CodemodeArtifact[];
 	bridgeCalls: CodemodeBridgeCall[];
 	sandbox: {
@@ -152,6 +201,140 @@ function truncate(text: string, maxChars: number): string {
 	return `${text.slice(0, maxChars)}\n\n[truncated ${text.length - maxChars} chars]`;
 }
 
+interface LogCaptureState {
+	lines: string[];
+	bytes: number;
+	droppedLines: number;
+	droppedBytes: number;
+	clippedLines: number;
+}
+
+interface RawOutputCaptureState {
+	value: string;
+	bytes: number;
+	droppedBytes: number;
+	truncated: boolean;
+}
+
+function utf8Prefix(text: string, maxBytes: number): string {
+	if (maxBytes <= 0 || text.length === 0) return "";
+	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+
+	let low = 0;
+	let high = text.length;
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		if (Buffer.byteLength(text.slice(0, mid), "utf8") <= maxBytes) {
+			low = mid;
+		} else {
+			high = mid - 1;
+		}
+	}
+	return text.slice(0, low);
+}
+
+function formatOutputTruncationNotice(truncation: TruncationResult): string {
+	const omittedLines = truncation.totalLines - truncation.outputLines;
+	const omittedBytes = truncation.totalBytes - truncation.outputBytes;
+	return `[Output truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}). ${omittedLines} lines (${formatSize(omittedBytes)}) omitted.]`;
+}
+
+function truncateToolOutput(text: string): { text: string; truncation: TruncationResult } {
+	const truncation = truncateHead(text, {
+		maxLines: TOOL_OUTPUT_MAX_LINES,
+		maxBytes: TOOL_OUTPUT_MAX_BYTES,
+	});
+	if (!truncation.truncated) return { text: truncation.content, truncation };
+	return {
+		text: `${truncation.content}\n\n${formatOutputTruncationNotice(truncation)}`,
+		truncation,
+	};
+}
+
+function createLogCaptureState(): LogCaptureState {
+	return { lines: [], bytes: 0, droppedLines: 0, droppedBytes: 0, clippedLines: 0 };
+}
+
+function capLogLine(line: string): { line: string; clipped: boolean } {
+	if (line.length <= MAX_LOG_LINE_CHARS) return { line, clipped: false };
+	const omitted = line.length - MAX_LOG_LINE_CHARS;
+	return {
+		line: `${line.slice(0, MAX_LOG_LINE_CHARS)}… [line truncated: ${omitted} chars omitted]`,
+		clipped: true,
+	};
+}
+
+function appendLogLine(state: LogCaptureState, line: string): void {
+	const capped = capLogLine(line);
+	if (capped.clipped) state.clippedLines += 1;
+	const bytes = Buffer.byteLength(capped.line, "utf8");
+	state.lines.push(capped.line);
+	state.bytes += bytes;
+
+	while (state.lines.length > MAX_LOG_LINES || state.bytes > MAX_LOG_BYTES) {
+		const removed = state.lines.shift();
+		if (removed === undefined) break;
+		const removedBytes = Buffer.byteLength(removed, "utf8");
+		state.bytes -= removedBytes;
+		state.droppedLines += 1;
+		state.droppedBytes += removedBytes;
+	}
+}
+
+function formatLogNotice(state: LogCaptureState): string | undefined {
+	const parts: string[] = [];
+	if (state.droppedLines > 0) {
+		parts.push(`${state.droppedLines} older log line(s) (${formatSize(state.droppedBytes)}) were dropped to stay within ${MAX_LOG_LINES} lines/${formatSize(MAX_LOG_BYTES)}`);
+	}
+	if (state.clippedLines > 0) {
+		parts.push(`${state.clippedLines} line(s) were clipped to ${MAX_LOG_LINE_CHARS} chars`);
+	}
+	if (parts.length === 0) return undefined;
+	return `[Log output truncated: ${parts.join("; ")}.]`;
+}
+
+function createRawOutputCaptureState(): RawOutputCaptureState {
+	return {
+		value: "",
+		bytes: 0,
+		droppedBytes: 0,
+		truncated: false,
+	};
+}
+
+function appendRawOutput(state: RawOutputCaptureState, chunk: string): void {
+	if (!chunk) return;
+	const chunkBytes = Buffer.byteLength(chunk, "utf8");
+	if (state.truncated) {
+		state.droppedBytes += chunkBytes;
+		return;
+	}
+
+	if (state.bytes + chunkBytes <= MAX_RAW_OUTPUT_BYTES) {
+		state.value += chunk;
+		state.bytes += chunkBytes;
+		return;
+	}
+
+	const remaining = Math.max(0, MAX_RAW_OUTPUT_BYTES - state.bytes);
+	if (remaining > 0) {
+		state.value += utf8Prefix(chunk, remaining);
+		state.bytes = MAX_RAW_OUTPUT_BYTES;
+	}
+	state.droppedBytes += Math.max(0, chunkBytes - remaining);
+	state.truncated = true;
+}
+
+function finalizeRawOutput(state: RawOutputCaptureState): { text: string; notice?: string } {
+	if (!state.truncated) return { text: state.value };
+	const totalBytes = state.bytes + state.droppedBytes;
+	const notice = `[Raw output truncated: captured ${formatSize(state.bytes)} of ${formatSize(totalBytes)} (${formatSize(state.droppedBytes)} omitted).]`;
+	return {
+		text: state.value ? `${state.value}\n\n${notice}` : notice,
+		notice,
+	};
+}
+
 function formatLogLine(log: ProtocolLog): string {
 	const parts = (log.args ?? []).map((arg) => serializeForDisplay(arg));
 	const prefix = log.level ? `[${log.level}] ` : "";
@@ -159,16 +342,16 @@ function formatLogLine(log: ProtocolLog): string {
 }
 
 function parseProtocolOutput(rawOutput: string): { logs: string[]; result?: ProtocolResult } {
-	const logs: string[] = [];
+	const logState = createLogCaptureState();
 	let result: ProtocolResult | undefined;
 
 	for (const line of rawOutput.split(/\r?\n/)) {
 		if (line.startsWith(LOG_PREFIX)) {
 			try {
 				const payload = JSON.parse(line.slice(LOG_PREFIX.length)) as ProtocolLog;
-				logs.push(formatLogLine(payload));
+				appendLogLine(logState, formatLogLine(payload));
 			} catch {
-				logs.push(`[protocol] could not parse log payload: ${line.slice(LOG_PREFIX.length)}`);
+				appendLogLine(logState, `[protocol] could not parse log payload: ${line.slice(LOG_PREFIX.length)}`);
 			}
 			continue;
 		}
@@ -187,7 +370,10 @@ function parseProtocolOutput(rawOutput: string): { logs: string[]; result?: Prot
 		}
 	}
 
-	return { logs: logs.slice(-MAX_LOG_LINES), result };
+	const logs = [...logState.lines];
+	const notice = formatLogNotice(logState);
+	if (notice) logs.push(notice);
+	return { logs, result };
 }
 
 function buildRunnerSource(capabilities: CodemodeCapability[]): string {
@@ -471,7 +657,7 @@ async function runTaskBridge(state: BridgeRuntimeState, args: unknown): Promise<
 		throw new Error("host.task.run only allows agentScope='user' in this MVP");
 	}
 	const taskCwd = typeof input.cwd === "string" ? path.resolve(state.cwd, input.cwd) : state.cwd;
-	const discovery = discoverAgents(taskCwd, agentScope);
+	const discovery = taskAgents.discoverAgents(taskCwd, agentScope);
 	const agent = discovery.agents.find((candidate) => candidate.name === input.agent);
 	if (!agent) throw new Error(`Unknown agent: ${input.agent}`);
 
@@ -506,6 +692,7 @@ async function runTaskBridge(state: BridgeRuntimeState, args: unknown): Promise<
 				stdio: ["ignore", "pipe", "pipe"],
 				env: process.env,
 			});
+			let procClosed = false;
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
@@ -529,17 +716,21 @@ async function runTaskBridge(state: BridgeRuntimeState, args: unknown): Promise<
 				stderr += chunk.toString("utf8");
 			});
 			proc.on("close", (code) => {
+				procClosed = true;
 				if (buffer.trim()) processLine(buffer);
 				resolve(code ?? 0);
 			});
-			proc.on("error", () => resolve(1));
+			proc.on("error", () => {
+				procClosed = true;
+				resolve(1);
+			});
 
 			if (state.signal) {
+				let aborted = false;
 				const onAbort = () => {
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
+					if (aborted) return;
+					aborted = true;
+					terminateProcessWithEscalation(proc, { isExited: () => procClosed });
 				};
 				if (state.signal.aborted) onAbort();
 				else state.signal.addEventListener("abort", onAbort, { once: true });
@@ -624,7 +815,10 @@ function buildContent(details: CodemodeDetails): string {
 	if (details.ok) {
 		const resultText = truncate(serializeForDisplay(details.result), MAX_RESULT_PREVIEW);
 		const parts = ["TypeScript completed successfully.", "", "Result:", resultText];
-		if (details.logs.length > 0) parts.push("", "Logs:", details.logs.join("\n"));
+		if (details.logs.length > 0 || details.logNotice) {
+			parts.push("", "Logs:", ...details.logs);
+			if (details.logNotice) parts.push(details.logNotice);
+		}
 		if (details.artifacts.length > 0) {
 			parts.push("", "Artifacts:", ...details.artifacts.map((artifact) => `- ${artifact.name} (${artifact.size} bytes)`));
 		}
@@ -636,7 +830,10 @@ function buildContent(details: CodemodeDetails): string {
 
 	const errorText = details.error ? `${details.error.phase}: ${details.error.message}` : "unknown error";
 	const parts = ["TypeScript execution failed.", "", `Error: ${errorText}`];
-	if (details.logs.length > 0) parts.push("", "Logs:", details.logs.join("\n"));
+	if (details.logs.length > 0 || details.logNotice) {
+		parts.push("", "Logs:", ...details.logs);
+		if (details.logNotice) parts.push(details.logNotice);
+	}
 	if (details.bridgeCalls.length > 0) {
 		parts.push("", "Bridge calls:", ...details.bridgeCalls.map((call) => `- ${call.name}: ${call.ok ? "ok" : `error (${call.error})`}`));
 	}
@@ -725,7 +922,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
-			if (details.logs.length > 0) {
+			if (details.logs.length > 0 || details.logNotice) {
 				const shownLogs = expanded ? details.logs : details.logs.slice(0, 3);
 				text += `\n${theme.fg("muted", `logs (${details.logs.length}):`)}`;
 				for (const line of shownLogs) {
@@ -734,6 +931,13 @@ export default function (pi: ExtensionAPI) {
 				if (!expanded && details.logs.length > 3) {
 					text += `\n  ${theme.fg("dim", `... ${details.logs.length - 3} more`)}`;
 				}
+				if (details.logNotice) {
+					text += `\n  ${theme.fg("warning", details.logNotice)}`;
+				}
+			}
+
+			if (details.outputTruncation?.truncated) {
+				text += `\n${theme.fg("warning", formatOutputTruncationNotice(details.outputTruncation))}`;
 			}
 
 			if (!expanded) {
@@ -767,10 +971,10 @@ export default function (pi: ExtensionAPI) {
 			onUpdate?.({ content: [{ type: "text", text: `Starting TypeScript (${profile})...` }] });
 
 			let exitCode: number | null = null;
-			let rawOutput = "";
+			const rawOutputState = createRawOutputCaptureState();
 			const sandboxMode: "dedicated" = "dedicated";
 			let protocolResult: ProtocolResult | undefined;
-			const logs: string[] = [];
+			const logState = createLogCaptureState();
 			const artifacts: CodemodeArtifact[] = [];
 			const bridgeCalls: CodemodeBridgeCall[] = [];
 			const runtimeEnv = {
@@ -801,10 +1005,9 @@ export default function (pi: ExtensionAPI) {
 				if (line.startsWith(LOG_PREFIX)) {
 					try {
 						const payload = JSON.parse(line.slice(LOG_PREFIX.length)) as ProtocolLog;
-						logs.push(formatLogLine(payload));
-						if (logs.length > MAX_LOG_LINES) logs.splice(0, logs.length - MAX_LOG_LINES);
+						appendLogLine(logState, formatLogLine(payload));
 					} catch {
-						logs.push(`[protocol] could not parse log payload: ${line.slice(LOG_PREFIX.length)}`);
+						appendLogLine(logState, `[protocol] could not parse log payload: ${line.slice(LOG_PREFIX.length)}`);
 					}
 					return;
 				}
@@ -869,14 +1072,14 @@ export default function (pi: ExtensionAPI) {
 
 			const handleStdoutData = (chunk: Buffer) => {
 				const text = chunk.toString("utf8");
-				rawOutput += text;
+				appendRawOutput(rawOutputState, text);
 				stdoutBuffer += text;
 				const lines = stdoutBuffer.split(/\r?\n/);
 				stdoutBuffer = lines.pop() || "";
 				for (const line of lines) handleProtocolLine(line);
 			};
 			const handleStderrData = (chunk: Buffer) => {
-				rawOutput += chunk.toString("utf8");
+				appendRawOutput(rawOutputState, chunk.toString("utf8"));
 			};
 
 			try {
@@ -901,6 +1104,9 @@ export default function (pi: ExtensionAPI) {
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
+				const rawOutput = finalizeRawOutput(rawOutputState);
+				const logs = [...logState.lines];
+				const logNotice = formatLogNotice(logState);
 				const details: CodemodeDetails = {
 					profile,
 					cwd,
@@ -913,7 +1119,9 @@ export default function (pi: ExtensionAPI) {
 						message,
 					},
 					logs,
-					rawOutput,
+					logNotice,
+					rawOutput: rawOutput.text,
+					rawOutputNotice: rawOutput.notice,
 					artifacts,
 					bridgeCalls,
 					sandbox: {
@@ -936,6 +1144,9 @@ export default function (pi: ExtensionAPI) {
 				},
 			};
 
+			const rawOutput = finalizeRawOutput(rawOutputState);
+			const logs = [...logState.lines];
+			const logNotice = formatLogNotice(logState);
 			const details: CodemodeDetails = {
 				profile,
 				cwd,
@@ -946,7 +1157,9 @@ export default function (pi: ExtensionAPI) {
 				result: finalResult.ok ? finalResult.result : undefined,
 				error: finalResult.ok ? undefined : finalResult.error,
 				logs,
-				rawOutput,
+				logNotice,
+				rawOutput: rawOutput.text,
+				rawOutputNotice: rawOutput.notice,
 				artifacts,
 				bridgeCalls,
 				sandbox: {
@@ -956,12 +1169,15 @@ export default function (pi: ExtensionAPI) {
 				},
 			};
 
+			const output = truncateToolOutput(buildContent(details));
+			details.outputTruncation = output.truncation;
+
 			if (!details.ok) {
 				throwCodemodeExecutionError(details);
 			}
 
 			return {
-				content: [{ type: "text", text: buildContent(details) }],
+				content: [{ type: "text", text: output.text }],
 				details,
 			};
 		},
@@ -970,10 +1186,15 @@ export default function (pi: ExtensionAPI) {
 
 export const __test__ = {
 	parseProtocolOutput,
+	truncateToolOutput,
+	createRawOutputCaptureState,
+	appendRawOutput,
+	finalizeRawOutput,
 	buildRunnerSource,
 	splitImportsAndBody,
 	buildUserModule,
 	resolveExecutionCwd,
 	clampTimeout,
 	sanitizeArtifactName,
+	terminateProcessWithEscalation,
 };

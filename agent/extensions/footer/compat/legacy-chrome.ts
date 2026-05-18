@@ -1,4 +1,4 @@
-import { CustomEditor, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { CustomEditor, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 function hideLegacyFooter(ctx: ExtensionContext): void {
   if (!ctx.hasUI) return;

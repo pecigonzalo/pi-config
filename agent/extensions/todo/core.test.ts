@@ -263,6 +263,67 @@ describe("todo core invariants", () => {
 	});
 });
 
+describe("todo output truncation", () => {
+	it("truncates oversized list output with a notice", () => {
+		const state: TodoState = {
+			nextId: 901,
+			wipLimit: 2,
+			todos: Array.from({ length: 900 }, (_, index) => ({
+				id: index + 1,
+				title: `Task ${index + 1}`,
+				status: "todo" as const,
+				tags: [],
+				priority: "med" as const,
+				effort: "M" as const,
+				blockerIds: [],
+				archived: false,
+				history: [],
+				createdAt: FIXED_TIMESTAMP,
+				updatedAt: FIXED_TIMESTAMP,
+			})),
+		};
+
+		const harness = createHarness(state);
+		const result = harness.execute({ action: "list" });
+		expect(result.content[0].text).toContain("[Output truncated: showing");
+	});
+
+	it("truncates oversized read and history output with a notice", () => {
+		const state: TodoState = {
+			nextId: 2,
+			wipLimit: 2,
+			todos: [
+				{
+					id: 1,
+					title: "Large todo",
+					description: Array.from({ length: 2000 }, (_, index) => `description line ${index}`).join("\n"),
+					status: "todo",
+					tags: [],
+					priority: "med",
+					effort: "M",
+					blockerIds: [],
+					archived: false,
+					history: Array.from({ length: 150 }, (_, index) => ({
+						timestamp: `2024-01-01T00:00:${String(index).padStart(2, "0")}.000Z`,
+						type: "updated" as const,
+						todoId: 1,
+						meta: { description: `change-${index}-` + "x".repeat(1500) },
+					})),
+					createdAt: FIXED_TIMESTAMP,
+					updatedAt: FIXED_TIMESTAMP,
+				},
+			],
+		};
+
+		const harness = createHarness(state);
+		const read = harness.execute({ action: "read", id: 1 });
+		expect(read.content[0].text).toContain("[Output truncated: showing");
+
+		const history = harness.execute({ action: "history", id: 1, historyLimit: 150 });
+		expect(history.content[0].text).toContain("[Output truncated: showing");
+	});
+});
+
 describe("todo regressions to fix", () => {
 	it("BUG: /todos tag filtering should match tags regardless of command casing", () => {
 		const harness = createHarness();

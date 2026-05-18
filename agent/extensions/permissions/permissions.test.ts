@@ -25,7 +25,7 @@ let configModule: typeof import("./config");
 beforeAll(async () => {
 	const td = process.env.TMPDIR || os.tmpdir();
 	await fs.mkdir(td, { recursive: true });
-	mock.module("@mariozechner/pi-coding-agent", () => ({
+	mock.module("@earendil-works/pi-coding-agent", () => ({
 		getAgentDir: () => "/tmp",
 	}));
 	configModule = await import("./config");

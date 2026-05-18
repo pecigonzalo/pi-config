@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { SessionEntry } from "@mariozechner/pi-coding-agent";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { __test__ } from "./index";
 
 type ExecResult = { code: number; stdout?: string; stderr?: string };

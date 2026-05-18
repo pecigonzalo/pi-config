@@ -1,4 +1,4 @@
-import { getAgentDir, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { FOOTER_LAYOUT_NAMES } from "./constants";

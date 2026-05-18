@@ -6,7 +6,7 @@
     "test": "bun run --filter './agent/extensions/*' test"
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "v0.73.1",
+    "@earendil-works/pi-coding-agent": "0.75.1",
     "lefthook": "^2.1.6"
   }
 }

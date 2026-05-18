@@ -5,8 +5,8 @@
  * branch-aware reconstruction from session history.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import {
 	TodoBrowserComponent,
 	type TodoBrowserAction,

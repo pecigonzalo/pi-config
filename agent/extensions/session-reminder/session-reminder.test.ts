@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { __test__ } from "./session-reminder";
 
 interface TestTheme {

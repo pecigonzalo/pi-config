@@ -1,6 +1,6 @@
-import type { Message, ToolCall } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
+import type { Message, ToolCall } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
 	Key,
@@ -10,7 +10,7 @@ import {
 	matchesKey,
 	truncateToWidth,
 	wrapTextWithAnsi,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 
 const PICKER_SHORTCUT = "alt+shift+o";
 const LATEST_SHORTCUT = "alt+o";

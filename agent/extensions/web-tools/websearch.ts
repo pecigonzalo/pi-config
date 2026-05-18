@@ -1,8 +1,8 @@
-import { StringEnum } from "@mariozechner/pi-ai";
-import { keyHint, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { callMcpTool } from "./mcp";
+import { callMcpTool, MCP_MAX_RESPONSE_BYTES } from "./mcp";
 import {
 	clampTimeout,
 	clipText,
@@ -264,11 +264,11 @@ function renderResults(query: string, mode: WebsearchMode, domains: string[], re
 async function callExaMcpSearch(
 	request: { query: string; limit: number; domains: string[]; mode: WebsearchMode },
 	options?: { signal?: AbortSignal; fetchImpl?: typeof fetch },
-): Promise<{ response: Response; requestId?: string; text: string; endpoint: string }> {
+): Promise<{ response: Response; requestId?: string; text: string; endpoint: string; bodyTruncated: boolean }> {
 	const mcpRequest = buildExaMcpRequest();
 
 	try {
-		const { response, text } = await callMcpTool({
+		const { response, text, bodyTruncated } = await callMcpTool({
 			url: mcpRequest.endpoint,
 			toolName: "web_search_exa",
 			args: {
@@ -285,7 +285,7 @@ async function callExaMcpSearch(
 		});
 
 		const requestId = text.match(/"requestId":"([^"]+)"/)?.[1];
-		return { response, requestId, text, endpoint: sanitizeEndpointForDetails(mcpRequest.endpoint) };
+		return { response, requestId, text, endpoint: sanitizeEndpointForDetails(mcpRequest.endpoint), bodyTruncated };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (/HTTP 401|HTTP 403|auth/i.test(message)) {
@@ -308,7 +308,10 @@ export async function executeWebsearch(
 	const domains = normalizeDomainFilters(params.domains);
 	const warnings: string[] = [];
 
-	const { response, requestId, text, endpoint } = await callExaMcpSearch({ query, limit: appliedLimit, domains, mode }, options);
+	const { response, requestId, text, endpoint, bodyTruncated } = await callExaMcpSearch({ query, limit: appliedLimit, domains, mode }, options);
+	if (bodyTruncated) {
+		warnings.push(`MCP response exceeded ${Math.round(MCP_MAX_RESPONSE_BYTES / 1024)}KB and was truncated before parsing.`);
+	}
 	const parsedBlocks = parseMcpSearchText(text);
 	const normalizedResults = parsedBlocks
 		.map((block) => normalizeResult(block))
