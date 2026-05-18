@@ -115,6 +115,7 @@ function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): No
 	return {
 		...mergedEnv,
 		TMPDIR: effectiveTmpDir,
+		CLAUDE_TMPDIR: overrides.CLAUDE_TMPDIR ?? effectiveTmpDir,
 		XDG_CACHE_HOME: xdgCacheHome,
 		XDG_STATE_HOME: xdgStateHome,
 		BUN_INSTALL_CACHE_DIR: overrides.BUN_INSTALL_CACHE_DIR ?? path.join(effectiveTmpDir, "bun-cache"),
@@ -281,12 +282,21 @@ export async function runSandboxedCommand(
 	});
 }
 
-export function createSandboxedBashOps(sandboxManager: SandboxManagerLike): BashOperations {
+export function createSandboxedBashOps(
+	sandboxManager: SandboxManagerLike,
+	runtimeTmpDir?: string,
+): BashOperations {
 	return {
 		async exec(command, cwd, { onData, signal, timeout }) {
 			return runSandboxedCommand(sandboxManager, {
 				command,
 				cwd,
+				env: runtimeTmpDir
+					? {
+						TMPDIR: runtimeTmpDir,
+						CLAUDE_TMPDIR: runtimeTmpDir,
+					}
+					: undefined,
 				timeout,
 				signal,
 				onData,

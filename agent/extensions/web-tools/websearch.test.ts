@@ -50,16 +50,20 @@ describe("executeWebsearch", () => {
 		expect(result.content[0]?.text).toContain("Pi is extensible.");
 	});
 
-	test("passes EXA_API_KEY to the MCP endpoint when present", async () => {
+	test("sends EXA_API_KEY via headers and redacts secrets from returned details", async () => {
 		process.env.EXA_API_KEY = "test-key";
-		process.env.EXA_MCP_URL = "https://mcp.exa.ai/mcp";
+		process.env.EXA_MCP_URL = "https://mcp.exa.ai/mcp?exaApiKey=url-secret&foo=bar&access_token=token-secret";
 
-		await executeWebsearch(
+		const result = await executeWebsearch(
 			{ query: "pi coding agent" },
 			{
-				fetchImpl: async (url) => {
+				fetchImpl: async (url, init) => {
 					const parsed = new URL(String(url));
-					expect(parsed.searchParams.get("exaApiKey")).toBe("test-key");
+					const headers = new Headers(init?.headers);
+
+					expect(headers.get("authorization")).toBe("Bearer test-key");
+					expect(headers.get("x-api-key")).toBe("test-key");
+					expect(parsed.searchParams.get("exaApiKey")).toBe("url-secret");
 					return new Response(
 						JSON.stringify({
 							result: {
@@ -78,6 +82,15 @@ describe("executeWebsearch", () => {
 				},
 			},
 		);
+
+		const detailsEndpoint = new URL(result.details.response.endpoint);
+		expect(detailsEndpoint.searchParams.get("foo")).toBe("bar");
+		expect(detailsEndpoint.searchParams.get("exaApiKey")).toBe("REDACTED");
+		expect(detailsEndpoint.searchParams.get("access_token")).toBe("REDACTED");
+		expect(result.content[0]?.text).not.toContain("test-key");
+		expect(JSON.stringify(result)).not.toContain("test-key");
+		expect(JSON.stringify(result)).not.toContain("url-secret");
+		expect(JSON.stringify(result)).not.toContain("token-secret");
 	});
 
 	test("treats empty parsed results as success", async () => {

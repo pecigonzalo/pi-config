@@ -90,6 +90,7 @@ import {
 	approvalsCoverPaths,
 	approvalsCoverTool,
 	dedupeApprovals,
+	extractApprovalRecords,
 	formatApprovalScope,
 	getApprovalsSettings,
 	pruneExpiredApprovals,
@@ -108,6 +109,7 @@ import {
 	isPathOutsideCwd,
 } from "./matching";
 import {
+	canAutoApproveParsedBash,
 	detectDangerousBashPattern,
 	getFirstUnapprovedParsedCommand,
 	isAllParsedCommandsAllowed,
@@ -128,7 +130,6 @@ import {
 import {
 	dedupeStrings,
 	isFilesystemToolName,
-	type ApprovalFile,
 	type ApprovalRecord,
 	type PermissionToolInput,
 	type PermissionToolName,
@@ -201,7 +202,7 @@ export default function (pi: ExtensionAPI) {
 				return localBash.execute(id, params, signal, onUpdate, ctx);
 			}
 			const sandboxedBash = createBashTool(ctx.cwd, {
-				operations: createSandboxedBashOps(sandboxManager),
+				operations: createSandboxedBashOps(sandboxManager, sandboxTmpDir),
 			});
 			return sandboxedBash.execute(id, params, signal, onUpdate, ctx);
 		},
@@ -218,23 +219,39 @@ export default function (pi: ExtensionAPI) {
 	const sessionBashApprovals: ApprovalRecord[] = [];
 	const approvalsFile = path.join(getAgentDir(), "permissions-approvals.json");
 
-	const loadApprovals = () => {
-		const parsed = readJsonFile(approvalsFile) as ApprovalFile | undefined;
-		const loaded = parsed?.approvals ?? [];
+	const warnPermissionIssue = (ctx: ExtensionContext | undefined, message: string) => {
+		if (ctx?.hasUI) {
+			ctx.ui.notify(`Permissions warning: ${message}`, "warning");
+			return;
+		}
+		console.warn(`[permissions] ${message}`);
+	};
+
+	const loadApprovals = (ctx?: ExtensionContext) => {
+		const parsed = readJsonFile(approvalsFile, {
+			onWarning: (message) => warnPermissionIssue(ctx, message),
+		});
+		const loaded = extractApprovalRecords(
+			parsed,
+			(message) => warnPermissionIssue(ctx, message),
+			approvalsFile,
+		);
 		persistentApprovals = dedupeApprovals(pruneExpiredApprovals(loaded, approvalsSettings));
 	};
 
 	const saveApprovals = () => {
-		const data: ApprovalFile = { approvals: dedupeApprovals(pruneExpiredApprovals(persistentApprovals, approvalsSettings)) };
+		const data = { approvals: dedupeApprovals(pruneExpiredApprovals(persistentApprovals, approvalsSettings)) };
 		fs.writeFileSync(approvalsFile, JSON.stringify(data, null, 2) + "\n", "utf-8");
 	};
 
-	const reload = (cwd: string) => {
-		config = loadConfig(cwd);
+	const reload = (ctx: ExtensionContext) => {
+		config = loadConfig(ctx.cwd, {
+			onWarning: (message) => warnPermissionIssue(ctx, message),
+		});
 		agentName = detectAgentName(pi);
 		profileName = detectProfileName(pi);
 		approvalsSettings = getApprovalsSettings(config);
-		loadApprovals();
+		loadApprovals(ctx);
 	};
 
 	const createPathApproval = (toolName: PermissionToolName, scopeValue: string, projectRoot: string): ApprovalRecord => ({
@@ -288,9 +305,6 @@ export default function (pi: ExtensionAPI) {
 			sandboxTmpDir = effectiveTmpDir;
 			sandboxTmpDirEphemeral = false;
 		}
-		// Override sandbox-runtime's /tmp/claude fallback with a pi-branded temp dir.
-		process.env.CLAUDE_TMPDIR = effectiveTmpDir;
-		process.env.TMPDIR = effectiveTmpDir;
 		const compiled = compileSandboxConfig(policy, ctx.cwd, config.sandbox, effectiveTmpDir);
 		sandboxConfig = compiled.config;
 
@@ -350,7 +364,7 @@ export default function (pi: ExtensionAPI) {
 		sessionBashApprovals.length = 0;
 		sandboxTmpDir = undefined;
 		sandboxTmpDirEphemeral = false;
-		reload(ctx.cwd);
+		reload(ctx);
 		treeSitterReady = await isTreeSitterAvailable();
 		if (ctx.hasUI) {
 			if (treeSitterReady) ctx.ui.notify("Shell parser active: tree-sitter", "info");
@@ -360,7 +374,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		reload(ctx.cwd);
+		reload(ctx);
 		treeSitterReady = await isTreeSitterAvailable();
 		await initializeSandbox(ctx);
 	});
@@ -798,8 +812,8 @@ export default function (pi: ExtensionAPI) {
 				return askPermission(toolName, input, dangerousReason, projectRoot, ctx);
 			}
 
-			// If tree-sitter parsed successfully, check if all commands are allowed/approved
-			if (parsedBash && isAllParsedCommandsAllowed(parsedBash, policy.rules, isApprovedBashSegment)) {
+			// If tree-sitter parsed successfully, only auto-allow simple commands that are fully covered.
+			if (parsedBash && canAutoApproveParsedBash(parsedBash, policy.rules, isApprovedBashSegment)) {
 				return undefined;
 			}
 		} else if (sessionAllows.has(toolName)) {
@@ -831,8 +845,8 @@ export default function (pi: ExtensionAPI) {
 
 			if (rule.action === "ask") {
 				if (toolName === "bash") {
-					// If tree-sitter confirms all commands are allowed, skip
-					if (parsedBash && isAllParsedCommandsAllowed(parsedBash, policy.rules, isApprovedBashSegment)) {
+					// If tree-sitter confirms all simple commands are allowed, skip.
+					if (parsedBash && canAutoApproveParsedBash(parsedBash, policy.rules, isApprovedBashSegment)) {
 						return undefined;
 					}
 					const { segment: unapprovedSegment, parsed: unapprovedParsed } = getUnapprovedBashSegment();

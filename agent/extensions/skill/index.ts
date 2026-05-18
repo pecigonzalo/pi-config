@@ -196,10 +196,7 @@ export default function skillExtension(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const requestedName = params.name.trim();
 			if (!requestedName) {
-				return {
-					content: [{ type: "text", text: "Skill name is required." }],
-					isError: true,
-				};
+				throw new Error("Skill name is required.");
 			}
 
 			const skill = await resolveSkillRecord(loadedSkills, requestedName, ctx.cwd);
@@ -208,10 +205,7 @@ export default function skillExtension(pi: ExtensionAPI) {
 					.map((entry) => entry.name)
 					.sort((a, b) => a.localeCompare(b));
 				const suffix = available.length > 0 ? ` Available loaded skills: ${available.join(", ")}.` : "";
-				return {
-					content: [{ type: "text", text: `Skill not found: ${requestedName}.${suffix}` }],
-					isError: true,
-				};
+				throw new Error(`Skill not found: ${requestedName}.${suffix}`);
 			}
 
 			try {
@@ -230,10 +224,7 @@ export default function skillExtension(pi: ExtensionAPI) {
 				};
 			} catch (error: unknown) {
 				const message = error instanceof Error ? error.message : String(error);
-				return {
-					content: [{ type: "text", text: `Failed to load skill ${requestedName}: ${message}` }],
-					isError: true,
-				};
+				throw new Error(`Failed to load skill ${requestedName}: ${message}`);
 			}
 		},
 

@@ -120,11 +120,44 @@ function parseHeaderNumber(value: string | null): number | undefined {
 	return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function buildExaMcpUrl(): string {
-	const url = new URL(process.env.EXA_MCP_URL || DEFAULT_EXA_MCP_URL);
+interface ExaMcpRequestConfig {
+	endpoint: string;
+	headers?: Record<string, string>;
+}
+
+function isSensitiveQueryParam(paramName: string): boolean {
+	const normalized = paramName.toLowerCase();
+	return normalized === "exaapikey" || /(^|[_-])(api)?key$/i.test(normalized) || /(token|secret|auth|password)/i.test(normalized);
+}
+
+function sanitizeEndpointForDetails(endpoint: string): string {
+	let parsed: URL;
+	try {
+		parsed = new URL(endpoint);
+	} catch {
+		return endpoint;
+	}
+
+	for (const key of new Set(parsed.searchParams.keys())) {
+		if (!isSensitiveQueryParam(key)) continue;
+		parsed.searchParams.set(key, "REDACTED");
+	}
+
+	return parsed.toString();
+}
+
+function buildExaMcpRequest(): ExaMcpRequestConfig {
+	const endpoint = new URL(process.env.EXA_MCP_URL || DEFAULT_EXA_MCP_URL).toString();
 	const apiKey = process.env.EXA_API_KEY?.trim();
-	if (apiKey) url.searchParams.set("exaApiKey", apiKey);
-	return url.toString();
+	if (!apiKey) return { endpoint };
+
+	return {
+		endpoint,
+		headers: {
+			authorization: `Bearer ${apiKey}`,
+			"x-api-key": apiKey,
+		},
+	};
 }
 
 function parseSearchBlock(block: string): ParsedMcpSearchBlock | undefined {
@@ -232,11 +265,11 @@ async function callExaMcpSearch(
 	request: { query: string; limit: number; domains: string[]; mode: WebsearchMode },
 	options?: { signal?: AbortSignal; fetchImpl?: typeof fetch },
 ): Promise<{ response: Response; requestId?: string; text: string; endpoint: string }> {
-	const endpoint = buildExaMcpUrl();
+	const mcpRequest = buildExaMcpRequest();
 
 	try {
 		const { response, text } = await callMcpTool({
-			url: endpoint,
+			url: mcpRequest.endpoint,
 			toolName: "web_search_exa",
 			args: {
 				query: request.query,
@@ -248,10 +281,11 @@ async function callExaMcpSearch(
 			timeoutSeconds: EXA_MCP_TIMEOUT_SECONDS,
 			signal: options?.signal,
 			fetchImpl: options?.fetchImpl,
+			headers: mcpRequest.headers,
 		});
 
 		const requestId = text.match(/"requestId":"([^"]+)"/)?.[1];
-		return { response, requestId, text, endpoint };
+		return { response, requestId, text, endpoint: sanitizeEndpointForDetails(mcpRequest.endpoint) };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (/HTTP 401|HTTP 403|auth/i.test(message)) {

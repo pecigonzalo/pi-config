@@ -76,3 +76,12 @@ export function isAllParsedCommandsAllowed(
 	if (parsed.commands.length === 0) return false;
 	return getFirstUnapprovedParsedCommand(parsed, rules, isApproved) === undefined;
 }
+
+export function canAutoApproveParsedBash(
+	parsed: ParsedBash,
+	rules: Rule[],
+	isApproved?: (candidate: string) => boolean,
+): boolean {
+	if (parsed.isComplex) return false;
+	return isAllParsedCommandsAllowed(parsed, rules, isApproved);
+}

@@ -45,15 +45,23 @@ export function hasRegexMeta(pattern: string): boolean {
 	return /[.^$+?(){}[\]\\|]/.test(pattern);
 }
 
+export function bashPrefixMatchesCommand(prefix: string, command: string): boolean {
+	const trimmedPrefix = prefix.trim();
+	const trimmedCommand = command.trim();
+	if (!trimmedPrefix || !trimmedCommand) return false;
+	if (trimmedCommand === trimmedPrefix) return true;
+	if (!trimmedCommand.startsWith(trimmedPrefix)) return false;
+	const boundaryChar = trimmedCommand[trimmedPrefix.length];
+	return boundaryChar !== undefined && /\s/.test(boundaryChar);
+}
+
 export function matchSimpleBashPattern(pattern: string, command: string): boolean {
 	const trimmedPattern = pattern.trim();
-	const trimmedCommand = command.trim();
 	if (!trimmedPattern) return false;
 
 	if (trimmedPattern.endsWith(" *")) {
 		const prefix = trimmedPattern.slice(0, -2).trim();
-		if (!prefix) return false;
-		return trimmedCommand === prefix || trimmedCommand.startsWith(`${prefix} `);
+		return bashPrefixMatchesCommand(prefix, command);
 	}
 
 	if (!trimmedPattern.includes(" ")) {

@@ -11,6 +11,6 @@
     "typebox": "^1.1.24"
   },
   "pi": {
-    "extensions": ["./todo.ts"]
+    "extensions": ["./index.ts"]
   }
 }

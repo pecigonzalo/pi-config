@@ -100,11 +100,17 @@ export function parseJsonc(text: string): unknown {
 	return JSON.parse(cleaned);
 }
 
-export function readJsonFile(filePath: string): unknown | undefined {
+export function readJsonFile(
+	filePath: string,
+	options?: { onWarning?: (message: string) => void },
+): unknown | undefined {
 	try {
 		const raw = fs.readFileSync(filePath, "utf-8");
 		return parseJsonc(raw);
-	} catch {
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return undefined;
+		const message = error instanceof Error ? error.message : String(error);
+		options?.onWarning?.(`Failed to parse ${filePath}: ${message}`);
 		return undefined;
 	}
 }
@@ -258,12 +264,27 @@ export function mergeDefaultConfig(
 	};
 }
 
-export function loadConfig(cwd: string): PermissionsConfig {
+function asObjectRecord(value: unknown): Record<string, unknown> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	return value as Record<string, unknown>;
+}
+
+export function loadConfig(cwd: string, options?: { onWarning?: (message: string) => void }): PermissionsConfig {
 	const globalPath = path.join(getAgentDir(), "permissions.jsonc");
 	const projectPath = path.join(cwd, ".pi", "permissions.jsonc");
 
-	const global = readJsonFile(globalPath) as PermissionsConfig | undefined;
-	const project = readJsonFile(projectPath) as PermissionsConfig | undefined;
+	const globalRaw = readJsonFile(globalPath, options);
+	const projectRaw = readJsonFile(projectPath, options);
+
+	if (globalRaw !== undefined && !asObjectRecord(globalRaw)) {
+		options?.onWarning?.(`Ignoring malformed permissions config at ${globalPath}: expected object root`);
+	}
+	if (projectRaw !== undefined && !asObjectRecord(projectRaw)) {
+		options?.onWarning?.(`Ignoring malformed permissions config at ${projectPath}: expected object root`);
+	}
+
+	const global = asObjectRecord(globalRaw) as PermissionsConfig | undefined;
+	const project = asObjectRecord(projectRaw) as PermissionsConfig | undefined;
 
 	return interpolateConfig({
 		default: mergeDefaultConfig(global?.default, project?.default),

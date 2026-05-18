@@ -1,5 +1,6 @@
-import { pathMatchesPrefix } from "./matching";
+import { bashPrefixMatchesCommand, pathMatchesPrefix } from "./matching";
 import type {
+	ApprovalFile,
 	ApprovalRecord,
 	ApprovalsSettings,
 	PermissionToolName,
@@ -81,7 +82,7 @@ function bashApprovalMatches(
 	if (settings.scopeByProject && approval.projectRoot !== projectRoot) return false;
 	if (settings.scopeByAgent && approval.agentName !== agentName) return false;
 	if (approval.scopeType === "bash-exact") return approval.scopeValue === command;
-	if (approval.scopeType === "bash-prefix") return command.startsWith(approval.scopeValue);
+	if (approval.scopeType === "bash-prefix") return bashPrefixMatchesCommand(approval.scopeValue, command);
 	return false;
 }
 
@@ -99,6 +100,58 @@ export function approvalsCoverTool(
 		if (settings.scopeByAgent && a.agentName !== agentName) return false;
 		return true;
 	});
+}
+
+function isApprovalScopeType(value: unknown): value is ApprovalRecord["scopeType"] {
+	return value === "path-prefix" || value === "tool" || value === "bash-exact" || value === "bash-prefix";
+}
+
+function toApprovalRecord(candidate: unknown): ApprovalRecord | undefined {
+	if (!candidate || typeof candidate !== "object") return undefined;
+	const value = candidate as Partial<ApprovalRecord>;
+	if (typeof value.tool !== "string") return undefined;
+	if (!isApprovalScopeType(value.scopeType)) return undefined;
+	if (typeof value.scopeValue !== "string" || value.scopeValue.trim().length === 0) return undefined;
+	if (typeof value.createdAt !== "number" || !Number.isFinite(value.createdAt)) return undefined;
+	if (value.projectRoot !== undefined && typeof value.projectRoot !== "string") return undefined;
+	if (value.agentName !== undefined && typeof value.agentName !== "string") return undefined;
+	return {
+		tool: value.tool,
+		scopeType: value.scopeType,
+		scopeValue: value.scopeValue,
+		projectRoot: value.projectRoot,
+		agentName: value.agentName,
+		createdAt: value.createdAt,
+	};
+}
+
+export function extractApprovalRecords(
+	raw: unknown,
+	onWarning?: (message: string) => void,
+	filePath = "approvals file",
+): ApprovalRecord[] {
+	if (raw === undefined) return [];
+	if (!raw || typeof raw !== "object") {
+		onWarning?.(`Ignoring malformed approvals at ${filePath}: expected object root`);
+		return [];
+	}
+
+	const file = raw as Partial<ApprovalFile>;
+	if (!Array.isArray(file.approvals)) {
+		onWarning?.(`Ignoring malformed approvals at ${filePath}: expected "approvals" array`);
+		return [];
+	}
+
+	const result: ApprovalRecord[] = [];
+	for (let i = 0; i < file.approvals.length; i++) {
+		const parsed = toApprovalRecord(file.approvals[i]);
+		if (!parsed) {
+			onWarning?.(`Ignoring malformed approval entry #${i + 1} in ${filePath}`);
+			continue;
+		}
+		result.push(parsed);
+	}
+	return result;
 }
 
 export function approvalsCoverBash(

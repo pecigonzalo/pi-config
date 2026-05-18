@@ -84,6 +84,23 @@ interface ResolvedCheckpoint {
   matchedEntryId: string;
 }
 
+interface LoadedSettings {
+  settings: SessionGuardSettings;
+  warnings: string[];
+}
+
+interface RestoreCheckpointResult {
+  error?: string;
+  safetySnapshotCreated: boolean;
+  safetySnapshotRef?: string;
+}
+
+interface SafetySnapshotResult {
+  created: boolean;
+  ref?: string;
+  error?: string;
+}
+
 const CHECKPOINT_ENTRY_TYPE = "session-guard-checkpoint";
 const CHECKPOINT_MESSAGE_PREFIX = "pi-session-guard";
 
@@ -188,22 +205,112 @@ function readJsonFile(filePath: string): unknown | undefined {
   }
 }
 
-function loadSettings(cwd: string): SessionGuardSettings {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function formatInvalidSettingWarning(
+  key: string,
+  actual: unknown,
+  fallback: string,
+): string {
+  return `Invalid sessionGuard.${key} value (${JSON.stringify(actual)}); using "${fallback}".`;
+}
+
+function parseBooleanSetting(
+  key: string,
+  value: unknown,
+  warnings: string[],
+): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "boolean") return value;
+  warnings.push(
+    formatInvalidSettingWarning(
+      key,
+      value,
+      "false",
+    ),
+  );
+  return false;
+}
+
+function parseDirtyRepoPolicySetting(
+  value: unknown,
+  warnings: string[],
+): DirtyRepoPolicy | undefined {
+  if (value === undefined) return undefined;
+  if (value === "off" || value === "warn" || value === "block") {
+    return value;
+  }
+  warnings.push(formatInvalidSettingWarning("dirtyRepo", value, "off"));
+  return "off";
+}
+
+function parseRestoreModeSetting(
+  key: "restoreCodeOnFork" | "restoreCodeOnTree",
+  value: unknown,
+  warnings: string[],
+): RestoreMode | undefined {
+  if (value === undefined) return undefined;
+  if (value === "off" || value === "ask" || value === "auto") {
+    return value;
+  }
+  warnings.push(formatInvalidSettingWarning(key, value, "ask"));
+  return "ask";
+}
+
+function sanitizeSettings(raw: unknown): LoadedSettings {
+  if (!isRecord(raw)) return { settings: {}, warnings: [] };
+
+  const warnings: string[] = [];
+  const settings: SessionGuardSettings = {
+    confirmNewSession: parseBooleanSetting(
+      "confirmNewSession",
+      raw.confirmNewSession,
+      warnings,
+    ),
+    confirmSwitchSession: parseBooleanSetting(
+      "confirmSwitchSession",
+      raw.confirmSwitchSession,
+      warnings,
+    ),
+    confirmFork: parseBooleanSetting("confirmFork", raw.confirmFork, warnings),
+    dirtyRepo: parseDirtyRepoPolicySetting(raw.dirtyRepo, warnings),
+    restoreCodeOnFork: parseRestoreModeSetting(
+      "restoreCodeOnFork",
+      raw.restoreCodeOnFork,
+      warnings,
+    ),
+    restoreCodeOnTree: parseRestoreModeSetting(
+      "restoreCodeOnTree",
+      raw.restoreCodeOnTree,
+      warnings,
+    ),
+  };
+
+  return { settings, warnings };
+}
+
+function readSessionGuardSettings(filePath: string): unknown {
+  const parsed = readJsonFile(filePath) as
+    | { default?: { sessionGuard?: unknown } }
+    | undefined;
+  return parsed?.default?.sessionGuard;
+}
+
+function loadSettings(cwd: string): LoadedSettings {
   const globalPath = path.join(getAgentDir(), "permissions.jsonc");
   const projectPath = path.join(cwd, ".pi", "permissions.jsonc");
 
-  const global = ((
-    readJsonFile(globalPath) as
-    | { default?: { sessionGuard?: SessionGuardSettings } }
-    | undefined
-  )?.default?.sessionGuard ?? undefined) as SessionGuardSettings | undefined;
-  const project = ((
-    readJsonFile(projectPath) as
-    | { default?: { sessionGuard?: SessionGuardSettings } }
-    | undefined
-  )?.default?.sessionGuard ?? undefined) as SessionGuardSettings | undefined;
+  const globalRaw = readSessionGuardSettings(globalPath);
+  const projectRaw = readSessionGuardSettings(projectPath);
 
-  return { ...global, ...project };
+  const merged = {
+    ...(isRecord(globalRaw) ? globalRaw : {}),
+    ...(isRecord(projectRaw) ? projectRaw : {}),
+  };
+
+  return sanitizeSettings(merged);
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -551,34 +658,231 @@ function buildRestorePrompt(
   return `${actionLabel}: restore code state from ${describeCheckpointSource(resolution)}?${trackedOnlyNote}`;
 }
 
+function formatSafetySnapshotHint(snapshot: SafetySnapshotResult): string {
+  if (!snapshot.created) return "";
+  if (snapshot.ref) {
+    return ` Local changes were saved to safety stash ${snapshot.ref}.`;
+  }
+  return " Local changes were saved to a safety stash.";
+}
+
+function appendSafetySnapshotHint(
+  message: string,
+  snapshot: SafetySnapshotResult,
+): string {
+  return `${message}${formatSafetySnapshotHint(snapshot)}`;
+}
+
+async function validateCheckpointRef(
+  pi: ExtensionAPI,
+  repoRoot: string,
+  checkpoint: StoredCheckpoint,
+): Promise<string | undefined> {
+  const verifyTarget =
+    checkpoint.kind === "commit"
+      ? `${checkpoint.ref}^{tree}`
+      : `${checkpoint.ref}^{commit}`;
+  const verify = await pi.exec(
+    "git",
+    ["rev-parse", "--verify", "--quiet", verifyTarget],
+    {
+      cwd: repoRoot,
+    },
+  );
+
+  if (verify.code !== 0 || verify.stdout.trim().length === 0) {
+    return `Checkpoint ref ${JSON.stringify(checkpoint.ref)} is missing or invalid.`;
+  }
+
+  if (checkpoint.kind === "stash") {
+    const parents = await pi.exec(
+      "git",
+      ["rev-list", "--parents", "-n", "1", checkpoint.ref],
+      { cwd: repoRoot },
+    );
+    const parentCount = parents.stdout.trim().split(/\s+/).filter(Boolean).length;
+    if (parents.code !== 0 || parentCount < 3) {
+      return `Checkpoint stash ref ${JSON.stringify(checkpoint.ref)} is invalid.`;
+    }
+  }
+
+  return undefined;
+}
+
+async function createSafetySnapshot(
+  pi: ExtensionAPI,
+  repoRoot: string,
+): Promise<SafetySnapshotResult> {
+  const status = await pi.exec(
+    "git",
+    ["status", "--porcelain", "--untracked-files=all"],
+    { cwd: repoRoot },
+  );
+
+  if (status.code !== 0) {
+    return {
+      created: false,
+      error: formatCommandFailure(
+        "git status --porcelain --untracked-files=all",
+        status.stdout,
+        status.stderr,
+        status.code,
+      ),
+    };
+  }
+
+  const hasChanges = status.stdout.trim().length > 0;
+  if (!hasChanges) return { created: false };
+
+  const stash = await pi.exec(
+    "git",
+    [
+      "stash",
+      "push",
+      "--include-untracked",
+      "--message",
+      `${CHECKPOINT_MESSAGE_PREFIX} safety-restore ${new Date().toISOString()}`,
+    ],
+    { cwd: repoRoot },
+  );
+
+  if (stash.code !== 0) {
+    return {
+      created: false,
+      error: formatCommandFailure(
+        "git stash push --include-untracked",
+        stash.stdout,
+        stash.stderr,
+        stash.code,
+      ),
+    };
+  }
+
+  const summary = `${stash.stdout}\n${stash.stderr}`;
+  if (/No local changes to save/i.test(summary)) {
+    return { created: false };
+  }
+
+  const refResult = await pi.exec(
+    "git",
+    ["rev-parse", "--verify", "--quiet", "stash@{0}"],
+    {
+      cwd: repoRoot,
+    },
+  );
+
+  const ref = refResult.code === 0 ? refResult.stdout.trim() : undefined;
+  return {
+    created: true,
+    ...(ref ? { ref } : {}),
+  };
+}
+
+async function confirmDirtyRestoreAllowed(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  actionLabel: string,
+): Promise<{ cancel: boolean } | undefined> {
+  const repoRoot = await resolveGitRepoRoot(pi, ctx.cwd);
+  if (!repoRoot) return undefined;
+
+  const status = await pi.exec(
+    "git",
+    ["status", "--porcelain", "--untracked-files=all"],
+    { cwd: repoRoot },
+  );
+  if (status.code !== 0) {
+    if (ctx.hasUI) {
+      ctx.ui.notify("Code restore cancelled: unable to inspect git status.", "error");
+    } else {
+      console.warn(
+        "[session-guard] Refusing destructive code restore because git status could not be inspected.",
+      );
+    }
+    return { cancel: true };
+  }
+
+  const changedFiles = status.stdout.trim().split("\n").filter(Boolean).length;
+  if (changedFiles === 0) return undefined;
+
+  const noun = changedFiles === 1 ? "file" : "files";
+  if (!ctx.hasUI) {
+    console.warn(
+      `[session-guard] Refusing ${actionLabel.toLowerCase()} code restore in no-UI mode because ${changedFiles} uncommitted ${noun} would require destructive reset/clean.`,
+    );
+    return { cancel: true };
+  }
+
+  const choice = await ctx.ui.select(
+    `${actionLabel}: ${changedFiles} uncommitted ${noun} detected.\nRestore will run git reset --hard and git clean -fd after creating a safety stash. Continue?`,
+    ["Yes, stash and restore code", "No, keep current code"],
+  );
+
+  if (choice !== "Yes, stash and restore code") {
+    ctx.ui.notify("Code restore cancelled; local changes kept.", "info");
+    return { cancel: true };
+  }
+
+  return undefined;
+}
+
 async function restoreCheckpoint(
   pi: ExtensionAPI,
   cwd: string,
   checkpoint: StoredCheckpoint,
-): Promise<string | undefined> {
+): Promise<RestoreCheckpointResult> {
   const repoRoot = await resolveGitRepoRoot(pi, cwd);
-  if (!repoRoot) return "Not inside a git repository.";
+  if (!repoRoot) {
+    return {
+      error: "Not inside a git repository.",
+      safetySnapshotCreated: false,
+    };
+  }
+
+  const validationError = await validateCheckpointRef(pi, repoRoot, checkpoint);
+  if (validationError) {
+    return { error: validationError, safetySnapshotCreated: false };
+  }
+
+  const safetySnapshot = await createSafetySnapshot(pi, repoRoot);
+  if (safetySnapshot.error) {
+    return { error: safetySnapshot.error, safetySnapshotCreated: false };
+  }
 
   const reset = await pi.exec("git", ["reset", "--hard", "HEAD"], {
     cwd: repoRoot,
   });
   if (reset.code !== 0) {
-    return formatCommandFailure(
-      "git reset --hard HEAD",
-      reset.stdout,
-      reset.stderr,
-      reset.code,
-    );
+    return {
+      error: appendSafetySnapshotHint(
+        formatCommandFailure(
+          "git reset --hard HEAD",
+          reset.stdout,
+          reset.stderr,
+          reset.code,
+        ),
+        safetySnapshot,
+      ),
+      safetySnapshotCreated: safetySnapshot.created,
+      safetySnapshotRef: safetySnapshot.ref,
+    };
   }
 
   const clean = await pi.exec("git", ["clean", "-fd"], { cwd: repoRoot });
   if (clean.code !== 0) {
-    return formatCommandFailure(
-      "git clean -fd",
-      clean.stdout,
-      clean.stderr,
-      clean.code,
-    );
+    return {
+      error: appendSafetySnapshotHint(
+        formatCommandFailure(
+          "git clean -fd",
+          clean.stdout,
+          clean.stderr,
+          clean.code,
+        ),
+        safetySnapshot,
+      ),
+      safetySnapshotCreated: safetySnapshot.created,
+      safetySnapshotRef: safetySnapshot.ref,
+    };
   }
 
   if (checkpoint.kind === "commit") {
@@ -597,14 +901,24 @@ async function restoreCheckpoint(
       },
     );
     if (restore.code !== 0) {
-      return formatCommandFailure(
-        `git restore --source=${checkpoint.ref}`,
-        restore.stdout,
-        restore.stderr,
-        restore.code,
-      );
+      return {
+        error: appendSafetySnapshotHint(
+          formatCommandFailure(
+            `git restore --source=${checkpoint.ref}`,
+            restore.stdout,
+            restore.stderr,
+            restore.code,
+          ),
+          safetySnapshot,
+        ),
+        safetySnapshotCreated: safetySnapshot.created,
+        safetySnapshotRef: safetySnapshot.ref,
+      };
     }
-    return undefined;
+    return {
+      safetySnapshotCreated: safetySnapshot.created,
+      safetySnapshotRef: safetySnapshot.ref,
+    };
   }
 
   const apply = await pi.exec(
@@ -613,15 +927,25 @@ async function restoreCheckpoint(
     { cwd: repoRoot },
   );
   if (apply.code !== 0) {
-    return formatCommandFailure(
-      `git stash apply --index ${checkpoint.ref}`,
-      apply.stdout,
-      apply.stderr,
-      apply.code,
-    );
+    return {
+      error: appendSafetySnapshotHint(
+        formatCommandFailure(
+          `git stash apply --index ${checkpoint.ref}`,
+          apply.stdout,
+          apply.stderr,
+          apply.code,
+        ),
+        safetySnapshot,
+      ),
+      safetySnapshotCreated: safetySnapshot.created,
+      safetySnapshotRef: safetySnapshot.ref,
+    };
   }
 
-  return undefined;
+  return {
+    safetySnapshotCreated: safetySnapshot.created,
+    safetySnapshotRef: safetySnapshot.ref,
+  };
 }
 
 async function maybeRestoreCodeState(
@@ -659,14 +983,17 @@ async function maybeRestoreCodeState(
     if (choice !== "Yes, restore code") return undefined;
   }
 
-  const restoreError = await restoreCheckpoint(
+  const dirtyConfirmation = await confirmDirtyRestoreAllowed(
     pi,
-    ctx.cwd,
-    resolution.checkpoint,
+    ctx,
+    actionLabel,
   );
-  if (restoreError) {
+  if (dirtyConfirmation?.cancel) return { cancel: true };
+
+  const restoreResult = await restoreCheckpoint(pi, ctx.cwd, resolution.checkpoint);
+  if (restoreResult.error) {
     if (ctx.hasUI)
-      ctx.ui.notify(`Code restore failed: ${restoreError}`, "error");
+      ctx.ui.notify(`Code restore failed: ${restoreResult.error}`, "error");
     return { cancel: true };
   }
 
@@ -681,17 +1008,44 @@ async function maybeRestoreCodeState(
         ? "warning"
         : "info",
     );
+
+    if (restoreResult.safetySnapshotCreated) {
+      const safetyMessage = restoreResult.safetySnapshotRef
+        ? `Safety stash created before restore: ${restoreResult.safetySnapshotRef}`
+        : "Safety stash created before restore.";
+      ctx.ui.notify(safetyMessage, "warning");
+    }
   }
 
   return undefined;
 }
 
+export const __test__ = {
+  sanitizeSettings,
+  confirmDirtyRestoreAllowed,
+  restoreCheckpoint,
+  maybeRestoreCodeState,
+};
+
 export default function (pi: ExtensionAPI) {
   let settings: SessionGuardSettings = {};
   let checkpoints = new Map<string, StoredCheckpoint>();
+  const warnedSettings = new Set<string>();
+
+  const emitSettingsWarning = (ctx: ExtensionContext, warning: string) => {
+    if (warnedSettings.has(warning)) return;
+    warnedSettings.add(warning);
+    if (ctx.hasUI) {
+      ctx.ui.notify(`Session guard config: ${warning}`, "warning");
+      return;
+    }
+    console.warn(`[session-guard] ${warning}`);
+  };
 
   const reload = (ctx: ExtensionContext) => {
-    settings = loadSettings(ctx.cwd);
+    const loaded = loadSettings(ctx.cwd);
+    settings = loaded.settings;
+    for (const warning of loaded.warnings) emitSettingsWarning(ctx, warning);
     checkpoints = reconstructCheckpoints(ctx.sessionManager.getEntries());
   };
 

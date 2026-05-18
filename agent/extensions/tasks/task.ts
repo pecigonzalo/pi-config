@@ -4109,16 +4109,20 @@ export default function (pi: ExtensionAPI) {
 						childSessions: childSessions.length > 0 ? childSessions : undefined,
 					};
 				};
+			const throwTaskError = (message: string, details: TaskDetails): never => {
+				const error = new Error(message) as Error & { details?: TaskDetails };
+				error.details = details;
+				throw error;
+			};
 
 			// Recursion depth guard
 			const depthCheck = checkSubagentDepth();
 			if (depthCheck.blocked) {
 				const mode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
-				return {
-					content: [{ type: "text", text: `Task depth limit reached (depth ${depthCheck.depth}, max ${depthCheck.maxDepth}). Nested task delegation is blocked to prevent runaway recursion.` }],
-					details: makeDetails(mode)([]),
-					isError: true,
-				};
+				throwTaskError(
+					`Task depth limit reached (depth ${depthCheck.depth}, max ${depthCheck.maxDepth}). Nested task delegation is blocked to prevent runaway recursion.`,
+					makeDetails(mode)([]),
+				);
 			}
 
 			if (modeCount !== 1) {
@@ -4158,35 +4162,25 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (hasRuntimePersistOverride(params as unknown)) {
-				return {
-					content: [{ type: "text", text: "Invalid parameters. Runtime persist overrides are not supported." }],
-					details: makeDetails(mode)([]),
-					isError: true,
-				};
+				throwTaskError("Invalid parameters. Runtime persist overrides are not supported.", makeDetails(mode)([]));
 			}
 
 			if (mode !== "chain") {
 				const invalidStep = stepsToRun.findIndex((step) => hasPreviousPlaceholder(step.task));
 				if (invalidStep !== -1) {
-					return {
-						content: [{ type: "text", text: `Invalid task at step ${invalidStep + 1}: {previous} is only supported in chain mode.` }],
-						details: makeDetails(mode)([]),
-						isError: true,
-					};
+					throwTaskError(
+						`Invalid task at step ${invalidStep + 1}: {previous} is only supported in chain mode.`,
+						makeDetails(mode)([]),
+					);
 				}
 			}
 
-			if (mode === "parallel" && stepsToRun.length > MAX_PARALLEL_TASKS)
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Too many parallel tasks (${stepsToRun.length}). Max is ${MAX_PARALLEL_TASKS}.`,
-						},
-					],
-					details: makeDetails("parallel")([]),
-					isError: true,
-				};
+			if (mode === "parallel" && stepsToRun.length > MAX_PARALLEL_TASKS) {
+				throwTaskError(
+					`Too many parallel tasks (${stepsToRun.length}). Max is ${MAX_PARALLEL_TASKS}.`,
+					makeDetails("parallel")([]),
+				);
+			}
 
 			let preparedSteps: PreparedTaskStep[] = [];
 
@@ -4217,11 +4211,7 @@ export default function (pi: ExtensionAPI) {
 
 			const preflight = await preflightTaskRun(mode, stepsToRun, discovery, ctx.cwd, ctx.sessionManager);
 			if (preflight.error || !preflight.prepared) {
-				return {
-					content: [{ type: "text", text: preflight.error ?? "Failed to prepare task run." }],
-					details: makeDetails(mode)([]),
-					isError: true,
-				};
+				throwTaskError(preflight.error ?? "Failed to prepare task run.", makeDetails(mode)([]));
 			}
 			sessionRunId = preflight.prepared.sessionRunId;
 			sessionRunRoot = preflight.prepared.sessionRunRoot;
@@ -4277,16 +4267,10 @@ export default function (pi: ExtensionAPI) {
 					if (isError) {
 						const errorMsg =
 							result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
-						return {
-							content: [
-								{
-									type: "text",
-									text: `Chain stopped at step ${preparedStep.step} (${preparedStep.rawStep.agent ?? preparedStep.rawStep.profile ?? "generic"}): ${errorMsg}\n\n${formatChainResults(results)}`,
-								},
-							],
-							details: makeDetails("chain")(results),
-							isError: true,
-						};
+						throwTaskError(
+							`Chain stopped at step ${preparedStep.step} (${preparedStep.rawStep.agent ?? preparedStep.rawStep.profile ?? "generic"}): ${errorMsg}\n\n${formatChainResults(results)}`,
+							makeDetails("chain")(results),
+						);
 					}
 					previousOutput = truncateOutput(getFinalOutput(result.messages));
 				}
@@ -4406,11 +4390,7 @@ export default function (pi: ExtensionAPI) {
 				if (isError) {
 					const errorMsg =
 						result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
-					return {
-						content: [{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${errorMsg}` }],
-						details: makeDetails("single")([result]),
-						isError: true,
-					};
+					throwTaskError(`Agent ${result.stopReason || "failed"}: ${errorMsg}`, makeDetails("single")([result]));
 				}
 				return {
 					content: [{ type: "text", text: truncateOutput(getFinalOutput(result.messages)) || "(no output)" }],

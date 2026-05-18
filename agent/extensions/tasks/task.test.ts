@@ -287,25 +287,23 @@ describe("tasks extension persisted-session guardrails", () => {
 	it("rejects runtime persist override in task execution", async () => {
 		const tool = createTaskTool();
 
-		const result = await tool.execute(
-			"tc-1",
-			{ task: "Do work", prompt: "Be concise", persist: true },
-			undefined,
-			undefined,
-			{
-				cwd: process.cwd(),
-				hasUI: false,
-				sessionManager: {
-					getSessionFile: () => undefined,
-					getBranch: () => [],
-					appendCustomEntry: () => "entry-id",
+		await expect(
+			tool.execute(
+				"tc-1",
+				{ task: "Do work", prompt: "Be concise", persist: true },
+				undefined,
+				undefined,
+				{
+					cwd: process.cwd(),
+					hasUI: false,
+					sessionManager: {
+						getSessionFile: () => undefined,
+						getBranch: () => [],
+						appendCustomEntry: () => "entry-id",
+					},
 				},
-			},
-		);
-
-		expect(result.isError).toBe(true);
-		expect(result.content[0]?.type).toBe("text");
-		expect(result.content[0]?.text).toContain("Runtime persist overrides are not supported");
+			),
+		).rejects.toThrow("Runtime persist overrides are not supported");
 	});
 
 	it("fails preflight for fork context when effective persist is false", async () => {

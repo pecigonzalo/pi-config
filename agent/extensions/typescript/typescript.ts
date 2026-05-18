@@ -643,6 +643,13 @@ function buildContent(details: CodemodeDetails): string {
 	return parts.join("\n");
 }
 
+function throwCodemodeExecutionError(details: CodemodeDetails): never {
+	const errorText = details.error ? `${details.error.phase}: ${details.error.message}` : "unknown error";
+	const error = new Error(`TypeScript execution failed: ${errorText}`) as Error & { details?: CodemodeDetails };
+	error.details = details;
+	throw error;
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "typescript",
@@ -915,10 +922,7 @@ export default function (pi: ExtensionAPI) {
 						mode: sandboxMode,
 					},
 				};
-				return {
-					content: [{ type: "text", text: buildContent(details) }],
-					details,
-				};
+				throwCodemodeExecutionError(details);
 			} finally {
 				await fs.rm(runtimeDir, { recursive: true, force: true }).catch(() => {});
 			}
@@ -951,6 +955,10 @@ export default function (pi: ExtensionAPI) {
 					mode: sandboxMode,
 				},
 			};
+
+			if (!details.ok) {
+				throwCodemodeExecutionError(details);
+			}
 
 			return {
 				content: [{ type: "text", text: buildContent(details) }],

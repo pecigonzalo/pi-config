@@ -14,7 +14,7 @@ import {
 	isParsedCommandAllowed,
 	sandboxFallbackModeForPolicy,
 } from "./shell-policy";
-import { compileSandboxConfig, getWorkspaceWritePaths, runSandboxedCommand } from "./sandbox";
+import { compileSandboxConfig, createSandboxedBashOps, getWorkspaceWritePaths, runSandboxedCommand } from "./sandbox";
 import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-parse";
 
 const execFile = promisify(execFileCallback);
@@ -366,6 +366,30 @@ describe("sandboxed command runner", () => {
 			path.join(sandboxTmpDir, "npm-cache"),
 			"",
 		].join("\n"));
+	});
+
+	it("uses runtime tmpdir overrides without mutating process env", async () => {
+		const runtimeTmpDir = path.join(os.tmpdir(), "pi-runtime-tmpdir-test");
+		const oldTmpDir = process.env.TMPDIR;
+		const oldClaudeTmpDir = process.env.CLAUDE_TMPDIR;
+		const chunks: string[] = [];
+
+		const ops = createSandboxedBashOps(
+			{
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command) => command,
+			},
+			runtimeTmpDir,
+		);
+
+		await ops.exec("printf '%s\n%s\n' \"$TMPDIR\" \"$CLAUDE_TMPDIR\"", process.cwd(), {
+			onData: (chunk) => chunks.push(chunk.toString("utf8")),
+		});
+
+		expect(chunks.join("")).toBe([runtimeTmpDir, runtimeTmpDir, ""].join("\n"));
+		expect(process.env.TMPDIR).toBe(oldTmpDir);
+		expect(process.env.CLAUDE_TMPDIR).toBe(oldClaudeTmpDir);
 	});
 
 	it("rejects with timeout errors", async () => {
