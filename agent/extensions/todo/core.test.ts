@@ -134,6 +134,15 @@ describe("todo core invariants", () => {
 		expect(todo?.history.map((entry) => entry.type)).toEqual(["created"]);
 	});
 
+	it("includes todo titles in status-change results", () => {
+		const harness = createHarness();
+		harness.execute({ action: "add", title: "Write clearer status messages" });
+
+		const result = harness.execute({ action: "toggle", id: 1, toStatus: "in-progress" });
+
+		expect(result.content[0].text).toBe("Todo #1: Write clearer status messages moved todo → in progress");
+	});
+
 	it("updates editable fields and records update history", () => {
 		const harness = createHarness();
 		harness.execute({ action: "add", title: "Original title" });

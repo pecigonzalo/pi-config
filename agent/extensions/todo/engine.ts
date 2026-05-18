@@ -144,6 +144,9 @@ function invalidTransitionMessage(from: TodoStatus): string {
 	return `Invalid transition. Valid from ${statusLabel(from)}: ${valid}`;
 }
 
+function todoLabel(todo: TodoItem): string {
+	return `Todo #${todo.id}: ${todo.title}`;
+}
 
 function ok(state: TodoState, action: TodoAction, text: string): TodoResult {
 	return {
@@ -373,7 +376,7 @@ export function executeTodoAction(
 				return { state: nextState, result: fail(nextState, "toggle", `Todo #${params.id} not found`, `#${params.id} not found`) };
 			}
 			if (todo.archived) {
-				return { state: nextState, result: fail(nextState, "toggle", `Todo #${todo.id} is archived`, "cannot toggle archived todo") };
+				return { state: nextState, result: fail(nextState, "toggle", `${todoLabel(todo)} is archived`, "cannot toggle archived todo") };
 			}
 
 			const previousStatus = todo.status;
@@ -382,7 +385,7 @@ export function executeTodoAction(
 				return { state: nextState, result: fail(nextState, "toggle", invalidTransitionMessage(previousStatus), "invalid transition") };
 			}
 			if (previousStatus === nextStatus) {
-				return { state: nextState, result: ok(nextState, "toggle", `Todo #${todo.id} already ${statusLabel(nextStatus)}`) };
+				return { state: nextState, result: ok(nextState, "toggle", `${todoLabel(todo)} already ${statusLabel(nextStatus)}`) };
 			}
 
 			if (nextStatus === "in-progress") {
@@ -390,7 +393,7 @@ export function executeTodoAction(
 				if (blockers.length) {
 					return {
 						state: nextState,
-						result: fail(nextState, "toggle", `Todo #${todo.id} is blocked by ${blockers.map((id) => `#${id}`).join(", ")}`, "unfinished blockers"),
+						result: fail(nextState, "toggle", `${todoLabel(todo)} is blocked by ${blockers.map((id) => `#${id}`).join(", ")}`, "unfinished blockers"),
 					};
 				}
 				if (previousStatus !== "in-progress" && inProgressCount(nextState) >= nextState.wipLimit) {
@@ -414,13 +417,13 @@ export function executeTodoAction(
 						result: fail(
 							nextState,
 							"toggle",
-							`Todo #${todo.id} cannot be done while blocked by ${blockers.map((id) => `#${id}`).join(", ")}`,
+							`${todoLabel(todo)} cannot be done while blocked by ${blockers.map((id) => `#${id}`).join(", ")}`,
 							"unfinished blockers",
 						),
 					};
 				}
 				if (hasOpenChildren(nextState, todo.id)) {
-					return { state: nextState, result: fail(nextState, "toggle", `Todo #${todo.id} has unfinished children`, "unfinished children") };
+					return { state: nextState, result: fail(nextState, "toggle", `${todoLabel(todo)} has unfinished children`, "unfinished children") };
 				}
 			}
 
@@ -432,7 +435,7 @@ export function executeTodoAction(
 						result: fail(
 							nextState,
 							"toggle",
-							`Cannot reopen #${todo.id}; active dependents: ${activeDependents.map((dependent) => `#${dependent.id}`).join(", ")}`,
+							`Cannot reopen ${todoLabel(todo)}; active dependents: ${activeDependents.map((dependent) => `#${dependent.id}`).join(", ")}`,
 							"active dependents",
 						),
 					};
@@ -443,7 +446,7 @@ export function executeTodoAction(
 			addHistory(todo, "status_changed", { from: previousStatus, to: nextStatus });
 			return {
 				state: nextState,
-				result: ok(nextState, "toggle", `Todo #${todo.id} moved ${statusLabel(previousStatus)} → ${statusLabel(nextStatus)}`),
+				result: ok(nextState, "toggle", `${todoLabel(todo)} moved ${statusLabel(previousStatus)} → ${statusLabel(nextStatus)}`),
 			};
 		}
 
