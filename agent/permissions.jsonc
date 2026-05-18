@@ -25,7 +25,7 @@
       },
       {
         "tool": "ls",
-        "match": "^${PI_PACKAGE_DIR}(/(docs|examples)(/|$)?)?$",
+        "match": "^${PI_PACKAGE_DIR}(/(docs|examples)(/|$).*)?$",
         "action": "allow",
         "externalPathAction": "allow",
       },

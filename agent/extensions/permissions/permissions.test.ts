@@ -92,6 +92,26 @@ describe("permissions config merge", () => {
 			else process.env.PI_PACKAGE_DIR = old;
 		}
 	});
+
+	it("infers the Pi package root from the running entrypoint path", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-pi-package-"));
+		const root = path.join(tmp, "node_modules", "@earendil-works", "pi-coding-agent");
+		await fs.mkdir(path.join(root, "dist"), { recursive: true });
+		await fs.mkdir(path.join(root, "docs"), { recursive: true });
+		await fs.mkdir(path.join(root, "examples"), { recursive: true });
+		await fs.writeFile(path.join(root, "README.md"), "# Pi\n", "utf8");
+		await fs.writeFile(path.join(root, "package.json"), JSON.stringify({
+			name: "@earendil-works/pi-coding-agent",
+			bin: { pi: "dist/cli.js" },
+		}), "utf8");
+		await fs.writeFile(path.join(root, "dist", "cli.js"), "", "utf8");
+
+		try {
+			expect(configModule.inferPiPackageDirFrom(path.join(root, "dist", "cli.js"))).toBe(await fs.realpath(root));
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("external path canonicalization", () => {

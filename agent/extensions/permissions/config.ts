@@ -119,23 +119,50 @@ function expandHome(value: string): string {
 	return value;
 }
 
-function findPiPackageDirFrom(candidate: string | undefined): string | undefined {
+function toExistingDirectory(candidate: string | undefined): string | undefined {
 	if (!candidate) return undefined;
-	let dir = candidate;
+
 	try {
-		dir = fs.statSync(candidate).isDirectory() ? candidate : path.dirname(candidate);
+		const real = fs.realpathSync.native(candidate);
+		return fs.statSync(real).isDirectory() ? real : path.dirname(real);
 	} catch {
-		dir = path.dirname(candidate);
+		const resolved = path.resolve(candidate);
+		try {
+			return fs.statSync(resolved).isDirectory() ? resolved : path.dirname(resolved);
+		} catch {
+			return path.dirname(resolved);
+		}
 	}
+}
+
+function looksLikePiPackageRoot(dir: string): boolean {
+	const packageJsonPath = path.join(dir, "package.json");
+	try {
+		const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")) as {
+			name?: string;
+			bin?: string | Record<string, string>;
+			piConfig?: unknown;
+		};
+		const hasExpectedResources =
+			fs.existsSync(path.join(dir, "README.md")) &&
+			fs.existsSync(path.join(dir, "docs")) &&
+			fs.existsSync(path.join(dir, "examples"));
+		if (!hasExpectedResources) return false;
+
+		const hasPiBin = typeof pkg.bin === "object" && typeof pkg.bin.pi === "string";
+		const nameLooksLikePi = typeof pkg.name === "string" && pkg.name.endsWith("/pi-coding-agent");
+		return hasPiBin || nameLooksLikePi || pkg.piConfig !== undefined;
+	} catch {
+		return false;
+	}
+}
+
+export function inferPiPackageDirFrom(candidate: string | undefined): string | undefined {
+	let dir = toExistingDirectory(candidate);
+	if (!dir) return undefined;
 
 	while (dir !== path.dirname(dir)) {
-		const packageJsonPath = path.join(dir, "package.json");
-		try {
-			const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")) as { name?: string };
-			if (pkg.name === "@mariozechner/pi-coding-agent") return dir;
-		} catch {
-			// Keep walking upward.
-		}
+		if (looksLikePiPackageRoot(dir)) return dir;
 		dir = path.dirname(dir);
 	}
 
@@ -145,7 +172,16 @@ function findPiPackageDirFrom(candidate: string | undefined): string | undefined
 export function getInterpolationVariables(): Record<string, string | undefined> {
 	const vars: Record<string, string | undefined> = { ...process.env };
 	vars.HOME ??= os.homedir();
-	vars.PI_PACKAGE_DIR ??= findPiPackageDirFrom(process.argv[1]) ?? findPiPackageDirFrom(process.execPath);
+
+	const piPackageDir = vars.PI_PACKAGE_DIR ?? inferPiPackageDirFrom(process.argv[1]) ?? inferPiPackageDirFrom(process.execPath);
+	if (piPackageDir) {
+		vars.PI_PACKAGE_DIR = piPackageDir;
+		vars.PI_DOCS_DIR ??= path.resolve(piPackageDir, "docs");
+		vars.PI_EXAMPLES_DIR ??= path.resolve(piPackageDir, "examples");
+		vars.PI_README_PATH ??= path.resolve(piPackageDir, "README.md");
+		vars.PI_CHANGELOG_PATH ??= path.resolve(piPackageDir, "CHANGELOG.md");
+	}
+
 	return vars;
 }
 
