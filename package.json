@@ -1,8 +1,11 @@
 {
   "scripts": {
-    "generate:footer-schema": "cd agent/extensions/footer && bun run generate:footer-schema"
+    "generate:footer-schema": "cd agent/extensions/footer && bun run generate:footer-schema",
+    "prepare": "lefthook install",
+    "test": "bun run scripts/test-extensions.ts"
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "v0.73.1"
+    "@mariozechner/pi-coding-agent": "v0.73.1",
+    "lefthook": "^2.1.6"
   }
 }
