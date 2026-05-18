@@ -1,7 +1,9 @@
 import { beforeAll, describe, it, expect, mock } from "bun:test";
+import { execFile as execFileCallback } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { promisify } from "node:util";
 import { approvalsCoverBash, approvalsCoverPaths, getApprovalsSettings } from "./approvals";
 import { resolveCodemodePolicy } from "./codemode";
 import { findGitRepoRoot, getFilesystemApprovalTargets, isPathOutsideCwd, ruleMatch } from "./matching";
@@ -12,8 +14,10 @@ import {
 	isParsedCommandAllowed,
 	sandboxFallbackModeForPolicy,
 } from "./shell-policy";
-import { compileSandboxConfig, runSandboxedCommand } from "./sandbox";
+import { compileSandboxConfig, getWorkspaceWritePaths, runSandboxedCommand } from "./sandbox";
 import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-parse";
+
+const execFile = promisify(execFileCallback);
 
 let configModule: typeof import("./config");
 
@@ -416,6 +420,27 @@ describe("sandbox network config", () => {
 	it("includes configured tmpDir in allowWrite", () => {
 		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
 		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/custom-pi");
+	});
+
+	it("allows git metadata writes when cwd is below the repo root", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-git-sandbox-"));
+		const repo = path.join(tmp, "repo");
+		const subdir = path.join(repo, "packages", "app");
+		await fs.mkdir(subdir, { recursive: true });
+		await execFile("git", ["init", "-q"], { cwd: repo });
+
+		try {
+			const repoRealPath = await fs.realpath(repo);
+			const subdirRealPath = await fs.realpath(subdir);
+			const writePaths = getWorkspaceWritePaths(subdir);
+			expect(writePaths).toContain(subdirRealPath);
+			expect(writePaths).toContain(path.join(repoRealPath, ".git"));
+
+			const compiled = compileSandboxConfig(policy, subdir, { enabled: true });
+			expect(compiled.config.filesystem?.allowWrite).toContain(path.join(repoRealPath, ".git"));
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
 	});
 
 	it("does not blanket-allow package manager home directories", () => {

@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { BashOperations } from "@mariozechner/pi-coding-agent";
@@ -62,6 +63,45 @@ function getPlatformCacheWritePaths(): string[] {
 	return darwinCacheDir ? [darwinCacheDir] : [];
 }
 
+function existingPathAliases(candidate: string): string[] {
+	const resolved = path.resolve(candidate);
+	try {
+		return dedupeStrings([resolved, fs.realpathSync.native(resolved)]);
+	} catch {
+		return [resolved];
+	}
+}
+
+function resolveGitPathAliases(candidate: string, cwd: string): string[] {
+	return existingPathAliases(path.isAbsolute(candidate) ? candidate : path.resolve(cwd, candidate));
+}
+
+function gitRevParse(cwd: string, arg: string): string | undefined {
+	try {
+		const value = execFileSync("git", ["rev-parse", arg], {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+		return value.length > 0 ? value : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+export function getWorkspaceWritePaths(cwd: string): string[] {
+	// Starting pi from a repo subdirectory should still allow `git commit`.
+	// Git writes index/object/lock files under the repository metadata directory,
+	// which can live outside cwd (and outside the worktree for git worktrees).
+	const gitDir = gitRevParse(cwd, "--git-dir");
+	const gitCommonDir = gitRevParse(cwd, "--git-common-dir");
+	return dedupeStrings([
+		...existingPathAliases(cwd),
+		...(gitDir ? resolveGitPathAliases(gitDir, cwd) : []),
+		...(gitCommonDir ? resolveGitPathAliases(gitCommonDir, cwd) : []),
+	]);
+}
+
 function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
 	const overrides = env ?? {};
 	const mergedEnv: NodeJS.ProcessEnv = { ...process.env, ...overrides };
@@ -92,10 +132,11 @@ export function compileSandboxConfig(
 	overrides: SandboxSettings | undefined,
 	runtimeTmpDir?: string,
 ): { enabled: boolean; config: SandboxRuntimeConfigLike; reason: string } {
+	const workspaceWritePaths = getWorkspaceWritePaths(cwd);
 	const modeDefaults: Record<PermissionMode, { enabled: boolean; network: boolean; allowWrite: string[] }> = {
 		plan: { enabled: true, network: false, allowWrite: [] },
-		"workspace-write": { enabled: true, network: true, allowWrite: [cwd] },
-		"full-access": { enabled: false, network: true, allowWrite: [cwd] },
+		"workspace-write": { enabled: true, network: true, allowWrite: workspaceWritePaths },
+		"full-access": { enabled: false, network: true, allowWrite: workspaceWritePaths },
 	};
 
 	const modeDefault = modeDefaults[policy.mode];
