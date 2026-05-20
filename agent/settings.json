@@ -17,9 +17,7 @@
   "defaultModel": "gpt-5.5",
   "defaultThinkingLevel": "high",
   "resources": {
-    "skills": [
-      "~/.config/opencode/skills"
-    ]
+    "skills": ["~/.config/opencode/skills"]
   },
   "compaction": {
     "enabled": true

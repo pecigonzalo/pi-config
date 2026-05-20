@@ -1,5 +1,7 @@
 {
-  "workspaces": ["agent/extensions/*"],
+  "workspaces": [
+    "agent/extensions/*"
+  ],
   "scripts": {
     "generate:footer-schema": "cd agent/extensions/footer && bun run generate:footer-schema",
     "prepare": "lefthook install",
@@ -7,7 +9,7 @@
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.75.1",
-    "@mariozechner/pi-coding-agent": "v0.73.1",
+    "@types/bun": "^1.3.14",
     "lefthook": "^2.1.6"
   }
 }
