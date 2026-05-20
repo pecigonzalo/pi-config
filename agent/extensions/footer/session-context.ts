@@ -242,6 +242,20 @@ export interface SessionContextController {
 export function createSessionContextController(pi: ExtensionAPI): SessionContextController {
   let requestRender: (() => void) | undefined;
   let sessionStart = Date.now();
+  let cachedUsageTotals: { leafId: unknown; totals: ReturnType<typeof getUsageTotals> } | undefined;
+
+  const invalidateUsageTotals = (): void => {
+    cachedUsageTotals = undefined;
+  };
+
+  const getCachedUsageTotals = (ctx: ExtensionContext): ReturnType<typeof getUsageTotals> => {
+    const leafId = ctx.sessionManager.getLeafId();
+    if (cachedUsageTotals && cachedUsageTotals.leafId === leafId) return cachedUsageTotals.totals;
+
+    const totals = getUsageTotals(ctx);
+    cachedUsageTotals = { leafId, totals };
+    return totals;
+  };
 
   return {
     setRequestRender(nextRequestRender) {
@@ -251,15 +265,18 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
     onSessionStart() {
       sessionStart = Date.now();
       gitInvalidate();
+      invalidateUsageTotals();
       requestRender?.();
     },
 
     onTurnStart() {
+      invalidateUsageTotals();
       requestRender?.();
     },
 
     onTurnEnd() {
       gitInvalidate();
+      invalidateUsageTotals();
       requestRender?.();
     },
 
@@ -287,17 +304,12 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
     },
 
     onSessionShutdown() {
+      invalidateUsageTotals();
       requestRender = undefined;
     },
 
     renderSegment(ctx, segment, options) {
       const theme = ctx.ui.theme;
-      const { tokIn, tokOut, cost } = getUsageTotals(ctx);
-      const usage = ctx.getContextUsage?.();
-      const ctxMax = ctx.model?.contextWindow;
-      const ctxPct = usage && ctxMax ? Math.min(100, (usage.tokens / ctxMax) * 100) : null;
-      const thinkingLevel = pi.getThinkingLevel();
-      const git = gitGet(ctx.cwd, () => requestRender?.());
 
       switch (segment) {
         case "path": {
@@ -306,6 +318,7 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
         }
 
         case "git": {
+          const git = gitGet(ctx.cwd, () => requestRender?.());
           if (!git.branch) return null;
           let rendered = theme.fg("dim", `${icons.branch} ${git.branch}`);
           const indicators: string[] = [];
@@ -329,6 +342,7 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
         }
 
         case "thinking": {
+          const thinkingLevel = pi.getThinkingLevel();
           if (thinkingLevel === "off") return null;
           const label: Record<string, string> = {
             minimal: "min",
@@ -352,17 +366,24 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
         }
 
         case "context": {
+          const usage = ctx.getContextUsage?.();
+          const ctxMax = ctx.model?.contextWindow;
+          const ctxPct = usage?.tokens != null && ctxMax ? Math.min(100, (usage.tokens / ctxMax) * 100) : null;
           if (ctxPct === null) return null;
           const color = ctxPct >= 90 ? "error" : ctxPct >= 70 ? "warning" : "dim";
           const label = ctxMax ? `${ctxPct.toFixed(1)}%/${fmtNum(ctxMax)}` : `${ctxPct.toFixed(1)}%`;
           return theme.fg(color, `${icons.ctx} ${label}`);
         }
 
-        case "tokens":
+        case "tokens": {
+          const { tokIn, tokOut } = getCachedUsageTotals(ctx);
           return tokIn || tokOut ? theme.fg("muted", `${icons.tokIn} ${fmtNum(tokIn)} ${icons.tokOut} ${fmtNum(tokOut)}`) : null;
+        }
 
-        case "cost":
+        case "cost": {
+          const { cost } = getCachedUsageTotals(ctx);
           return cost ? theme.fg("text", `${icons.cost}${cost.toFixed(3)}`) : null;
+        }
 
         case "time_spent": {
           const elapsed = Date.now() - sessionStart;
