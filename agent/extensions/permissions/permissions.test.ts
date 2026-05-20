@@ -511,6 +511,25 @@ describe("sandbox network config", () => {
 		expect(compiled.config.network?.deniedDomains).toEqual(["malicious.example.com"]);
 	});
 
+	it("allows macOS DNS config lookup when network is enabled", () => {
+		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, network: true });
+		if (process.platform === "darwin") {
+			expect(compiled.config.network?.allowMachLookup).toContain("com.apple.SystemConfiguration.configd");
+		} else {
+			expect(compiled.config.network?.allowMachLookup).toBeUndefined();
+		}
+	});
+
+	it("forwards configured macOS Mach lookup allowances", () => {
+		const compiled = compileSandboxConfig(policy, "/repo", {
+			enabled: true,
+			network: true,
+			allowMachLookup: ["com.example.service", "com.example.service"],
+		});
+		expect(compiled.config.network?.allowMachLookup).toContain("com.example.service");
+		expect(compiled.config.network?.allowMachLookup?.filter((value) => value === "com.example.service")).toHaveLength(1);
+	});
+
 	it("blocks all network when disabled", () => {
 		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, network: false });
 		expect(compiled.config.network?.allowedDomains).toEqual([]);
@@ -520,6 +539,70 @@ describe("sandbox network config", () => {
 	it("includes configured tmpDir in allowWrite", () => {
 		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
 		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/custom-pi");
+	});
+
+	it("includes current GOCACHE in default allowWrite", () => {
+		const originalGoCache = process.env.GOCACHE;
+		process.env.GOCACHE = "/tmp/custom-go-cache";
+		try {
+			const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
+			expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/custom-go-cache");
+		} finally {
+			if (originalGoCache === undefined) delete process.env.GOCACHE;
+			else process.env.GOCACHE = originalGoCache;
+		}
+	});
+
+	it("allows Go to populate current GOCACHE outside the workspace", async () => {
+		let currentGoCache: string;
+		try {
+			currentGoCache = (await execFile("go", ["env", "GOCACHE"])).stdout.trim();
+		} catch {
+			return;
+		}
+		if (!currentGoCache || currentGoCache === "off" || !path.isAbsolute(currentGoCache)) return;
+
+		const originalGoCache = process.env.GOCACHE;
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-go-cache-"));
+		const repo = path.join(tmp, "repo");
+
+		try {
+			await fs.mkdir(repo, { recursive: true });
+			await fs.writeFile(path.join(repo, "go.mod"), "module example.com/pi-go-cache-test\n\ngo 1.18\n");
+			await fs.writeFile(path.join(repo, "main_test.go"), `package gocachetest
+
+import "testing"
+
+const cacheBust = "${path.basename(tmp)}"
+
+func TestGoCache(t *testing.T) {}
+`);
+			process.env.GOCACHE = currentGoCache;
+
+			const compiled = compileSandboxConfig(policy, repo, { enabled: true, network: true });
+			expect(compiled.config.filesystem?.allowWrite).toContain(currentGoCache);
+
+			const chunks: string[] = [];
+			const result = await runSandboxedCommand(
+				{
+					initialize: async () => {},
+					reset: async () => {},
+					wrapWithSandbox: async (command) => command,
+				},
+				{
+					command: "go test ./...",
+					cwd: repo,
+					timeout: 30,
+					onData: (chunk) => chunks.push(chunk.toString("utf8")),
+				},
+			);
+
+			if (result.exitCode !== 0) throw new Error(chunks.join(""));
+		} finally {
+			if (originalGoCache === undefined) delete process.env.GOCACHE;
+			else process.env.GOCACHE = originalGoCache;
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
 	});
 
 	it("uses sandbox path globs rather than permission regexes for protected resources", () => {

@@ -35,6 +35,8 @@ function getCompatWritePaths(): string[] {
 
 let darwinUserCacheDir: string | undefined;
 let darwinUserCacheDirLoaded = false;
+let goBuildCacheDir: string | undefined;
+let goBuildCacheDirLoaded = false;
 
 /**
  * On macOS, many tools use the per-user Darwin cache directory returned by
@@ -58,9 +60,34 @@ function getDarwinUserCacheDir(): string | undefined {
 	return darwinUserCacheDir;
 }
 
+function normalizeCacheDir(value: string | undefined): string | undefined {
+	const trimmed = value?.trim();
+	if (!trimmed || trimmed === "off") return undefined;
+	return path.isAbsolute(trimmed) ? trimmed : undefined;
+}
+
+function getGoBuildCacheDir(): string | undefined {
+	if (process.env.GOCACHE !== undefined && process.env.GOCACHE.trim().length > 0) {
+		return normalizeCacheDir(process.env.GOCACHE);
+	}
+	if (goBuildCacheDirLoaded) return goBuildCacheDir;
+	goBuildCacheDirLoaded = true;
+	try {
+		const resolved = execFileSync("go", ["env", "GOCACHE"], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+		goBuildCacheDir = normalizeCacheDir(resolved);
+	} catch {
+		goBuildCacheDir = undefined;
+	}
+	return goBuildCacheDir;
+}
+
 function getPlatformCacheWritePaths(): string[] {
 	const darwinCacheDir = getDarwinUserCacheDir();
-	return darwinCacheDir ? [darwinCacheDir] : [];
+	const goCacheDir = getGoBuildCacheDir();
+	return dedupeStrings([darwinCacheDir, goCacheDir].filter((value): value is string => value !== undefined));
 }
 
 const PROTECTED_RESOURCE_SANDBOX_DENY_READ = new Map<string, string[]>([
@@ -77,6 +104,13 @@ const PROTECTED_RESOURCE_SANDBOX_DENY_WRITE = new Map<string, string[]>([
 	["(^|[/])(\\.vscode/|\\.idea/)", ["**/.vscode", "**/.vscode/**", "**/.idea", "**/.idea/**"]],
 	["(^|[/])\\.claude/(commands/|agents/)", ["**/.claude/commands", "**/.claude/commands/**", "**/.claude/agents", "**/.claude/agents/**"]],
 ]);
+
+// c-ares-based tools on macOS (for example Nix curl) read DNS settings via
+// SystemConfiguration instead of /etc/resolv.conf. Seatbelt blocks that Mach
+// lookup unless it is explicitly allowed, which leaves network enabled but DNS
+// unusable. This service exposes resolver configuration; it does not perform
+// DNS requests itself, unlike mDNSResponder.
+const DARWIN_DNS_CONFIG_MACH_LOOKUPS = ["com.apple.SystemConfiguration.configd"];
 
 function resolveSandboxPathTokens(values: string[], cwd: string): string[] {
 	return values.map((value) => resolveToken(value, cwd));
@@ -185,6 +219,8 @@ export function compileSandboxConfig(
 	if (overrides?.allowSshAuthSock && process.env.SSH_AUTH_SOCK) socketSet.add(process.env.SSH_AUTH_SOCK);
 	const allowUnixSockets = [...socketSet];
 	const allowAllUnixSockets = overrides?.allowAllUnixSockets ?? false;
+	const defaultMachLookups = process.platform === "darwin" && networkEnabled ? DARWIN_DNS_CONFIG_MACH_LOOKUPS : [];
+	const allowMachLookup = dedupeStrings([...defaultMachLookups, ...(overrides?.allowMachLookup ?? [])]);
 	const explicitAllowedDomains = overrides?.allowedDomains;
 	const explicitDeniedDomains = overrides?.deniedDomains;
 	const hasExplicitDomainPolicy = explicitAllowedDomains !== undefined || explicitDeniedDomains !== undefined;
@@ -195,6 +231,7 @@ export function compileSandboxConfig(
 				deniedDomains: [],
 				allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
 				allowAllUnixSockets: allowAllUnixSockets || undefined,
+				allowMachLookup: allowMachLookup.length > 0 ? allowMachLookup : undefined,
 			}
 		: hasExplicitDomainPolicy
 			? {
@@ -202,10 +239,12 @@ export function compileSandboxConfig(
 					deniedDomains: dedupeStrings(explicitDeniedDomains ?? []),
 					allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
 					allowAllUnixSockets: allowAllUnixSockets || undefined,
+					allowMachLookup: allowMachLookup.length > 0 ? allowMachLookup : undefined,
 				}
 			: {
 					allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
 					allowAllUnixSockets: allowAllUnixSockets || undefined,
+					allowMachLookup: allowMachLookup.length > 0 ? allowMachLookup : undefined,
 				};
 
 	return {

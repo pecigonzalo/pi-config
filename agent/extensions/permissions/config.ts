@@ -235,6 +235,7 @@ export function interpolateConfig(config: PermissionsConfig): PermissionsConfig 
 				...config.sandbox,
 				tmpDir: config.sandbox.tmpDir === undefined ? undefined : interpolateEnvString(config.sandbox.tmpDir),
 				allowUnixSockets: interpolateStringArray(config.sandbox.allowUnixSockets),
+				allowMachLookup: interpolateStringArray(config.sandbox.allowMachLookup),
 				allowWrite: interpolateStringArray(config.sandbox.allowWrite),
 				denyRead: interpolateStringArray(config.sandbox.denyRead),
 				denyWrite: interpolateStringArray(config.sandbox.denyWrite),

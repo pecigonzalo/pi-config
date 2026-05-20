@@ -414,6 +414,10 @@
   //   "allowSshAuthSock": true,
   //   "allowUnixSockets": ["/path/to/ssh-agent.sock"],
   //   "allowAllUnixSockets": false,
+  //   // macOS only: extra XPC/Mach services to allow. Pi includes
+  //   // com.apple.SystemConfiguration.configd by default when network=true
+  //   // so c-ares-based tools (for example Nix curl) can read DNS settings.
+  //   "allowMachLookup": ["com.example.service"],
   //   "allowWrite": ["/tmp"],
   //   "denyRead": ["~/.ssh", "~/.aws", "~/.gnupg"],
   //   "denyWrite": [".env", ".env.*", "*.pem", "*.key"]

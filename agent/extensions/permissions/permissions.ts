@@ -358,6 +358,35 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	async function disableSandboxForSession(ctx: ExtensionContext) {
+		if (sandboxEnabled && sandboxAvailable && sandboxManager) {
+			try {
+				await sandboxManager.reset();
+			} catch (err) {
+				warnPermissionIssue(ctx, `Sandbox reset failed while disabling: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+
+		const policy = activePolicy(config, agentName, profileName);
+		sandboxEnabled = false;
+		sandboxConfig = undefined;
+		sandboxReason = "disabled by /permissions sandbox disable";
+		sandboxMode = sandboxFallbackModeForPolicy(policy.mode);
+		clearSandboxEnv();
+	}
+
+	async function enableSandboxForSession(ctx: ExtensionContext) {
+		if (sandboxEnabled && sandboxAvailable && sandboxManager) {
+			try {
+				await sandboxManager.reset();
+			} catch (err) {
+				warnPermissionIssue(ctx, `Sandbox reset failed while re-enabling: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+
+		await initializeSandbox(ctx);
+	}
+
 	pi.on("session_start", async (_event, ctx) => {
 		sessionAllows.clear();
 		sessionPathApprovals.length = 0;
@@ -915,10 +944,56 @@ export default function (pi: ExtensionAPI) {
 	// ── /permissions command ──────────────────────────────────────────────────
 
 	pi.registerCommand("permissions", {
-		description: "Show permission summary (/permissions verbose for full details)",
+		description: "Show permission summary and subcommands (/permissions help)",
 		handler: async (args, ctx) => {
 			agentName = detectAgentName(pi);
 			profileName = detectProfileName(pi);
+			const normalizedArgs = (args || "").trim().toLowerCase().replace(/\s+/g, " ");
+			const [subcommand = "", ...subcommandRest] = normalizedArgs ? normalizedArgs.split(" ") : [""];
+			const subcommandArgs = subcommandRest.join(" ");
+
+			if (subcommand === "help") {
+				ctx.ui.notify("Usage: /permissions [verbose|approvals|reset [session|saved|project|agent|all]|mode|sandbox [status|enable|disable]]", "info");
+				return;
+			}
+
+			if (subcommand === "approvals" || subcommand === "approval") {
+				await showPermissionApprovals(ctx);
+				return;
+			}
+
+			if (subcommand === "reset") {
+				resetPermissions(subcommandArgs, ctx);
+				return;
+			}
+
+			if (subcommand === "mode") {
+				showPermissionsMode(ctx);
+				return;
+			}
+
+			if (normalizedArgs === "sandbox disable" || normalizedArgs === "sandbox off") {
+				await disableSandboxForSession(ctx);
+				const bashExecutionMode = sandboxMode === "normal" ? "local" : `local (${sandboxMode})`;
+				ctx.ui.notify(`Bash sandbox disabled for this session; bash exec mode: ${bashExecutionMode}`, "warning");
+				return;
+			}
+
+			if (normalizedArgs === "sandbox enable" || normalizedArgs === "sandbox on") {
+				await enableSandboxForSession(ctx);
+				const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
+				const bashExecutionMode = sandboxEnabled ? "sandboxed" : sandboxMode === "normal" ? "local" : `local (${sandboxMode})`;
+				ctx.ui.notify(`Bash sandbox: ${sandboxStatus}; bash exec mode: ${bashExecutionMode}`, sandboxEnabled ? "info" : "warning");
+				return;
+			}
+
+			if (normalizedArgs === "sandbox" || normalizedArgs === "sandbox status") {
+				const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
+				const bashExecutionMode = sandboxEnabled ? "sandboxed" : sandboxMode === "normal" ? "local" : `local (${sandboxMode})`;
+				ctx.ui.notify(`Bash sandbox: ${sandboxStatus}; bash exec mode: ${bashExecutionMode}`, "info");
+				return;
+			}
+
 			const policy = activePolicy(config, agentName, profileName);
 			const rules = policy.rules;
 			const externalPath = policy.externalPath;
@@ -989,7 +1064,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					lines.push("");
 					lines.push(`  ${theme.fg("muted", "Protected:    ")}${theme.fg("warning", `read=${protectedResources.denyRead.length} write=${protectedResources.denyWrite.length}`)}`);
-					lines.push(`  ${theme.fg("muted", "More:         ")}${theme.fg("dim", "/permissions verbose  •  /permissions-approvals  •  /permissions-reset")}`);
+					lines.push(`  ${theme.fg("muted", "More:         ")}${theme.fg("dim", "/permissions verbose  •  /permissions approvals  •  /permissions reset  •  /permissions sandbox enable|disable")}`);
 					lines.push("");
 					lines.push(`  ${theme.fg("dim", "Press Escape to close")}`);
 					lines.push("");
@@ -1130,117 +1205,108 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("permissions-approvals", {
-		description: "Show scoped session/saved permission approvals",
-		handler: async (_args, ctx) => {
-			agentName = detectAgentName(pi);
-			const projectRoot = canonicalizePath(ctx.cwd);
-			const scopedSaved = persistentApprovals.filter((a) => {
-				if (approvalsSettings.scopeByProject && a.projectRoot !== projectRoot) return false;
-				if (approvalsSettings.scopeByAgent && a.agentName !== agentName) return false;
-				return true;
-			});
-			const scopedSession = [...sessionPathApprovals, ...sessionBashApprovals].filter((a) => {
-				if (approvalsSettings.scopeByProject && a.projectRoot !== projectRoot) return false;
-				if (approvalsSettings.scopeByAgent && a.agentName !== agentName) return false;
-				return true;
-			});
-			const format = (a: ApprovalRecord) => `${a.tool}:${formatApprovalScope(a)}`;
+	async function showPermissionApprovals(ctx: ExtensionContext) {
+		agentName = detectAgentName(pi);
+		const projectRoot = canonicalizePath(ctx.cwd);
+		const scopedSaved = persistentApprovals.filter((a) => {
+			if (approvalsSettings.scopeByProject && a.projectRoot !== projectRoot) return false;
+			if (approvalsSettings.scopeByAgent && a.agentName !== agentName) return false;
+			return true;
+		});
+		const scopedSession = [...sessionPathApprovals, ...sessionBashApprovals].filter((a) => {
+			if (approvalsSettings.scopeByProject && a.projectRoot !== projectRoot) return false;
+			if (approvalsSettings.scopeByAgent && a.agentName !== agentName) return false;
+			return true;
+		});
+		const format = (a: ApprovalRecord) => `${a.tool}:${formatApprovalScope(a)}`;
 
-			if (!ctx.hasUI) {
-				ctx.ui.notify(
-					`Approvals (project=${projectRoot}, agent=${agentName}): session=${scopedSession.length}, saved=${scopedSaved.length}`,
-					"info",
-				);
-				return;
-			}
+		if (!ctx.hasUI) {
+			ctx.ui.notify(
+				`Approvals (project=${projectRoot}, agent=${agentName}): session=${scopedSession.length}, saved=${scopedSaved.length}`,
+				"info",
+			);
+			return;
+		}
 
-			await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
-				const lines: string[] = [];
-				lines.push("");
-				lines.push(`  ${theme.fg("accent", "Permission Approvals")}`);
-				lines.push(`  ${theme.fg("muted", "Project:")} ${theme.fg("dim", projectRoot)}`);
-				lines.push(`  ${theme.fg("muted", "Agent:  ")} ${theme.fg("dim", agentName)}`);
-				lines.push("");
-				lines.push(`  ${theme.fg("warning", `Session approvals (${scopedSession.length})`)}`);
-				for (const approval of scopedSession.slice(0, 10)) lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", format(approval))}`);
-				if (scopedSession.length > 10) lines.push(`  ${theme.fg("dim", `  ... ${scopedSession.length - 10} more`)}`);
-				lines.push("");
-				lines.push(`  ${theme.fg("accent", `Saved approvals (${scopedSaved.length})`)}`);
-				for (const approval of scopedSaved.slice(0, 10)) lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", format(approval))}`);
-				if (scopedSaved.length > 10) lines.push(`  ${theme.fg("dim", `  ... ${scopedSaved.length - 10} more`)}`);
-				lines.push("");
-				lines.push(`  ${theme.fg("dim", "Press Escape to close")}`);
-				lines.push("");
+		await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
+			const lines: string[] = [];
+			lines.push("");
+			lines.push(`  ${theme.fg("accent", "Permission Approvals")}`);
+			lines.push(`  ${theme.fg("muted", "Project:")} ${theme.fg("dim", projectRoot)}`);
+			lines.push(`  ${theme.fg("muted", "Agent:  ")} ${theme.fg("dim", agentName)}`);
+			lines.push("");
+			lines.push(`  ${theme.fg("warning", `Session approvals (${scopedSession.length})`)}`);
+			for (const approval of scopedSession.slice(0, 10)) lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", format(approval))}`);
+			if (scopedSession.length > 10) lines.push(`  ${theme.fg("dim", `  ... ${scopedSession.length - 10} more`)}`);
+			lines.push("");
+			lines.push(`  ${theme.fg("accent", `Saved approvals (${scopedSaved.length})`)}`);
+			for (const approval of scopedSaved.slice(0, 10)) lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", format(approval))}`);
+			if (scopedSaved.length > 10) lines.push(`  ${theme.fg("dim", `  ... ${scopedSaved.length - 10} more`)}`);
+			lines.push("");
+			lines.push(`  ${theme.fg("dim", "Press Escape to close")}`);
+			lines.push("");
 
-				const text = new Text(lines.join("\n"), 0, 0);
-				return {
-					render: (w: number) => text.render(w),
-					invalidate: () => text.invalidate(),
-					handleInput: (data: string) => { if (matchesKey(data, Key.escape)) done(); },
-				};
-			});
-		},
-	});
+			const text = new Text(lines.join("\n"), 0, 0);
+			return {
+				render: (w: number) => text.render(w),
+				invalidate: () => text.invalidate(),
+				handleInput: (data: string) => { if (matchesKey(data, Key.escape)) done(); },
+			};
+		});
+	}
 
-	pi.registerCommand("permissions-reset", {
-		description: "Reset permission approvals (session|saved|project|agent|all)",
-		handler: async (args, ctx) => {
-			agentName = detectAgentName(pi);
-			const trimmed = (args || "").trim().toLowerCase();
-			const projectRoot = canonicalizePath(ctx.cwd);
-			const resetSession = trimmed === "" || trimmed === "session" || trimmed === "all";
-			const resetSaved = trimmed === "saved" || trimmed === "all";
-			const resetProject = trimmed === "project";
-			const resetAgent = trimmed === "agent";
+	function resetPermissions(args: string | undefined, ctx: ExtensionContext) {
+		agentName = detectAgentName(pi);
+		const trimmed = (args || "").trim().toLowerCase();
+		const projectRoot = canonicalizePath(ctx.cwd);
+		const resetSession = trimmed === "" || trimmed === "session" || trimmed === "all";
+		const resetSaved = trimmed === "saved" || trimmed === "all";
+		const resetProject = trimmed === "project";
+		const resetAgent = trimmed === "agent";
 
-			if (!resetSession && !resetSaved && !resetProject && !resetAgent) {
-				ctx.ui.notify("Usage: /permissions-reset [session|saved|project|agent|all]", "warning");
-				return;
-			}
+		if (!resetSession && !resetSaved && !resetProject && !resetAgent) {
+			ctx.ui.notify("Usage: /permissions reset [session|saved|project|agent|all]", "warning");
+			return;
+		}
 
-			if (resetSession) {
-				sessionAllows.clear();
-				sessionPathApprovals.length = 0;
-				sessionBashApprovals.length = 0;
-			}
+		if (resetSession) {
+			sessionAllows.clear();
+			sessionPathApprovals.length = 0;
+			sessionBashApprovals.length = 0;
+		}
 
-			if (resetSaved) {
-				persistentApprovals = [];
-				saveApprovals();
-			}
+		if (resetSaved) {
+			persistentApprovals = [];
+			saveApprovals();
+		}
 
-			if (resetProject) {
-				sessionPathApprovals.splice(0, sessionPathApprovals.length, ...sessionPathApprovals.filter((a) => a.projectRoot !== projectRoot));
-				sessionBashApprovals.splice(0, sessionBashApprovals.length, ...sessionBashApprovals.filter((a) => a.projectRoot !== projectRoot));
-				persistentApprovals = persistentApprovals.filter((a) => a.projectRoot !== projectRoot);
-				saveApprovals();
-			}
+		if (resetProject) {
+			sessionPathApprovals.splice(0, sessionPathApprovals.length, ...sessionPathApprovals.filter((a) => a.projectRoot !== projectRoot));
+			sessionBashApprovals.splice(0, sessionBashApprovals.length, ...sessionBashApprovals.filter((a) => a.projectRoot !== projectRoot));
+			persistentApprovals = persistentApprovals.filter((a) => a.projectRoot !== projectRoot);
+			saveApprovals();
+		}
 
-			if (resetAgent) {
-				sessionPathApprovals.splice(0, sessionPathApprovals.length, ...sessionPathApprovals.filter((a) => a.agentName !== agentName));
-				sessionBashApprovals.splice(0, sessionBashApprovals.length, ...sessionBashApprovals.filter((a) => a.agentName !== agentName));
-				persistentApprovals = persistentApprovals.filter((a) => a.agentName !== agentName);
-				saveApprovals();
-			}
+		if (resetAgent) {
+			sessionPathApprovals.splice(0, sessionPathApprovals.length, ...sessionPathApprovals.filter((a) => a.agentName !== agentName));
+			sessionBashApprovals.splice(0, sessionBashApprovals.length, ...sessionBashApprovals.filter((a) => a.agentName !== agentName));
+			persistentApprovals = persistentApprovals.filter((a) => a.agentName !== agentName);
+			saveApprovals();
+		}
 
-			const parts: string[] = [];
-			if (resetSession) parts.push("session approvals cleared");
-			if (resetSaved) parts.push("saved approvals cleared");
-			if (resetProject) parts.push(`project approvals cleared (${projectRoot})`);
-			if (resetAgent) parts.push(`agent approvals cleared (${agentName})`);
-			ctx.ui.notify(`Permissions reset: ${parts.join(", ")}`, "info");
-		},
-	});
+		const parts: string[] = [];
+		if (resetSession) parts.push("session approvals cleared");
+		if (resetSaved) parts.push("saved approvals cleared");
+		if (resetProject) parts.push(`project approvals cleared (${projectRoot})`);
+		if (resetAgent) parts.push(`agent approvals cleared (${agentName})`);
+		ctx.ui.notify(`Permissions reset: ${parts.join(", ")}`, "info");
+	}
 
-	pi.registerCommand("permissions-mode", {
-		description: "Show the active permission mode",
-		handler: async (_args, ctx) => {
-			agentName = detectAgentName(pi);
-			profileName = detectProfileName(pi);
-			const policy = activePolicy(config, agentName, profileName);
-			ctx.ui.notify(`Active permission mode: ${policy.mode}`, "info");
-		},
-	});
+	function showPermissionsMode(ctx: ExtensionContext) {
+		agentName = detectAgentName(pi);
+		profileName = detectProfileName(pi);
+		const policy = activePolicy(config, agentName, profileName);
+		ctx.ui.notify(`Active permission mode: ${policy.mode}`, "info");
+	}
 }
 
