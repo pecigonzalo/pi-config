@@ -18,7 +18,6 @@ import {
   FOOTER_REGISTER_EVENT,
   FOOTER_UNREGISTER_EVENT,
 } from "./types";
-import type { LegacyChromeController } from "../compat/legacy-chrome";
 
 function getItemKey(owner: string, id: string): string {
   return `${owner}:${id}`;
@@ -31,10 +30,7 @@ export class FooterManager {
   private currentCtx: ExtensionContext | undefined;
   private requestRender: (() => void) | undefined;
 
-  constructor(
-    private readonly pi: ExtensionAPI,
-    private readonly chrome: LegacyChromeController,
-  ) {
+  constructor(private readonly pi: ExtensionAPI) {
     this.pi.events.on(FOOTER_REGISTER_EVENT, (payload) => {
       const { item } = payload as FooterRegisterEventPayload;
       this.registerItem(item);
@@ -115,38 +111,31 @@ export class FooterManager {
     this.currentCtx = ctx;
     if (!ctx.hasUI) return;
 
-    this.chrome.install(ctx);
+    ctx.ui.setFooter((_tui, theme) => {
+      const nextRequestRender = () => _tui.requestRender();
+      this.requestRender = nextRequestRender;
 
-    ctx.ui.setWidget(
-      "footer",
-      (_tui, theme) => {
-        const nextRequestRender = () => _tui.requestRender();
-        this.requestRender = nextRequestRender;
-
-        return {
-          render: (width: number): string[] => {
-            return renderFooterLines(this.items.values(), this.getActiveLayout(), { ctx, theme: theme as FooterTheme, layoutName: this.activeLayoutName }, width);
-          },
-          invalidate: () => {
-            this.invalidate();
-          },
-          dispose: () => {
-            if (this.requestRender === nextRequestRender) this.requestRender = undefined;
-          },
-        };
-      },
-      { placement: "belowEditor" },
-    );
+      return {
+        render: (width: number): string[] => {
+          return renderFooterLines(this.items.values(), this.getActiveLayout(), { ctx, theme: theme as FooterTheme, layoutName: this.activeLayoutName }, width);
+        },
+        invalidate: () => {
+          this.invalidate();
+        },
+        dispose: () => {
+          if (this.requestRender === nextRequestRender) this.requestRender = undefined;
+        },
+      };
+    });
 
     this.requestRender?.();
   }
 
   unmount(ctx: ExtensionContext): void {
     if (ctx.hasUI) {
-      ctx.ui.setWidget("footer", undefined);
+      ctx.ui.setFooter(undefined);
     }
     this.requestRender = undefined;
-    this.chrome.uninstall(ctx);
     this.currentCtx = undefined;
   }
 
@@ -157,8 +146,7 @@ export class FooterManager {
     this.requestRender?.();
   }
 
-  onTurnStart(ctx: ExtensionContext): void {
-    this.chrome.refresh(ctx);
+  onTurnStart(): void {
     for (const item of this.items.values()) item.onTurnStart?.();
     this.requestRender?.();
   }

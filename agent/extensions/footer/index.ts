@@ -1,7 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createSessionContextItems } from "./builtins/context-items";
 import { createStarshipItems } from "./builtins/starship-item";
-import { createLegacyChromeController } from "./compat/legacy-chrome";
 import { FooterConfigController } from "./config";
 import { FooterManager } from "./core/manager";
 import { footerLayoutNames, footerLayouts } from "./layouts";
@@ -13,7 +12,7 @@ import { createStarshipController } from "./starship";
 
 export default function footer(pi: ExtensionAPI) {
   const config = new FooterConfigController();
-  const footerManager = new FooterManager(pi, createLegacyChromeController());
+  const footerManager = new FooterManager(pi);
   footerManager.setLayouts(footerLayouts);
 
   const sessionContext = createSessionContextController(pi);
@@ -42,8 +41,8 @@ export default function footer(pi: ExtensionAPI) {
     footerManager.onToolResult(event as { toolName: string; input?: unknown });
   });
 
-  pi.on("turn_start", async (_event, ctx) => {
-    footerManager.onTurnStart(ctx);
+  pi.on("turn_start", async () => {
+    footerManager.onTurnStart();
   });
 
   pi.on("turn_end", async () => {
