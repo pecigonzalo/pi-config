@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { __test__ } from "./skill-preservation";
+import { __test__ } from "./index";
 
 describe("skill-preservation helpers", () => {
 	it("infers skill names from SKILL.md and root markdown files", () => {

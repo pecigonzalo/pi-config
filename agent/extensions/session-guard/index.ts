@@ -1053,23 +1053,33 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_tree", async (_event, ctx) => reload(ctx));
 
   pi.on("turn_start", async (_event, ctx) => {
-    if (!shouldCaptureCheckpointsForContext(settings, ctx)) return;
-    const leafId = ctx.sessionManager.getLeafEntry()?.id;
-    const targetEntryIds = collectPreTurnEntryIds(
-      ctx.sessionManager.getEntries(),
-      leafId,
-    );
-    await captureCheckpoint(pi, ctx, checkpoints, targetEntryIds, "pre-turn");
+    try {
+      if (!shouldCaptureCheckpointsForContext(settings, ctx)) return;
+      const leafId = ctx.sessionManager.getLeafEntry()?.id;
+      const targetEntryIds = collectPreTurnEntryIds(
+        ctx.sessionManager.getEntries(),
+        leafId,
+      );
+      await captureCheckpoint(pi, ctx, checkpoints, targetEntryIds, "pre-turn");
+    } catch (error) {
+      if (isStaleSessionError(error)) return;
+      throw error;
+    }
   });
 
   pi.on("turn_end", async (_event, ctx) => {
-    if (!shouldCaptureCheckpointsForContext(settings, ctx)) return;
-    const leafId = ctx.sessionManager.getLeafEntry()?.id;
-    const targetEntryIds = collectPostTurnEntryIds(
-      ctx.sessionManager.getEntries(),
-      leafId,
-    );
-    await captureCheckpoint(pi, ctx, checkpoints, targetEntryIds, "post-turn");
+    try {
+      if (!shouldCaptureCheckpointsForContext(settings, ctx)) return;
+      const leafId = ctx.sessionManager.getLeafEntry()?.id;
+      const targetEntryIds = collectPostTurnEntryIds(
+        ctx.sessionManager.getEntries(),
+        leafId,
+      );
+      await captureCheckpoint(pi, ctx, checkpoints, targetEntryIds, "post-turn");
+    } catch (error) {
+      if (isStaleSessionError(error)) return;
+      throw error;
+    }
   });
 
   pi.on("session_before_switch", async (event, ctx) => {
