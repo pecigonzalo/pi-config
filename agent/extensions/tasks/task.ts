@@ -345,8 +345,22 @@ function appendTaskOutputSection(
 		return;
 	}
 	for (const item of displayItems) {
-		if (item.type !== "toolCall") continue;
-		container.addChild(new Text(themeFg("muted", "→ ") + formatToolCall(item.name, item.args, themeFg), 0, 0));
+		if (item.type === "toolCall") {
+			container.addChild(new Text(themeFg("muted", "→ ") + formatToolCall(item.name, item.args, themeFg), 0, 0));
+			continue;
+		}
+		if (item.type === "toolResult") {
+			const icon = item.isError ? themeFg("error", "✗") : themeFg("success", "✓");
+			container.addChild(new Text(`${themeFg("muted", "↳ ")}${icon} ${themeFg("muted", `${item.name} result`)}`, 0, 0));
+			if (item.text) {
+				container.addChild(new Text(themeFg(item.isError ? "error" : "dim", item.text), 0, 0));
+			}
+			if (item.diff) {
+				container.addChild(new Text(themeFg("muted", "diff:"), 0, 0));
+				const diffBody = truncateOutput(item.diff).trim();
+				container.addChild(new Markdown(`\`\`\`diff\n${diffBody}\n\`\`\``, 0, 0, mdTheme));
+			}
+		}
 	}
 	if (finalOutput) {
 		container.addChild(new Spacer(1));
@@ -570,7 +584,36 @@ function formatChainResults(results: SingleResult[]): string {
 	return [`Chain: ${successCount}/${results.length} succeeded`, ...sections].join("\n\n");
 }
 
-type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
+type DisplayItem =
+	| { type: "text"; text: string }
+	| { type: "toolCall"; name: string; args: Record<string, any> }
+	| { type: "toolResult"; name: string; text?: string; diff?: string; isError: boolean };
+
+function extractMessageTextContent(message: Message): string | undefined {
+	const content = (message as { content?: unknown }).content;
+	if (typeof content === "string") {
+		const text = content.trim();
+		return text || undefined;
+	}
+	if (!Array.isArray(content)) return undefined;
+	const text = content
+		.flatMap((part) => {
+			if (typeof part === "string") return [part];
+			if (!isRecord(part)) return [];
+			if (typeof part.text === "string") return [part.text];
+			return [];
+		})
+		.join("\n")
+		.trim();
+	return text || undefined;
+}
+
+function extractToolResultDiff(message: Message): string | undefined {
+	const details = (message as { details?: unknown }).details;
+	if (!isRecord(details) || typeof details.diff !== "string") return undefined;
+	const diff = details.diff.trim();
+	return diff || undefined;
+}
 
 function getDisplayItems(messages: Message[]): DisplayItem[] {
 	const items: DisplayItem[] = [];
@@ -580,6 +623,20 @@ function getDisplayItems(messages: Message[]): DisplayItem[] {
 				if (part.type === "text") items.push({ type: "text", text: part.text });
 				else if (part.type === "toolCall") items.push({ type: "toolCall", name: part.name, args: part.arguments });
 			}
+			continue;
+		}
+		if (msg.role === "toolResult") {
+			const toolName = (msg as { toolName?: unknown }).toolName;
+			const isError = (msg as { isError?: unknown }).isError === true;
+			const text = extractMessageTextContent(msg);
+			const diff = extractToolResultDiff(msg);
+			items.push({
+				type: "toolResult",
+				name: typeof toolName === "string" && toolName.trim() ? toolName : "tool",
+				text,
+				diff,
+				isError,
+			});
 		}
 	}
 	return items;
@@ -4498,9 +4555,17 @@ export default function (pi: ExtensionAPI) {
 					if (item.type === "text") {
 						const preview = expanded ? item.text : item.text.split("\n").slice(0, 3).join("\n");
 						text += `${theme.fg("toolOutput", preview)}\n`;
-					} else {
-						text += `${theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme))}\n`;
+						continue;
 					}
+					if (item.type === "toolCall") {
+						text += `${theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme))}\n`;
+						continue;
+					}
+					if (!expanded) continue;
+					const icon = item.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+					text += `${theme.fg("muted", "↳ ")}${icon} ${theme.fg("muted", `${item.name} result`)}\n`;
+					if (item.text) text += `${theme.fg(item.isError ? "error" : "dim", item.text)}\n`;
+					if (item.diff) text += `${theme.fg("muted", "diff available")}\n`;
 				}
 				return text.trimEnd();
 			};
