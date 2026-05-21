@@ -1,0 +1,97 @@
+import { describe, expect, test } from "bun:test";
+import { __test } from "./index";
+
+const sourceFile = {
+	absPath: "/repo/src/auth.ts",
+	relPath: "src/auth.ts",
+	language: "typescript",
+	size: 100,
+};
+
+describe("code-intel Phase 1 extraction", () => {
+	test("extracts TypeScript declarations and methods", () => {
+		const defs = __test.extractDefinitions(
+			sourceFile,
+			`export interface AuthOptions {\n  tokenTtl: number;\n}\n\nexport class AuthService {\n  constructor(private store: TokenStore) {}\n  async login(email: string, password: string): Promise<Token> {\n    return this.store.create(email);\n  }\n}\n\nexport const buildAuth = (store: TokenStore) => new AuthService(store);\n`,
+		);
+
+		expect(defs.map((def) => `${def.kind}:${def.name}`)).toContain("interface:AuthOptions");
+		expect(defs.map((def) => `${def.kind}:${def.name}`)).toContain("class:AuthService");
+		expect(defs.map((def) => `${def.kind}:${def.name}`)).toContain("method:login");
+		expect(defs.map((def) => `${def.kind}:${def.name}`)).toContain("function:buildAuth");
+	});
+
+	test("finds brace-delimited symbol ranges", () => {
+		const lines = `export class AuthService {\n  async login() {\n    if (true) {\n      return 1;\n    }\n  }\n}\n\nexport function outside() {}`.split("\n");
+
+		expect(__test.findDefinitionEnd(lines, 0, "typescript")).toBe(6);
+		expect(__test.findDefinitionEnd(lines, 1, "typescript")).toBe(5);
+	});
+
+	test("ranks externally referenced definitions higher", () => {
+		const authDef = {
+			name: "AuthService",
+			kind: "class",
+			file: "src/auth.ts",
+			line: 1,
+			column: 13,
+			text: "class AuthService {}",
+			signatureLines: ["class AuthService {}"],
+			score: 0,
+		};
+		const localDef = {
+			...authDef,
+			name: "LocalHelper",
+			kind: "function",
+			text: "function LocalHelper() {}",
+			signatureLines: ["function LocalHelper() {}"],
+		};
+
+		const refs = new Map([
+			["AuthService", new Map([["src/routes.ts", 3]])],
+			["LocalHelper", new Map([["src/auth.ts", 1]])],
+		]);
+		const ranked = __test.rankDefinitions(
+			new Map([
+				["AuthService", [authDef]],
+				["LocalHelper", [localDef]],
+			]),
+			refs,
+			new Set(),
+		);
+
+		expect(ranked[0]?.name).toBe("AuthService");
+	});
+
+	test("reports unsupported extensions when map scope has no supported files", () => {
+		const notes = __test.renderScanDiagnostics(
+			{
+				unsupportedExtensions: new Map([
+					[".zig", 4],
+					[".vue", 2],
+				]),
+				fallbackPatternLanguages: new Map(),
+			},
+			0,
+		);
+
+		expect(notes.join("\n")).toContain("No supported source files were analyzed");
+		expect(notes.join("\n")).toContain(".zig (4)");
+	});
+
+	test("reports fallback language extraction limits", () => {
+		const notes = __test.renderScanDiagnostics(
+			{
+				unsupportedExtensions: new Map(),
+				fallbackPatternLanguages: new Map([
+					["scala", 3],
+					["elixir", 1],
+				]),
+			},
+			2,
+		);
+
+		expect(notes.join("\n")).toContain("generic fallback patterns");
+		expect(notes.join("\n")).toContain("scala (3 file(s))");
+	});
+});

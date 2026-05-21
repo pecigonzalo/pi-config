@@ -1,0 +1,13 @@
+{
+  "name": "code-intel",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.75.1",
+    "@earendil-works/pi-tui": "0.75.1"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
