@@ -412,6 +412,9 @@
   //   // "allowedDomains": ["api.github.com", "*.npmjs.org"],
   //   // "deniedDomains": ["malicious.example.com"],
   //   "allowSshAuthSock": true,
+  //   // Optional environment for sandboxed bash. By default, sandboxed bash
+  //   // sets GIT_SSH_COMMAND="ssh -o ControlMaster=no" to avoid dynamic SSH control sockets.
+  //   "env": { "GIT_SSH_COMMAND": "ssh -o ControlMaster=no" },
   //   "allowUnixSockets": ["/path/to/ssh-agent.sock"],
   //   "allowAllUnixSockets": false,
   //   // macOS only: extra XPC/Mach services to allow. Pi includes

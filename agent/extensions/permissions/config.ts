@@ -206,6 +206,11 @@ function interpolateStringArray(values: string[] | undefined, options?: { regex?
 	return values?.map((value) => interpolateEnvString(value, options));
 }
 
+function interpolateStringRecord(values: Record<string, string> | undefined): Record<string, string> | undefined {
+	if (!values) return undefined;
+	return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, interpolateEnvString(value)]));
+}
+
 export function interpolateConfig(config: PermissionsConfig): PermissionsConfig {
 	const interpolateRules = (rules: Rule[] | undefined): Rule[] | undefined =>
 		rules?.map((rule) => ({
@@ -239,6 +244,7 @@ export function interpolateConfig(config: PermissionsConfig): PermissionsConfig 
 				allowWrite: interpolateStringArray(config.sandbox.allowWrite),
 				denyRead: interpolateStringArray(config.sandbox.denyRead),
 				denyWrite: interpolateStringArray(config.sandbox.denyWrite),
+				env: interpolateStringRecord(config.sandbox.env),
 			}
 			: undefined,
 		protectedResources: config.protectedResources

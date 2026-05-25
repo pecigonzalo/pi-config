@@ -116,6 +116,7 @@ export interface SandboxSettings {
 	allowWrite?: string[];
 	denyRead?: string[];
 	denyWrite?: string[];
+	env?: Record<string, string>;
 }
 
 export interface SandboxRuntimeConfigLike {

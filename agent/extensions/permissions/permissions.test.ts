@@ -82,6 +82,24 @@ describe("permissions config merge", () => {
 		}
 	});
 
+	it("interpolates environment variables in sandbox env values", () => {
+		const old = process.env.PI_TEST_SOCKET_DIR;
+		process.env.PI_TEST_SOCKET_DIR = "/tmp/pi sockets";
+		try {
+			const config = configModule.interpolateConfig({
+				sandbox: {
+					env: {
+						GIT_SSH_COMMAND: "ssh -o ControlMaster=no -o ControlPath=${PI_TEST_SOCKET_DIR}/git.sock",
+					},
+				},
+			});
+			expect(config.sandbox?.env?.GIT_SSH_COMMAND).toBe("ssh -o ControlMaster=no -o ControlPath=/tmp/pi sockets/git.sock");
+		} finally {
+			if (old === undefined) delete process.env.PI_TEST_SOCKET_DIR;
+			else process.env.PI_TEST_SOCKET_DIR = old;
+		}
+	});
+
 	it("interpolates environment variables in sandbox paths as raw paths", () => {
 		const old = process.env.PI_PACKAGE_DIR;
 		process.env.PI_PACKAGE_DIR = "/tmp/pi.package";
@@ -666,6 +684,48 @@ func TestGoCache(t *testing.T) {}
 		expect(allowWrite).not.toContain(path.join(home, ".npm"));
 		expect(allowWrite).not.toContain(path.join(home, ".yarn"));
 		expect(allowWrite).not.toContain(path.join(home, ".cargo"));
+	});
+
+	it("defaults sandboxed Git SSH to disabling SSH control sockets", async () => {
+		const originalGitSshCommand = process.env.GIT_SSH_COMMAND;
+		delete process.env.GIT_SSH_COMMAND;
+		const chunks: string[] = [];
+		try {
+			await runSandboxedCommand(
+				{
+					initialize: async () => {},
+					reset: async () => {},
+					wrapWithSandbox: async (command) => command,
+				},
+				{
+					command: "printf '%s' \"$GIT_SSH_COMMAND\"",
+					cwd: process.cwd(),
+					onData: (chunk) => chunks.push(chunk.toString("utf8")),
+				},
+			);
+			expect(chunks.join("")).toBe("ssh -o ControlMaster=no");
+		} finally {
+			if (originalGitSshCommand === undefined) delete process.env.GIT_SSH_COMMAND;
+			else process.env.GIT_SSH_COMMAND = originalGitSshCommand;
+		}
+	});
+
+	it("lets sandbox env override the default Git SSH command", async () => {
+		const chunks: string[] = [];
+		await runSandboxedCommand(
+			{
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command) => command,
+			},
+			{
+				command: "printf '%s' \"$GIT_SSH_COMMAND\"",
+				cwd: process.cwd(),
+				env: { GIT_SSH_COMMAND: "ssh -o ControlMaster=auto" },
+				onData: (chunk) => chunks.push(chunk.toString("utf8")),
+			},
+		);
+		expect(chunks.join("")).toBe("ssh -o ControlMaster=auto");
 	});
 });
 

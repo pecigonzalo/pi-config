@@ -202,7 +202,7 @@ export default function (pi: ExtensionAPI) {
 				return localBash.execute(id, params, signal, onUpdate, ctx);
 			}
 			const sandboxedBash = createBashTool(ctx.cwd, {
-				operations: createSandboxedBashOps(sandboxManager, sandboxTmpDir),
+				operations: createSandboxedBashOps(sandboxManager, sandboxTmpDir, config.sandbox?.env),
 			});
 			return sandboxedBash.execute(id, params, signal, onUpdate, ctx);
 		},

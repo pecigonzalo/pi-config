@@ -111,6 +111,9 @@ const PROTECTED_RESOURCE_SANDBOX_DENY_WRITE = new Map<string, string[]>([
 // unusable. This service exposes resolver configuration; it does not perform
 // DNS requests itself, unlike mDNSResponder.
 const DARWIN_DNS_CONFIG_MACH_LOOKUPS = ["com.apple.SystemConfiguration.configd"];
+const DEFAULT_SANDBOX_ENV: NodeJS.ProcessEnv = {
+	GIT_SSH_COMMAND: "ssh -o ControlMaster=no",
+};
 
 function resolveSandboxPathTokens(values: string[], cwd: string): string[] {
 	return values.map((value) => resolveToken(value, cwd));
@@ -161,7 +164,8 @@ export function getWorkspaceWritePaths(cwd: string): string[] {
 
 function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
 	const overrides = env ?? {};
-	const mergedEnv: NodeJS.ProcessEnv = { ...process.env, ...overrides };
+	const mergedEnv: NodeJS.ProcessEnv = { ...DEFAULT_SANDBOX_ENV, ...process.env, ...overrides };
+	if (!mergedEnv.GIT_SSH_COMMAND?.trim()) mergedEnv.GIT_SSH_COMMAND = DEFAULT_SANDBOX_ENV.GIT_SSH_COMMAND;
 	const effectiveTmpDir = (overrides.TMPDIR && overrides.TMPDIR.trim().length > 0)
 		? resolveToken(overrides.TMPDIR, cwd)
 		: getEffectiveSandboxTmpDir(cwd, undefined);
@@ -375,6 +379,7 @@ export async function runSandboxedCommand(
 export function createSandboxedBashOps(
 	sandboxManager: SandboxManagerLike,
 	runtimeTmpDir?: string,
+	sandboxEnv?: Record<string, string>,
 ): BashOperations {
 	return {
 		async exec(command, cwd, { onData, signal, timeout }) {
@@ -383,9 +388,10 @@ export function createSandboxedBashOps(
 				cwd,
 				env: runtimeTmpDir
 					? {
+						...(sandboxEnv ?? {}),
 						TMPDIR: runtimeTmpDir,
 					}
-					: undefined,
+					: sandboxEnv,
 				timeout,
 				signal,
 				onData,
