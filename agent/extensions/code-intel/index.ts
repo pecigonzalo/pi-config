@@ -1,10 +1,20 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { formatSize } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { findEnclosingSymbol, findIdentifierLineMatches, findSymbols, generateOutline, generateRepoMap, renderTextMatchFallback, sliceSymbol, buildStatus } from "./src/actions";
+import {
+	__actionsTest,
+	buildStatus,
+	findEnclosingSymbol,
+	findIdentifierLineMatches,
+	findSymbols,
+	generateOutline,
+	generateRepoMap,
+	renderTextMatchFallback,
+	sliceSymbol,
+} from "./src/actions";
 import { __analysisTest } from "./src/analysis";
 import { CODE_INTEL_SCHEMA } from "./src/constants";
-import { extractDefinitions, extractImportLines, findDefinitionEnd, matchDefinition, mergeDefinitions } from "./src/extractors";
+import { extractDefinitions, extractImportLines, findDefinitionEnd, getDefinitionEnd, matchDefinition, mergeDefinitions } from "./src/extractors";
 import { buildDetails, formatAction, formatCallHint, textResult, truncateForTool } from "./src/helpers";
 import { languageForPath } from "./src/source-files";
 import { hydrateTreeSitterDefinitions, parseTreeSitterTagsOutput } from "./src/tree-sitter";
@@ -120,4 +130,9 @@ export const __test = {
 	mergeDefinitions,
 	renderTextMatchFallback,
 	findIdentifierLineMatches,
+	getDefinitionEnd,
+	filterBySliceMode: __actionsTest.filterBySliceMode,
+	isDeclaration: __actionsTest.isDeclaration,
+	formatBackendSummary: __actionsTest.formatBackendSummary,
+	normalizeSliceMode: __actionsTest.normalizeSliceMode,
 };

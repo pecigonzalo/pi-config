@@ -42,7 +42,10 @@ export async function buildRepoAnalysis(
 	const backendSignature = await getBackendSignature(pi, signal);
 	const cached = await loadAnalysisCache(root, files, backendSignature, params);
 	if (cached) {
-		const rankedDefinitions = rankDefinitions(cached.definitionsByName, cached.referencesByName, splitQueryTerms(params.query));
+		const rankedDefinitions = rankDefinitions(cached.definitionsByName, cached.referencesByName, splitQueryTerms(params.query), {
+			query: params.query,
+			preferPath: params.path,
+		});
 		return { ...cached, rankedDefinitions };
 	}
 
@@ -93,7 +96,10 @@ export async function buildRepoAnalysis(
 		}
 	}
 
-	const rankedDefinitions = rankDefinitions(definitionsByName, referencesByName, splitQueryTerms(params.query));
+	const rankedDefinitions = rankDefinitions(definitionsByName, referencesByName, splitQueryTerms(params.query), {
+		query: params.query,
+		preferPath: params.path,
+	});
 	const analysis = { root, files, diagnostics: sourceDiscovery.diagnostics, analyses, definitionsByName, referencesByName, rankedDefinitions };
 	await saveAnalysisCache(root, files, backendSignature, analysis).catch(() => undefined);
 	return analysis;
@@ -207,8 +213,12 @@ function rankDefinitions(
 	definitionsByName: Map<string, Definition[]>,
 	referencesByName: Map<string, Map<string, number>>,
 	queryTerms: Set<string>,
+	context?: { query?: string; preferPath?: string },
 ): Definition[] {
 	const ranked: Definition[] = [];
+	const queryLower = context?.query?.trim().toLowerCase();
+	const queryWantsTests = Boolean(queryLower && /\btest\b|_test|\.test\./.test(queryLower));
+	const preferPath = context?.preferPath ? context.preferPath.toLowerCase() : undefined;
 	for (const [name, definitions] of definitionsByName) {
 		const references = referencesByName.get(name) ?? new Map<string, number>();
 		const definitionFiles = new Set(definitions.map((definition) => definition.file));
@@ -229,6 +239,15 @@ function rankDefinitions(
 			if (name.startsWith("_")) score *= 0.2;
 			if (definitions.length > 5) score *= 0.35;
 			if (matchesQuery(definition, queryTerms)) score *= 12;
+
+			const defNameLower = definition.name.toLowerCase();
+			if (queryLower && defNameLower === queryLower) score *= 20;
+			else if (queryLower && defNameLower.includes(queryLower)) score *= 4;
+
+			if (preferPath && definition.file.toLowerCase().includes(preferPath)) score *= 4;
+			if (!queryWantsTests && isTestFile(definition.file)) score *= 0.4;
+			if (definition.declaration) score *= 0.85;
+
 			definition.score = score;
 			ranked.push(definition);
 		}
@@ -247,6 +266,11 @@ function matchesQuery(definition: Definition, queryTerms: Set<string>): boolean 
 		if (haystack.includes(term.toLowerCase())) return true;
 	}
 	return false;
+}
+
+function isTestFile(path: string): boolean {
+	const lower = path.toLowerCase();
+	return lower.includes("/test/") || lower.includes("/__tests__/") || lower.endsWith("_test.go") || lower.includes(".test.") || lower.includes(".spec.");
 }
 
 export function renderScanDiagnostics(diagnostics: SourceScanDiagnostics, analyzedSourceFiles: number): string[] {

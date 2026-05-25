@@ -1,8 +1,7 @@
 import { IDENT_RE, KEYWORDS, MAX_SIGNATURE_LINES } from "../constants";
 import type { Definition, SourceFile } from "../types";
-import type { DefinitionPattern } from "./types";
+import { extractGoInterfaceMembers, goPatterns } from "./lang/go";
 import { cFamilyPatterns } from "./lang/c-family";
-import { goPatterns } from "./lang/go";
 import { javascriptPatterns } from "./lang/javascript";
 import { jvmPatterns } from "./lang/jvm";
 import { phpPatterns } from "./lang/php";
@@ -10,6 +9,7 @@ import { pythonPatterns } from "./lang/python";
 import { rubyPatterns } from "./lang/ruby";
 import { rustPatterns } from "./lang/rust";
 import { swiftPatterns } from "./lang/swift";
+import type { DefinitionPattern } from "./types";
 
 const PATTERN_REGISTRY: Record<string, () => DefinitionPattern[]> = {
 	typescript: javascriptPatterns,
@@ -47,13 +47,35 @@ export function extractDefinitions(file: SourceFile, text: string): Definition[]
 			signatureLines: captureSignature(lines, index, file.language),
 			score: 0,
 			backend: "syntax-pattern",
+			declaration: match.declaration,
+			container: match.container,
 		});
+	}
+
+	if (file.language === "go") {
+		const interfaceMembers = extractGoInterfaceMembers(lines).map((member) => ({
+			name: member.name,
+			kind: "interface_method",
+			file: file.relPath,
+			line: member.line,
+			column: member.column,
+			text: member.text,
+			signatureLines: [member.text],
+			score: 0,
+			backend: "syntax-pattern" as const,
+			declaration: true,
+			container: member.container,
+		}));
+		return mergeDefinitions(definitions, interfaceMembers);
 	}
 
 	return definitions;
 }
 
-export function matchDefinition(language: string, line: string): { name: string; kind: string } | undefined {
+export function matchDefinition(
+	language: string,
+	line: string,
+): { name: string; kind: string; declaration?: boolean; container?: string } | undefined {
 	const trimmed = line.trim();
 	if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#") || trimmed.startsWith("*")) return;
 
@@ -89,15 +111,35 @@ export function captureSignature(lines: string[], start: number, language: strin
 	return out;
 }
 
-export function extractImportLines(lines: string[]): Array<{ line: number; text: string }> {
+export function extractImportLines(lines: string[], language?: string): Array<{ line: number; text: string }> {
 	const imports: Array<{ line: number; text: string }> = [];
 	for (let i = 0; i < lines.length; i++) {
 		const trimmed = lines[i].trim();
+
+		if (language === "go" && /^import\s*\($/.test(trimmed)) {
+			for (let j = i + 1; j < lines.length; j++) {
+				const inner = lines[j].trim();
+				if (inner === ")") {
+					i = j;
+					break;
+				}
+				if (!inner || inner.startsWith("//")) continue;
+				imports.push({ line: j, text: lines[j].trimEnd() });
+			}
+			continue;
+		}
+
 		if (/^(import|export\s+.*from|from\s+\S+\s+import|package\s+|use\s+|mod\s+|require\(|#include\s+)/.test(trimmed)) {
+			if (language === "go" && trimmed.startsWith("package ")) continue;
 			imports.push({ line: i, text: lines[i].trimEnd() });
 		}
 	}
 	return imports;
+}
+
+export function getDefinitionEnd(definition: Definition, lines: string[], language: string): number {
+	if (definition.declaration) return definition.line;
+	return findDefinitionEnd(lines, definition.line, language);
 }
 
 export function findDefinitionEnd(lines: string[], start: number, language: string): number {
@@ -181,7 +223,7 @@ export function findEnclosingDefinition(
 	language: string,
 ): { definition: Definition; endLine: number } | undefined {
 	return definitions
-		.map((definition) => ({ definition, endLine: findDefinitionEnd(lines, definition.line, language) }))
+		.map((definition) => ({ definition, endLine: getDefinitionEnd(definition, lines, language) }))
 		.filter((item) => item.definition.line <= zeroLine && item.endLine >= zeroLine)
 		.sort((a, b) => b.definition.line - a.definition.line)[0];
 }

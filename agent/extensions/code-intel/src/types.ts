@@ -14,6 +14,7 @@ export interface CodeIntelParams {
 	line?: number;
 	column?: number;
 	limit?: number;
+	sliceMode?: "implementation" | "declaration" | "any";
 }
 
 export interface SourceFile {
@@ -34,6 +35,8 @@ export interface Definition {
 	signatureLines: string[];
 	score: number;
 	backend?: "tree-sitter-tags" | "syntax-pattern";
+	declaration?: boolean;
+	container?: string;
 }
 
 export interface RepoMapOptions {
@@ -49,6 +52,7 @@ export interface RepoMapOptions {
 	line?: number;
 	column?: number;
 	limit?: number;
+	sliceMode?: "implementation" | "declaration" | "any";
 }
 
 export interface SourceScanDiagnostics {

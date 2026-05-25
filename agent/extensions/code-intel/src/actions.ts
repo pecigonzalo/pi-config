@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { formatSize } from "@earendil-works/pi-coding-agent";
 import { EXT_TO_LANGUAGE, LANGUAGE_SPECIFIC_PATTERN_SUPPORT } from "./constants";
 import { buildRepoAnalysis, generateRepoMapOutput, renderScanDiagnostics } from "./analysis";
-import { extractImportLines, findDefinitionEnd, findEnclosingDefinition } from "./extractors";
+import { extractImportLines, findEnclosingDefinition, getDefinitionEnd } from "./extractors";
 import { clampInt } from "./helpers";
 import { findProjectRoot, loadRequestedSourceFile } from "./source-files";
 import { commandVersion, extractDefinitionsForLoadedSource } from "./tree-sitter";
@@ -62,11 +62,12 @@ export async function generateOutline(
 	const { root, file, text } = loaded;
 	const definitions = await extractDefinitionsForLoadedSource(pi, root, file, text, signal);
 	const lines = text.split(/\r?\n/);
-	const imports = extractImportLines(lines);
+	const imports = extractImportLines(lines, file.language);
 	const out = [
 		`Outline for ${file.relPath}`,
 		`Root: ${root}`,
 		`Language: ${file.language}; ${lines.length} line(s); ${formatSize(file.size)}`,
+		formatBackendSummary(definitions),
 		"",
 	];
 
@@ -84,9 +85,10 @@ export async function generateOutline(
 
 	out.push("Symbols:");
 	for (const definition of definitions) {
-		const endLine = findDefinitionEnd(lines, definition.line, file.language);
+		const endLine = getDefinitionEnd(definition, lines, file.language);
+		const declarationMarker = definition.declaration ? " [declaration]" : "";
 		out.push(
-			`${String(definition.line + 1).padStart(5, " ")}-${String(endLine + 1).padStart(5, " ")} │${definition.kind.padEnd(10)} ${definition.name}${definition.backend ? ` [${definition.backend}]` : ""}`,
+			`${String(definition.line + 1).padStart(5, " ")}-${String(endLine + 1).padStart(5, " ")} │${definition.kind.padEnd(16)} ${definition.name}${declarationMarker}${definition.backend ? ` [${definition.backend}]` : ""}`,
 		);
 		for (const signatureLine of definition.signatureLines.slice(0, 3)) {
 			out.push(`            │ ${signatureLine.trim()}`);
@@ -119,8 +121,9 @@ export async function findSymbols(
 	];
 
 	for (const definition of matches.slice(0, limit)) {
+		const declarationMarker = definition.declaration ? " declaration" : "";
 		out.push(
-			`${definition.file}:${definition.line + 1}:${definition.column + 1} │ ${definition.kind} ${definition.name} │ score ${definition.score.toFixed(2)}${definition.backend ? ` │ ${definition.backend}` : ""}`,
+			`${definition.file}:${definition.line + 1}:${definition.column + 1} │ ${definition.kind}${declarationMarker} ${definition.name} │ score ${definition.score.toFixed(2)}${definition.backend ? ` │ ${definition.backend}` : ""}`,
 		);
 		out.push(`  ${definition.signatureLines[0]?.trim() ?? definition.text.trim()}`);
 	}
@@ -141,15 +144,18 @@ export async function sliceSymbol(
 		if (typeof loaded === "string") return loaded;
 	}
 
+	const sliceMode = normalizeSliceMode(params.sliceMode);
 	let target: { file: SourceFile; text: string; definition: Definition } | undefined;
 	let loadedDefinitions: Definition[] | undefined;
 	if (loaded && typeof loaded !== "string") {
 		loadedDefinitions = await extractDefinitionsForLoadedSource(pi, loaded.root, loaded.file, loaded.text, signal);
-		target = chooseDefinition(loadedDefinitions, loaded.file, loaded.text, params);
+		target = chooseDefinition(loadedDefinitions, loaded.file, loaded.text, params, sliceMode);
 	} else {
 		const analysis = await buildRepoAnalysis(pi, ctx, params, signal);
-		const candidates = analysis.rankedDefinitions.filter(
-			(definition) => definition.name === params.symbol || definition.name.toLowerCase().includes((params.symbol ?? "").toLowerCase()),
+		const symbolLower = (params.symbol ?? "").toLowerCase();
+		const candidates = filterBySliceMode(
+			analysis.rankedDefinitions.filter((definition) => definition.name.toLowerCase() === symbolLower || definition.name.toLowerCase().includes(symbolLower)),
+			sliceMode,
 		);
 		const definition = candidates[0];
 		if (definition) {
@@ -163,15 +169,25 @@ export async function sliceSymbol(
 
 	if (!target && loaded && typeof loaded !== "string" && loadedDefinitions && params.symbol?.trim()) {
 		const fallback = renderTextMatchFallback(loaded.file, loaded.text, loadedDefinitions, params.symbol);
-		if (fallback) return fallback;
+		if (fallback) {
+			const links = await renderImplementationLinks(pi, ctx, params, params.symbol, signal, loaded.file.relPath);
+			return links ? `${fallback}\n\n${links}` : fallback;
+		}
 	}
 
-	if (!target) return `No matching symbol found${params.symbol ? ` for "${params.symbol}"` : ""}.`;
+	if (!target) return `No matching symbol found${params.symbol ? ` for "${params.symbol}"` : ""} (sliceMode=${sliceMode}).`;
 	const lines = target.text.split(/\r?\n/);
-	const endLine = findDefinitionEnd(lines, target.definition.line, target.file.language);
+	const endLine = getDefinitionEnd(target.definition, lines, target.file.language);
 	const slice = lines.slice(target.definition.line, endLine + 1).join("\n");
-	const header = `${target.file.relPath}:${target.definition.line + 1}-${endLine + 1} │ ${target.definition.kind} ${target.definition.name}${target.definition.backend ? ` │ ${target.definition.backend}` : ""}`;
-	return `${header}\n\n${slice}`;
+	const declarationMarker = target.definition.declaration ? " declaration" : "";
+	const header = `${target.file.relPath}:${target.definition.line + 1}-${endLine + 1} │ ${target.definition.kind}${declarationMarker} ${target.definition.name}${target.definition.backend ? ` │ ${target.definition.backend}` : ""}`;
+	const summary = loadedDefinitions ? formatBackendSummary(loadedDefinitions) : formatBackendSummary([target.definition]);
+
+	const links = target.definition.declaration && params.symbol
+		? await renderImplementationLinks(pi, ctx, params, params.symbol, signal, target.file.relPath, target.definition.line)
+		: undefined;
+
+	return [header, summary, "", slice, links ? `\n${links}` : undefined].filter(Boolean).join("\n");
 }
 
 export async function findEnclosingSymbol(
@@ -192,24 +208,81 @@ export async function findEnclosingSymbol(
 	if (!enclosing) return `No enclosing symbol found at ${loaded.file.relPath}:${params.line}.`;
 	return [
 		`Enclosing symbol at ${loaded.file.relPath}:${params.line}${params.column ? `:${params.column}` : ""}`,
-		`${enclosing.definition.kind} ${enclosing.definition.name}${enclosing.definition.backend ? ` (${enclosing.definition.backend})` : ""}`,
+		`${enclosing.definition.kind} ${enclosing.definition.name}${enclosing.definition.declaration ? " (declaration)" : ""}${enclosing.definition.backend ? ` (${enclosing.definition.backend})` : ""}`,
 		`range: ${enclosing.definition.line + 1}-${enclosing.endLine + 1}`,
 		`signature: ${enclosing.definition.signatureLines.map((line) => line.trim()).join(" ")}`,
 	].join("\n");
 }
 
-function chooseDefinition(definitions: Definition[], file: SourceFile, text: string, params: RepoMapOptions): { file: SourceFile; text: string; definition: Definition } | undefined {
+function chooseDefinition(
+	definitions: Definition[],
+	file: SourceFile,
+	text: string,
+	params: RepoMapOptions,
+	sliceMode: "implementation" | "declaration" | "any",
+): { file: SourceFile; text: string; definition: Definition } | undefined {
+	const scoped = filterBySliceMode(definitions, sliceMode);
 	if (params.line) {
 		const lines = text.split(/\r?\n/);
 		const zeroLine = Math.max(0, Math.floor(params.line) - 1);
-		const enclosing = findEnclosingDefinition(definitions, lines, zeroLine, file.language);
+		const enclosing = findEnclosingDefinition(scoped, lines, zeroLine, file.language);
 		if (enclosing) return { file, text, definition: enclosing.definition };
 	}
 	const symbol = params.symbol?.toLowerCase();
 	const definition = symbol
-		? definitions.find((item) => item.name.toLowerCase() === symbol) ?? definitions.find((item) => item.name.toLowerCase().includes(symbol))
-		: definitions[0];
+		? scoped.find((item) => item.name.toLowerCase() === symbol) ?? scoped.find((item) => item.name.toLowerCase().includes(symbol))
+		: scoped[0];
 	return definition ? { file, text, definition } : undefined;
+}
+
+function filterBySliceMode(definitions: Definition[], sliceMode: "implementation" | "declaration" | "any"): Definition[] {
+	if (sliceMode === "any") return definitions;
+	if (sliceMode === "declaration") return definitions.filter(isDeclaration);
+	return definitions.filter((definition) => !isDeclaration(definition));
+}
+
+function normalizeSliceMode(mode?: string): "implementation" | "declaration" | "any" {
+	if (mode === "implementation" || mode === "declaration" || mode === "any") return mode;
+	return "any";
+}
+
+function isDeclaration(definition: Definition): boolean {
+	return Boolean(definition.declaration) || definition.kind === "interface_method";
+}
+
+function formatBackendSummary(definitions: Definition[]): string {
+	const tree = definitions.filter((definition) => definition.backend === "tree-sitter-tags").length;
+	const syntax = definitions.filter((definition) => definition.backend === "syntax-pattern").length;
+	const declarations = definitions.filter(isDeclaration).length;
+	return `Backend summary: tree-sitter=${tree}, syntax-pattern=${syntax}, declarations=${declarations}.`;
+}
+
+async function renderImplementationLinks(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	params: RepoMapOptions,
+	symbol: string,
+	signal: AbortSignal | undefined,
+	excludeFile?: string,
+	excludeLine?: number,
+): Promise<string | undefined> {
+	const analysis = await buildRepoAnalysis(pi, ctx, { ...params, path: undefined, query: symbol }, signal);
+	const lower = symbol.toLowerCase();
+	const implementations = analysis.rankedDefinitions
+		.filter((definition) => definition.name.toLowerCase() === lower)
+		.filter((definition) => ["method", "function"].includes(definition.kind))
+		.filter((definition) => !isDeclaration(definition))
+		.filter((definition) => !(definition.file === excludeFile && definition.line === excludeLine))
+		.slice(0, 8);
+
+	if (implementations.length === 0) return;
+	const out = [`Likely implementations for ${symbol}:`];
+	for (const definition of implementations) {
+		out.push(
+			`- ${definition.file}:${definition.line + 1}:${definition.column + 1} │ ${definition.kind} ${definition.name}${definition.backend ? ` │ ${definition.backend}` : ""}`,
+		);
+	}
+	return out.join("\n");
 }
 
 export function renderTextMatchFallback(file: SourceFile, text: string, definitions: Definition[], symbol: string): string | undefined {
@@ -220,6 +293,7 @@ export function renderTextMatchFallback(file: SourceFile, text: string, definiti
 	const out = [
 		`No extracted symbol found for "${symbol}".`,
 		`Text match fallback: found ${matches.length} identifier match(es) in ${file.relPath}.`,
+		formatBackendSummary(definitions),
 		"",
 	];
 	const renderedRanges = new Set<string>();
@@ -230,8 +304,9 @@ export function renderTextMatchFallback(file: SourceFile, text: string, definiti
 			const rangeKey = `${enclosing.definition.line}:${enclosing.endLine}`;
 			if (renderedRanges.has(rangeKey)) continue;
 			renderedRanges.add(rangeKey);
+			const declarationMarker = enclosing.definition.declaration ? " declaration" : "";
 			out.push(
-				`${file.relPath}:${enclosing.definition.line + 1}-${enclosing.endLine + 1} │ enclosing ${enclosing.definition.kind} ${enclosing.definition.name}${enclosing.definition.backend ? ` │ ${enclosing.definition.backend}` : ""}`,
+				`${file.relPath}:${enclosing.definition.line + 1}-${enclosing.endLine + 1} │ enclosing ${enclosing.definition.kind}${declarationMarker} ${enclosing.definition.name}${enclosing.definition.backend ? ` │ ${enclosing.definition.backend}` : ""}`,
 			);
 			out.push(`matched line ${match.line + 1}: ${lines[match.line]?.trimEnd() ?? ""}`);
 			out.push("");
@@ -272,3 +347,10 @@ export function findIdentifierLineMatches(lines: string[], symbol: string): Arra
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+export const __actionsTest = {
+	filterBySliceMode,
+	isDeclaration,
+	formatBackendSummary,
+	normalizeSliceMode,
+};

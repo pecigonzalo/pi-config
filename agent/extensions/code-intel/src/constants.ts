@@ -1,6 +1,6 @@
 import { formatSize } from "@earendil-works/pi-coding-agent";
 
-export const CODE_INTEL_CACHE_VERSION = 2;
+export const CODE_INTEL_CACHE_VERSION = 3;
 export const DEFAULT_MAP_TOKENS = 1600;
 export const DEFAULT_MAX_FILES = 2500;
 export const DEFAULT_MAX_FILE_BYTES = 512 * 1024;
@@ -34,6 +34,11 @@ export const CODE_INTEL_SCHEMA = {
 		line: { type: "number", description: "1-based line number for enclosing_symbol." },
 		column: { type: "number", description: "1-based column number for enclosing_symbol; currently informational." },
 		limit: { type: "number", description: "Maximum symbol results for symbols action. Default 50." },
+		sliceMode: {
+			type: "string",
+			enum: ["implementation", "declaration", "any"],
+			description: 'Slice preference for symbol declarations vs implementations. Default "any".',
+		},
 	},
 	required: ["action"],
 	additionalProperties: false,

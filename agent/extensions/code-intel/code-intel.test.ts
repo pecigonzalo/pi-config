@@ -35,6 +35,36 @@ describe("code-intel Phase 1 extraction", () => {
 		expect(__test.findDefinitionEnd(lines, 1, "typescript")).toBe(5);
 	});
 
+	test("extracts go interface members as declaration symbols", () => {
+		const defs = __test.extractDefinitions(
+			goSourceFile,
+			`type clusterState interface {\n\tIsLeader() bool\n\tCreateTopic(ctx context.Context, name string) error\n}\n`,
+		);
+
+		expect(defs.map((def) => `${def.kind}:${def.name}`)).toContain("type:clusterState");
+		expect(defs.map((def) => `${def.kind}:${def.name}`)).toContain("interface_method:IsLeader");
+		expect(defs.map((def) => `${def.kind}:${def.name}`)).toContain("interface_method:CreateTopic");
+		expect(defs.find((def) => def.name === "CreateTopic")?.declaration).toBe(true);
+		expect(defs.find((def) => def.name === "CreateTopic")?.container).toBe("clusterState");
+	});
+
+	test("uses declaration-aware ranges", () => {
+		const lines = `type clusterState interface {\n\tCreateTopic(ctx context.Context, name string) error\n}`.split("\n");
+		const declaration = {
+			name: "CreateTopic",
+			kind: "interface_method",
+			file: "internal/broker/server.go",
+			line: 1,
+			column: 1,
+			text: "\tCreateTopic(ctx context.Context, name string) error",
+			signatureLines: ["\tCreateTopic(ctx context.Context, name string) error"],
+			score: 0,
+			declaration: true,
+		};
+
+		expect(__test.getDefinitionEnd(declaration, lines, "go")).toBe(1);
+	});
+
 	test("ranks externally referenced definitions higher", () => {
 		const authDef = {
 			name: "AuthService",
@@ -127,6 +157,15 @@ describe("code-intel Phase 1 extraction", () => {
 		expect(notes.join("\n")).toContain("scala (3 file(s))");
 	});
 
+	test("extracts go multi-line imports without the import block header", () => {
+		const imports = __test.extractImportLines(
+			`package broker\n\nimport (\n\t"context"\n\tpb "example/pb"\n)\n\nfunc f() {}`.split("\n"),
+			"go",
+		);
+
+		expect(imports.map((item) => item.text.trim())).toEqual(['"context"', 'pb "example/pb"']);
+	});
+
 	test("merges tree-sitter and syntax definitions while preferring tree-sitter duplicates", () => {
 		const treeSitterDef = {
 			name: "CreateTopic",
@@ -166,8 +205,19 @@ describe("code-intel Phase 1 extraction", () => {
 
 		expect(fallback).toContain('No extracted symbol found for "CreateTopic".');
 		expect(fallback).toContain("Text match fallback: found 1 identifier match(es)");
-		expect(fallback).toContain("enclosing type clusterState");
+		expect(fallback).toContain("enclosing interface_method declaration CreateTopic");
 		expect(fallback).toContain("matched line 3");
 		expect(fallback).toContain("CreateTopic(ctx context.Context, name string) error");
+	});
+
+	test("filters definitions by slice mode", () => {
+		const defs = [
+			{ name: "CreateTopic", kind: "interface_method", declaration: true },
+			{ name: "CreateTopic", kind: "method", declaration: false },
+		] as any;
+
+		expect(__test.filterBySliceMode(defs, "declaration")).toHaveLength(1);
+		expect(__test.filterBySliceMode(defs, "implementation")).toHaveLength(1);
+		expect(__test.filterBySliceMode(defs, "any")).toHaveLength(2);
 	});
 });

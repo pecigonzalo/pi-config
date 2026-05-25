@@ -59,6 +59,7 @@ export function formatCallHint(args: Partial<CodeIntelParams>, theme: { fg: (nam
 	if (args.column !== undefined) parts.push(`column=${args.column}`);
 	if (args.mapTokens !== undefined) parts.push(`mapTokens=${args.mapTokens}`);
 	if (args.maxFiles !== undefined) parts.push(`maxFiles=${args.maxFiles}`);
+	if (args.sliceMode) parts.push(`sliceMode=${args.sliceMode}`);
 	if (args.include?.length) parts.push(`include=${quoteArg(args.include.join(","))}`);
 	if (args.exclude?.length) parts.push(`exclude=${quoteArg(args.exclude.join(","))}`);
 	if (args.root) parts.push(`root=${quoteArg(args.root)}`);
