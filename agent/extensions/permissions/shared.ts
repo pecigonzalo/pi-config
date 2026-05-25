@@ -114,6 +114,7 @@ export interface SandboxSettings {
 	allowUnixSockets?: string[];
 	allowAllUnixSockets?: boolean;
 	allowMachLookup?: string[];
+	allowPty?: boolean;
 	allowWrite?: string[];
 	denyRead?: string[];
 	denyWrite?: string[];
@@ -122,6 +123,7 @@ export interface SandboxSettings {
 
 export interface SandboxRuntimeConfigLike {
 	enableWeakerNetworkIsolation?: boolean;
+	allowPty?: boolean;
 	network?: {
 		allowedDomains?: string[];
 		deniedDomains?: string[];

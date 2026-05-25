@@ -86,8 +86,9 @@ function getGoBuildCacheDir(): string | undefined {
 
 function getPlatformCacheWritePaths(): string[] {
 	const darwinCacheDir = getDarwinUserCacheDir();
+	const darwinLibraryCacheDir = process.platform === "darwin" ? path.join(os.homedir(), "Library", "Caches") : undefined;
 	const goCacheDir = getGoBuildCacheDir();
-	return dedupeStrings([darwinCacheDir, goCacheDir].filter((value): value is string => value !== undefined));
+	return dedupeStrings([darwinCacheDir, darwinLibraryCacheDir, goCacheDir].filter((value): value is string => value !== undefined));
 }
 
 const PROTECTED_RESOURCE_SANDBOX_DENY_READ = new Map<string, string[]>([
@@ -262,6 +263,7 @@ export function compileSandboxConfig(
 		reason: enabled ? `mode=${policy.mode}, tmpDir=${effectiveTmpDir}` : `disabled by mode=${policy.mode}`,
 		config: {
 			enableWeakerNetworkIsolation,
+			allowPty: overrides?.allowPty ?? true,
 			network: networkConfig,
 			filesystem: {
 				denyRead,

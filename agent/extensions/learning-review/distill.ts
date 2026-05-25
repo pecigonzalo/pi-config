@@ -1,4 +1,3 @@
-import { complete } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { LearningCandidate, LearningDestination, LearningKind, LearningScope } from "./types";
 
@@ -205,6 +204,9 @@ async function runCompletion(prompt: string, ctx: ExtensionContext): Promise<str
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	if (!auth.ok) throw new Error(auth.error);
 	if (!auth.apiKey) throw new Error(`No API key for ${model.provider}`);
+
+	const { complete } = await import("@earendil-works/pi-ai");
+	if (typeof complete !== "function") throw new Error("Pi AI completion API is unavailable");
 
 	const response = await complete(
 		model,

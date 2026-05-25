@@ -43,10 +43,13 @@ beforeAll(async () => {
 	}));
 	mock.module("typebox", () => ({
 		Type: {
-			Object: (value: unknown) => value,
-			String: (value?: unknown) => value,
+			Object: (properties: unknown, options?: Record<string, unknown>) => ({ type: "object", properties, ...options }),
+			String: (options?: Record<string, unknown>) => ({ type: "string", ...options }),
 			Optional: (value: unknown) => value,
-			Number: (value?: unknown) => value,
+			Number: (options?: Record<string, unknown>) => ({ type: "number", ...options }),
+			Array: (items: unknown, options?: Record<string, unknown>) => ({ type: "array", items, ...options }),
+			Boolean: (options?: Record<string, unknown>) => ({ type: "boolean", ...options }),
+			Any: (options?: Record<string, unknown>) => ({ ...options }),
 		},
 	}));
 	const mockAgentsModule = () => ({

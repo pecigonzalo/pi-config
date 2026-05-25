@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
 import * as syncFs from "node:fs";
 import * as os from "node:os";
@@ -20,11 +21,13 @@ beforeAll(async () => {
 
 	mock.module("typebox", () => ({
 		Type: {
-			Object: (value: unknown) => value,
-			String: (value?: unknown) => value,
+			Object: (properties: unknown, options?: Record<string, unknown>) => ({ type: "object", properties, ...options }),
+			String: (options?: Record<string, unknown>) => ({ type: "string", ...options }),
 			Optional: (value: unknown) => value,
-			Array: (value: unknown) => value,
-			Boolean: (value?: unknown) => value,
+			Number: (options?: Record<string, unknown>) => ({ type: "number", ...options }),
+			Array: (items: unknown, options?: Record<string, unknown>) => ({ type: "array", items, ...options }),
+			Boolean: (options?: Record<string, unknown>) => ({ type: "boolean", ...options }),
+			Any: (options?: Record<string, unknown>) => ({ ...options }),
 		},
 	}));
 
@@ -49,6 +52,7 @@ beforeAll(async () => {
 	}));
 
 	mock.module("@earendil-works/pi-coding-agent", () => ({
+		...piCodingAgent,
 		getAgentDir: () => testAgentDir,
 		getMarkdownTheme: () => ({}),
 		keyHint: (_binding: string, description: string) => `Ctrl+O ${description}`,

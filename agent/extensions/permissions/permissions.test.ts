@@ -1,4 +1,5 @@
 import { beforeAll, describe, it, expect, mock } from "bun:test";
+import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import { execFile as execFileCallback } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -27,6 +28,7 @@ beforeAll(async () => {
 	const td = process.env.TMPDIR || os.tmpdir();
 	await fs.mkdir(td, { recursive: true });
 	mock.module("@earendil-works/pi-coding-agent", () => ({
+		...piCodingAgent,
 		getAgentDir: () => "/tmp",
 	}));
 	configModule = await import("./config");
@@ -614,6 +616,23 @@ describe("sandbox network config", () => {
 			if (originalGoCache === undefined) delete process.env.GOCACHE;
 			else process.env.GOCACHE = originalGoCache;
 		}
+	});
+
+	it("allows macOS Library caches by default", () => {
+		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
+		if (process.platform === "darwin") {
+			expect(compiled.config.filesystem?.allowWrite).toContain(path.join(os.homedir(), "Library", "Caches"));
+		} else {
+			expect(compiled.config.filesystem?.allowWrite).not.toContain(path.join(os.homedir(), "Library", "Caches"));
+		}
+	});
+
+	it("enables pseudo-terminal support by default and allows opting out", () => {
+		const defaultConfig = compileSandboxConfig(policy, "/repo", { enabled: true });
+		expect(defaultConfig.config.allowPty).toBe(true);
+
+		const optOutConfig = compileSandboxConfig(policy, "/repo", { enabled: true, allowPty: false });
+		expect(optOutConfig.config.allowPty).toBe(false);
 	});
 
 	it("allows Go to populate current GOCACHE outside the workspace", async () => {
