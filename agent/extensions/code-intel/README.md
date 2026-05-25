@@ -7,6 +7,7 @@ Current actions:
 - `code_intel` with `action: "repo_map"` for an Aider-style ranked map
 - `code_intel` with `action: "outline", path: "..."` for file symbols/imports
 - `code_intel` with `action: "symbols", query: "..."` for repo-wide symbol search
+  - supports simple filters in `query`: `kind:<kind>`, `file:<path-substring>`, `name:<symbol>`
 - `code_intel` with `action: "slice", path: "...", symbol: "..."` for targeted symbol bodies
   - optional `sliceMode: "implementation" | "declaration" | "any"` (default: `"any"`)
 - `code_intel` with `action: "enclosing_symbol", path: "...", line: 123` for location context

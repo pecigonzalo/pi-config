@@ -105,20 +105,18 @@ export async function findSymbols(
 ): Promise<string> {
 	const query = params.query?.trim() ?? params.symbol?.trim() ?? "";
 	const limit = clampInt(params.limit ?? 50, 1, 500);
+	const parsedQuery = parseSymbolQuery(query);
 	const analysis = await buildRepoAnalysis(pi, ctx, params, signal);
-	const lower = query.toLowerCase();
-	const matches = analysis.rankedDefinitions.filter((definition) => {
-		if (!query) return true;
-		return `${definition.name} ${definition.kind} ${definition.file}`.toLowerCase().includes(lower);
-	});
+	const matches = analysis.rankedDefinitions.filter((definition) => matchesSymbolQuery(definition, parsedQuery));
 
 	const out = [
 		query ? `Symbols matching "${query}"` : "Top ranked symbols",
 		`Root: ${analysis.root}`,
+		parsedQuery.filters.length > 0 ? `Applied filters: ${parsedQuery.filters.join(", ")}.` : undefined,
 		`Showing ${Math.min(matches.length, limit)} of ${matches.length} match(es).`,
 		...renderScanDiagnostics(analysis.diagnostics, analysis.files.length),
 		"",
-	];
+	].filter(Boolean) as string[];
 
 	for (const definition of matches.slice(0, limit)) {
 		const declarationMarker = definition.declaration ? " declaration" : "";
@@ -128,6 +126,52 @@ export async function findSymbols(
 		out.push(`  ${definition.signatureLines[0]?.trim() ?? definition.text.trim()}`);
 	}
 	return out.join("\n");
+}
+
+interface ParsedSymbolQuery {
+	text: string;
+	name?: string;
+	kind?: string;
+	file?: string;
+	filters: string[];
+}
+
+function parseSymbolQuery(query: string): ParsedSymbolQuery {
+	let rest = query.trim();
+	const parsed: ParsedSymbolQuery = { text: "", filters: [] };
+
+	const nameMatch = rest.match(/(?:^|\s)name:([^\s]+)/i);
+	if (nameMatch) {
+		parsed.name = nameMatch[1].replace(/^"|"$/g, "").toLowerCase();
+		parsed.filters.push(`name=${nameMatch[1]}`);
+		rest = rest.replace(nameMatch[0], " ").trim();
+	}
+
+	const kindMatch = rest.match(/(?:^|\s)kind:([^\s]+)/i);
+	if (kindMatch) {
+		parsed.kind = kindMatch[1].replace(/^"|"$/g, "").toLowerCase();
+		parsed.filters.push(`kind=${kindMatch[1]}`);
+		rest = rest.replace(kindMatch[0], " ").trim();
+	}
+
+	const fileMatch = rest.match(/(?:^|\s)file:([^\s]+)/i);
+	if (fileMatch) {
+		parsed.file = fileMatch[1].replace(/^"|"$/g, "").toLowerCase();
+		parsed.filters.push(`file=${fileMatch[1]}`);
+		rest = rest.replace(fileMatch[0], " ").trim();
+	}
+
+	parsed.text = rest.toLowerCase();
+	return parsed;
+}
+
+function matchesSymbolQuery(definition: Definition, query: ParsedSymbolQuery): boolean {
+	if (query.kind && definition.kind.toLowerCase() !== query.kind) return false;
+	if (query.name && definition.name.toLowerCase() !== query.name && !definition.name.toLowerCase().includes(query.name)) return false;
+	if (query.file && !definition.file.toLowerCase().includes(query.file)) return false;
+	if (!query.text) return true;
+	const haystack = `${definition.name} ${definition.kind} ${definition.file}`.toLowerCase();
+	return haystack.includes(query.text);
 }
 
 export async function sliceSymbol(
@@ -353,4 +397,6 @@ export const __actionsTest = {
 	isDeclaration,
 	formatBackendSummary,
 	normalizeSliceMode,
+	parseSymbolQuery,
+	matchesSymbolQuery,
 };

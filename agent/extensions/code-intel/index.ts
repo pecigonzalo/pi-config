@@ -135,4 +135,6 @@ export const __test = {
 	isDeclaration: __actionsTest.isDeclaration,
 	formatBackendSummary: __actionsTest.formatBackendSummary,
 	normalizeSliceMode: __actionsTest.normalizeSliceMode,
+	parseSymbolQuery: __actionsTest.parseSymbolQuery,
+	matchesSymbolQuery: __actionsTest.matchesSymbolQuery,
 };

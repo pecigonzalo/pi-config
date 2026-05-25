@@ -220,4 +220,28 @@ describe("code-intel Phase 1 extraction", () => {
 		expect(__test.filterBySliceMode(defs, "implementation")).toHaveLength(1);
 		expect(__test.filterBySliceMode(defs, "any")).toHaveLength(2);
 	});
+
+	test("parses symbol query DSL filters", () => {
+		const parsed = __test.parseSymbolQuery('kind:method file:internal/broker name:CreateTopic queue');
+		expect(parsed.kind).toBe("method");
+		expect(parsed.file).toBe("internal/broker");
+		expect(parsed.name).toBe("createtopic");
+		expect(parsed.text).toBe("queue");
+		expect(parsed.filters.length).toBe(3);
+	});
+
+	test("matches symbol query DSL filters", () => {
+		const parsed = __test.parseSymbolQuery("kind:method file:internal/broker name:CreateTopic");
+		const match = __test.matchesSymbolQuery(
+			{ name: "CreateTopic", kind: "method", file: "internal/broker/server.go" },
+			parsed,
+		);
+		const noMatch = __test.matchesSymbolQuery(
+			{ name: "CreateTopic", kind: "interface_method", file: "internal/broker/server.go" },
+			parsed,
+		);
+
+		expect(match).toBe(true);
+		expect(noMatch).toBe(false);
+	});
 });
