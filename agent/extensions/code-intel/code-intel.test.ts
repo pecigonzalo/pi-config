@@ -8,6 +8,13 @@ const sourceFile = {
 	size: 100,
 };
 
+const goSourceFile = {
+	absPath: "/repo/internal/broker/server.go",
+	relPath: "internal/broker/server.go",
+	language: "go",
+	size: 100,
+};
+
 describe("code-intel Phase 1 extraction", () => {
 	test("extracts TypeScript declarations and methods", () => {
 		const defs = __test.extractDefinitions(
@@ -118,5 +125,49 @@ describe("code-intel Phase 1 extraction", () => {
 
 		expect(notes.join("\n")).toContain("generic fallback patterns");
 		expect(notes.join("\n")).toContain("scala (3 file(s))");
+	});
+
+	test("merges tree-sitter and syntax definitions while preferring tree-sitter duplicates", () => {
+		const treeSitterDef = {
+			name: "CreateTopic",
+			kind: "method",
+			file: "internal/broker/server.go",
+			line: 10,
+			column: 18,
+			text: "func (s *Server) CreateTopic() {}",
+			signatureLines: ["func (s *Server) CreateTopic() {}"],
+			score: 0,
+			backend: "tree-sitter-tags" as const,
+		};
+		const duplicateSyntaxDef = { ...treeSitterDef, backend: "syntax-pattern" as const };
+		const syntaxOnlyDef = {
+			...treeSitterDef,
+			name: "clusterState",
+			kind: "type",
+			line: 2,
+			column: 5,
+			text: "type clusterState interface {",
+			signatureLines: ["type clusterState interface {"],
+			backend: "syntax-pattern" as const,
+		};
+
+		const merged = __test.mergeDefinitions([treeSitterDef], [duplicateSyntaxDef, syntaxOnlyDef]);
+
+		expect(merged.map((def) => `${def.kind}:${def.name}:${def.backend}`)).toEqual([
+			"type:clusterState:syntax-pattern",
+			"method:CreateTopic:tree-sitter-tags",
+		]);
+	});
+
+	test("renders enclosing context for text-only symbol matches", () => {
+		const text = `type clusterState interface {\n\tIsLeader() bool\n\tCreateTopic(ctx context.Context, name string) error\n}\n`;
+		const definitions = __test.extractDefinitions(goSourceFile, text);
+		const fallback = __test.renderTextMatchFallback(goSourceFile, text, definitions, "CreateTopic");
+
+		expect(fallback).toContain('No extracted symbol found for "CreateTopic".');
+		expect(fallback).toContain("Text match fallback: found 1 identifier match(es)");
+		expect(fallback).toContain("enclosing type clusterState");
+		expect(fallback).toContain("matched line 3");
+		expect(fallback).toContain("CreateTopic(ctx context.Context, name string) error");
 	});
 });
