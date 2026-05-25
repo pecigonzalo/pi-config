@@ -1,0 +1,19 @@
+{
+  "name": "store",
+  "private": true,
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.75.1",
+    "@earendil-works/pi-coding-agent": "0.75.1",
+    "@earendil-works/pi-tui": "0.75.1",
+    "typebox": "^1.1.24",
+    "yaml": "^2.8.2"
+  }
+}
