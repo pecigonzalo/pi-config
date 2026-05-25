@@ -137,4 +137,6 @@ export const __test = {
 	normalizeSliceMode: __actionsTest.normalizeSliceMode,
 	parseSymbolQuery: __actionsTest.parseSymbolQuery,
 	matchesSymbolQuery: __actionsTest.matchesSymbolQuery,
+	inferCallableArity: __actionsTest.inferCallableArity,
+	chooseReferenceDeclaration: __actionsTest.chooseReferenceDeclaration,
 };

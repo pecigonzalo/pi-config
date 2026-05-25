@@ -206,6 +206,8 @@ describe("code-intel Phase 1 extraction", () => {
 		expect(fallback).toContain('No extracted symbol found for "CreateTopic".');
 		expect(fallback).toContain("Text match fallback: found 1 identifier match(es)");
 		expect(fallback).toContain("enclosing interface_method declaration CreateTopic");
+		expect(fallback).toContain("declared in interface clusterState");
+		expect(fallback).toContain("container type clusterState");
 		expect(fallback).toContain("matched line 3");
 		expect(fallback).toContain("CreateTopic(ctx context.Context, name string) error");
 	});
@@ -243,5 +245,53 @@ describe("code-intel Phase 1 extraction", () => {
 
 		expect(match).toBe(true);
 		expect(noMatch).toBe(false);
+	});
+
+	test("parses declaration/backend symbol query filters", () => {
+		const parsed = __test.parseSymbolQuery("decl:true backend:tree CreateTopic");
+		expect(parsed.declaration).toBe(true);
+		expect(parsed.backend).toBe("tree-sitter-tags");
+		expect(parsed.text).toBe("createtopic");
+		expect(parsed.filters.length).toBe(2);
+	});
+
+	test("matches declaration/backend query filters", () => {
+		const parsed = __test.parseSymbolQuery("decl:true backend:syntax");
+		const decl = __test.matchesSymbolQuery(
+			{ name: "CreateTopic", kind: "interface_method", file: "internal/broker/server.go", declaration: true, backend: "syntax-pattern" },
+			parsed,
+		);
+		const impl = __test.matchesSymbolQuery(
+			{ name: "CreateTopic", kind: "method", file: "internal/broker/handler_admin.go", declaration: false, backend: "tree-sitter-tags" },
+			parsed,
+		);
+		expect(decl).toBe(true);
+		expect(impl).toBe(false);
+	});
+
+	test("infers callable arity from go signatures", () => {
+		const declArity = __test.inferCallableArity({
+			kind: "interface_method",
+			signatureLines: ["\tCreateTopic(ctx context.Context, name string, partitions int32) error"],
+			text: "",
+		});
+		const methodArity = __test.inferCallableArity({
+			kind: "method",
+			signatureLines: ["func (c *Cluster) CreateTopic(ctx context.Context, name string, partitions int32) error {"],
+			text: "",
+		});
+		expect(declArity).toBe(3);
+		expect(methodArity).toBe(3);
+	});
+
+	test("chooses declaration reference for symbol", () => {
+		const chosen = __test.chooseReferenceDeclaration(
+			[
+				{ name: "CreateTopic", kind: "method", declaration: false },
+				{ name: "CreateTopic", kind: "interface_method", declaration: true },
+			],
+			"CreateTopic",
+		);
+		expect(chosen?.kind).toBe("interface_method");
 	});
 });

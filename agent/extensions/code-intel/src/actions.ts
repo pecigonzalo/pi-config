@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatSize } from "@earendil-works/pi-coding-agent";
 import { EXT_TO_LANGUAGE, LANGUAGE_SPECIFIC_PATTERN_SUPPORT } from "./constants";
@@ -133,6 +134,8 @@ interface ParsedSymbolQuery {
 	name?: string;
 	kind?: string;
 	file?: string;
+	declaration?: boolean;
+	backend?: "tree-sitter-tags" | "syntax-pattern";
 	filters: string[];
 }
 
@@ -161,6 +164,21 @@ function parseSymbolQuery(query: string): ParsedSymbolQuery {
 		rest = rest.replace(fileMatch[0], " ").trim();
 	}
 
+	const declMatch = rest.match(/(?:^|\s)decl:(true|false|1|0|yes|no)/i);
+	if (declMatch) {
+		parsed.declaration = ["true", "1", "yes"].includes(declMatch[1].toLowerCase());
+		parsed.filters.push(`decl=${declMatch[1]}`);
+		rest = rest.replace(declMatch[0], " ").trim();
+	}
+
+	const backendMatch = rest.match(/(?:^|\s)backend:(tree|tree-sitter|syntax|tree-sitter-tags|syntax-pattern)/i);
+	if (backendMatch) {
+		const raw = backendMatch[1].toLowerCase();
+		parsed.backend = raw.startsWith("tree") ? "tree-sitter-tags" : "syntax-pattern";
+		parsed.filters.push(`backend=${backendMatch[1]}`);
+		rest = rest.replace(backendMatch[0], " ").trim();
+	}
+
 	parsed.text = rest.toLowerCase();
 	return parsed;
 }
@@ -169,6 +187,8 @@ function matchesSymbolQuery(definition: Definition, query: ParsedSymbolQuery): b
 	if (query.kind && definition.kind.toLowerCase() !== query.kind) return false;
 	if (query.name && definition.name.toLowerCase() !== query.name && !definition.name.toLowerCase().includes(query.name)) return false;
 	if (query.file && !definition.file.toLowerCase().includes(query.file)) return false;
+	if (query.declaration !== undefined && isDeclaration(definition) !== query.declaration) return false;
+	if (query.backend && definition.backend !== query.backend) return false;
 	if (!query.text) return true;
 	const haystack = `${definition.name} ${definition.kind} ${definition.file}`.toLowerCase();
 	return haystack.includes(query.text);
@@ -214,7 +234,11 @@ export async function sliceSymbol(
 	if (!target && loaded && typeof loaded !== "string" && loadedDefinitions && params.symbol?.trim()) {
 		const fallback = renderTextMatchFallback(loaded.file, loaded.text, loadedDefinitions, params.symbol);
 		if (fallback) {
-			const links = await renderImplementationLinks(pi, ctx, params, params.symbol, signal, loaded.file.relPath);
+			const reference = chooseReferenceDeclaration(loadedDefinitions, params.symbol);
+			const links = await renderImplementationLinks(pi, ctx, params, params.symbol, signal, {
+				excludeFile: loaded.file.relPath,
+				reference,
+			});
 			return links ? `${fallback}\n\n${links}` : fallback;
 		}
 	}
@@ -228,7 +252,11 @@ export async function sliceSymbol(
 	const summary = loadedDefinitions ? formatBackendSummary(loadedDefinitions) : formatBackendSummary([target.definition]);
 
 	const links = target.definition.declaration && params.symbol
-		? await renderImplementationLinks(pi, ctx, params, params.symbol, signal, target.file.relPath, target.definition.line)
+		? await renderImplementationLinks(pi, ctx, params, params.symbol, signal, {
+				excludeFile: target.file.relPath,
+				excludeLine: target.definition.line,
+				reference: target.definition,
+			})
 		: undefined;
 
 	return [header, summary, "", slice, links ? `\n${links}` : undefined].filter(Boolean).join("\n");
@@ -301,32 +329,130 @@ function formatBackendSummary(definitions: Definition[]): string {
 	return `Backend summary: tree-sitter=${tree}, syntax-pattern=${syntax}, declarations=${declarations}.`;
 }
 
+interface ImplementationLinkOptions {
+	excludeFile?: string;
+	excludeLine?: number;
+	reference?: Definition;
+}
+
 async function renderImplementationLinks(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	params: RepoMapOptions,
 	symbol: string,
 	signal: AbortSignal | undefined,
-	excludeFile?: string,
-	excludeLine?: number,
+	options?: ImplementationLinkOptions,
 ): Promise<string | undefined> {
 	const analysis = await buildRepoAnalysis(pi, ctx, { ...params, path: undefined, query: symbol }, signal);
 	const lower = symbol.toLowerCase();
-	const implementations = analysis.rankedDefinitions
+	const referenceArity = options?.reference ? inferCallableArity(options.reference) : undefined;
+	const preferredDir = options?.excludeFile ? dirname(options.excludeFile) : undefined;
+
+	const scored = analysis.rankedDefinitions
 		.filter((definition) => definition.name.toLowerCase() === lower)
 		.filter((definition) => ["method", "function"].includes(definition.kind))
 		.filter((definition) => !isDeclaration(definition))
-		.filter((definition) => !(definition.file === excludeFile && definition.line === excludeLine))
+		.filter((definition) => !(definition.file === options?.excludeFile && definition.line === options?.excludeLine))
+		.map((definition) => {
+			let score = definition.score;
+			const notes: string[] = [];
+			const arity = inferCallableArity(definition);
+			if (referenceArity !== undefined && arity !== undefined) {
+				if (arity === referenceArity) {
+					score += 1000;
+					notes.push(`arity=${arity}`);
+				} else {
+					score -= 250;
+				}
+			}
+			if (preferredDir && definition.file.startsWith(`${preferredDir}/`)) {
+				score += 200;
+				notes.push("same-dir");
+			}
+			return { definition, score, notes };
+		})
+		.sort((a, b) => b.score - a.score)
 		.slice(0, 8);
 
-	if (implementations.length === 0) return;
+	if (scored.length === 0) return;
 	const out = [`Likely implementations for ${symbol}:`];
-	for (const definition of implementations) {
+	for (const item of scored) {
+		const noteText = item.notes.length > 0 ? ` │ ${item.notes.join(",")}` : "";
 		out.push(
-			`- ${definition.file}:${definition.line + 1}:${definition.column + 1} │ ${definition.kind} ${definition.name}${definition.backend ? ` │ ${definition.backend}` : ""}`,
+			`- ${item.definition.file}:${item.definition.line + 1}:${item.definition.column + 1} │ ${item.definition.kind} ${item.definition.name}${item.definition.backend ? ` │ ${item.definition.backend}` : ""}${noteText}`,
 		);
 	}
 	return out.join("\n");
+}
+
+function chooseReferenceDeclaration(definitions: Definition[], symbol: string): Definition | undefined {
+	const lower = symbol.toLowerCase();
+	return definitions.find((definition) => definition.name.toLowerCase() === lower && isDeclaration(definition));
+}
+
+function inferCallableArity(definition: Definition): number | undefined {
+	const signature = definition.signatureLines[0] ?? definition.text;
+	if (!signature) return;
+	const groups = collectParenthesizedGroups(signature);
+	if (groups.length === 0) return;
+
+	let paramsText = groups[0];
+	if (definition.kind === "method" && signature.trimStart().startsWith("func ") && groups.length >= 2) {
+		paramsText = groups[1];
+	}
+	if (definition.kind === "interface_method" && groups.length >= 1) {
+		paramsText = groups[0];
+	}
+
+	const parts = splitTopLevel(paramsText, ",").map((part) => part.trim()).filter(Boolean);
+	return parts.length;
+}
+
+function collectParenthesizedGroups(text: string): string[] {
+	const out: string[] = [];
+	let depth = 0;
+	let current = "";
+	for (const char of text) {
+		if (char === "(") {
+			if (depth > 0) current += char;
+			depth++;
+			continue;
+		}
+		if (char === ")") {
+			depth--;
+			if (depth === 0) {
+				out.push(current);
+				current = "";
+				continue;
+			}
+		}
+		if (depth > 0) current += char;
+	}
+	return out;
+}
+
+function splitTopLevel(text: string, delimiter: string): string[] {
+	const parts: string[] = [];
+	let current = "";
+	let paren = 0;
+	let bracket = 0;
+	let brace = 0;
+	for (const char of text) {
+		if (char === "(") paren++;
+		if (char === ")") paren = Math.max(0, paren - 1);
+		if (char === "[") bracket++;
+		if (char === "]") bracket = Math.max(0, bracket - 1);
+		if (char === "{") brace++;
+		if (char === "}") brace = Math.max(0, brace - 1);
+		if (char === delimiter && paren === 0 && bracket === 0 && brace === 0) {
+			parts.push(current);
+			current = "";
+			continue;
+		}
+		current += char;
+	}
+	if (current) parts.push(current);
+	return parts;
 }
 
 export function renderTextMatchFallback(file: SourceFile, text: string, definitions: Definition[], symbol: string): string | undefined {
@@ -352,9 +478,23 @@ export function renderTextMatchFallback(file: SourceFile, text: string, definiti
 			out.push(
 				`${file.relPath}:${enclosing.definition.line + 1}-${enclosing.endLine + 1} │ enclosing ${enclosing.definition.kind}${declarationMarker} ${enclosing.definition.name}${enclosing.definition.backend ? ` │ ${enclosing.definition.backend}` : ""}`,
 			);
+			if (enclosing.definition.kind === "interface_method" && enclosing.definition.container) {
+				out.push(`declared in interface ${enclosing.definition.container}`);
+			}
 			out.push(`matched line ${match.line + 1}: ${lines[match.line]?.trimEnd() ?? ""}`);
 			out.push("");
 			out.push(lines.slice(enclosing.definition.line, enclosing.endLine + 1).join("\n"));
+			if (enclosing.definition.kind === "interface_method" && enclosing.definition.container) {
+				const containerDef = definitions.find(
+					(definition) => definition.kind === "type" && definition.name === enclosing.definition.container,
+				);
+				if (containerDef) {
+					const containerEnd = getDefinitionEnd(containerDef, lines, file.language);
+					out.push("");
+					out.push(`${file.relPath}:${containerDef.line + 1}-${containerEnd + 1} │ container type ${containerDef.name}`);
+					out.push(lines.slice(containerDef.line, containerEnd + 1).join("\n"));
+				}
+			}
 			out.push("");
 			continue;
 		}
@@ -399,4 +539,6 @@ export const __actionsTest = {
 	normalizeSliceMode,
 	parseSymbolQuery,
 	matchesSymbolQuery,
+	inferCallableArity,
+	chooseReferenceDeclaration,
 };
