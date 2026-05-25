@@ -395,7 +395,7 @@ function matchCount(text: string, re: RegExp): string | undefined {
 	return match[1];
 }
 
-function formatCallHint(args: Partial<CodeIntelParams>, theme: { fg: (name: string, value: string) => string; bold: (value: string) => string }): string {
+function formatCallHint(args: Partial<CodeIntelParams>, theme: { fg: (name: any, value: string) => string; bold: (value: string) => string }): string {
 	const action = formatAction(args.action);
 	const parts: string[] = [];
 	if (args.path) parts.push(`path=${quoteArg(args.path)}`);

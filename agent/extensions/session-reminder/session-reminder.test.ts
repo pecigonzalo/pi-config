@@ -38,7 +38,7 @@ function withStderrIsTTY(isTTY: boolean, callback: () => void): void {
       return;
     }
 
-    delete (process.stderr as NodeJS.WriteStream & { isTTY?: boolean }).isTTY;
+    Reflect.deleteProperty(process.stderr, "isTTY");
   }
 }
 

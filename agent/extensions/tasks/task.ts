@@ -142,7 +142,7 @@ function formatShortcutLabel(shortcut: string): string {
 const TASKS_BROWSER_SHORTCUT_LABEL = formatShortcutLabel(TASKS_BROWSER_SHORTCUT);
 
 function terminateProcessWithEscalation(
-	proc: Pick<ChildProcessWithoutNullStreams, "kill" | "once" | "exitCode" | "signalCode">,
+	proc: { kill(signal?: NodeJS.Signals | number): boolean; once(event: string, listener: () => void): unknown; exitCode: number | null; signalCode: NodeJS.Signals | null },
 	options?: { timeoutMs?: number; isExited?: () => boolean },
 ): void {
 	let exited = options?.isExited?.() ?? (proc.exitCode !== null || proc.signalCode !== null);
@@ -1287,12 +1287,12 @@ function getPersistedMainAgentState(entries: SessionEntry[]): PersistedMainAgent
 }
 
 function persistMainAgentSelection(
-	ctx: { sessionManager: { getBranch(): SessionEntry[]; appendCustomEntry(customType: string, data?: unknown): string } },
+	ctx: { sessionManager: { getBranch(): SessionEntry[]; appendCustomEntry?: (customType: string, data?: unknown) => string } },
 	state: { agent?: string; profile?: string; effort?: string },
 ): void {
 	const current = getPersistedMainAgentState(ctx.sessionManager.getBranch());
 	if (current.found && current.agent === state.agent && current.profile === state.profile && current.effort === state.effort) return;
-	ctx.sessionManager.appendCustomEntry(MAIN_SESSION_AGENT_CUSTOM_TYPE, {
+	ctx.sessionManager.appendCustomEntry?.(MAIN_SESSION_AGENT_CUSTOM_TYPE, {
 		agent: state.agent ?? null,
 		profile: state.profile ?? null,
 		effort: state.effort ?? null,
@@ -1348,7 +1348,7 @@ async function applyMainSessionAgentSelection(
 		ui: { confirm(title: string, message: string): Promise<boolean>; notify(message: string, level: "info" | "warning" | "error"): void };
 		model?: { provider: string; id: string };
 		modelRegistry: { find(provider: string, modelId: string): unknown };
-		sessionManager: { getSessionId(): string; getBranch(): SessionEntry[]; appendCustomEntry(customType: string, data?: unknown): string };
+		sessionManager: { getSessionId(): string; getBranch(): SessionEntry[]; appendCustomEntry?: (customType: string, data?: unknown) => string };
 	},
 	piApi: Pick<ExtensionAPI, "getAllTools" | "getActiveTools" | "getFlag" | "getThinkingLevel" | "setActiveTools" | "setModel" | "setThinkingLevel">,
 	selection: { agent?: string; profile?: string; effort?: string },
@@ -1551,7 +1551,7 @@ function resolvePersistedTaskSessionRoot(parentSessionFile: string | undefined, 
 }
 
 function readSessionHeaderStringField(entries: readonly SessionEntry[], field: "id" | "parentSession"): string | undefined {
-	const header = entries.find((entry) => entry.type === "session") as (SessionEntry & { id?: unknown; parentSession?: unknown }) | undefined;
+	const header = entries.find((entry) => (entry as { type?: unknown }).type === "session") as (SessionEntry & { id?: unknown; parentSession?: unknown }) | undefined;
 	if (!header) return undefined;
 	const value = header[field];
 	if (typeof value !== "string") return undefined;
@@ -1760,7 +1760,7 @@ async function preflightTaskRun(
 		if (!parentSessionFile) {
 			return { error: "context.mode=\"fork\" requires a parent session file, but the current session is unavailable." };
 		}
-		if (!parentBranch || !parentBranch.some((entry) => entry.type === "session")) {
+		if (!parentBranch || !parentBranch.some((entry) => (entry as { type?: unknown }).type === "session")) {
 			return { error: "context.mode=\"fork\" requires a valid parent session snapshot, but none was found." };
 		}
 	}
@@ -2259,7 +2259,7 @@ async function runSingleAgentViaRpc(
 			agent: worker.displayAgentName,
 			transport: "rpc",
 			proc,
-			pendingResponses: new Map<string, PendingRpcResponse>(),
+			pendingResponses: new Map<string, any>(),
 			status: "running",
 			startedAt: new Date().toISOString(),
 			isStreaming: false,
@@ -2320,7 +2320,7 @@ async function runSingleAgentViaRpc(
 			}
 			if (!isRecord(event)) return;
 			if (event.type === "response") {
-				const response = event as RpcResponseEnvelope;
+				const response = event as unknown as RpcResponseEnvelope;
 				if (typeof response.id === "string") {
 					const pending = controller.pendingResponses.get(response.id);
 					if (pending) {
@@ -2388,7 +2388,7 @@ async function runSingleAgentViaRpc(
 			}
 			if (event.type === "extension_ui_request" && typeof event.id === "string" && typeof event.method === "string") {
 				controller.lastActivity = `ui:${event.method}`;
-				const request = event as TaskExtensionUiRequest;
+				const request = event as unknown as TaskExtensionUiRequest;
 				if (request.method === "notify" && typeof request.message === "string" && request.message.trim()) {
 					addTaskInlineNotice(
 						currentResult,
@@ -2524,10 +2524,11 @@ async function runSingleAgent(
 }
 
 function appendTaskChildSessionMetadata(
-	sessionManager: { appendCustomEntry(customType: string, data?: unknown): string },
+	sessionManager: { getBranch?: () => readonly SessionEntry[]; appendCustomEntry?: (customType: string, data?: unknown) => string },
 	snapshot: ChildSessionSnapshot,
 ): string | undefined {
 	try {
+		if (!sessionManager.appendCustomEntry) return undefined;
 		sessionManager.appendCustomEntry(TASK_CHILD_SESSION_CUSTOM_TYPE, snapshot);
 		return undefined;
 	} catch (error) {
@@ -2545,7 +2546,7 @@ async function runTaskStepWithMetadata(options: {
 	signal: AbortSignal | undefined;
 	onUpdate: OnUpdateCallback | undefined;
 	makeDetails: (results: SingleResult[]) => TaskDetails;
-	sessionManager: { appendCustomEntry(customType: string, data?: unknown): string };
+	sessionManager: { getBranch?: () => readonly SessionEntry[]; appendCustomEntry?: (customType: string, data?: unknown) => string };
 	origin?: TaskOriginSnapshot;
 	refreshUi?: () => Promise<void> | void;
 	enableRpcControl?: boolean;
@@ -2711,14 +2712,14 @@ function resolveLiveTaskControllerForRun(run: TaskRunView, step?: TaskRunStepVie
 
 	const controllers = run.steps
 		.map((candidate) => getLiveTaskController(makeTaskRunStepKey(run.runId, candidate.step)))
-		.filter((candidate): candidate is LiveTaskController => Boolean(candidate) && candidate.status === "running");
+		.filter((candidate): candidate is LiveTaskController => candidate !== undefined && candidate.status === "running");
 	if (controllers.length === 0) {
 		return { error: `Run ${run.runId} has no running live task controller.` };
 	}
 	if (controllers.length > 1) {
 		return { error: `Run ${run.runId} has multiple running steps. Select a specific child session id prefix first.` };
 	}
-	return { controller: controllers[0] };
+	return { controller: controllers[0]! };
 }
 
 function describeTaskRunAccess(run: TaskRunView, selectedStep?: TaskRunStepView): string[] {
@@ -2869,9 +2870,9 @@ async function formatTaskRunDetails(scope: TasksScope, run: TaskRunView, selecte
 }
 
 function extractToolCallNames(message: Message): string[] {
-	const content = Array.isArray(message.content) ? message.content : [];
+	const content: unknown[] = Array.isArray(message.content) ? message.content : [];
 	return content
-		.filter((part): part is { type: "toolCall"; name: string } => isRecord(part) && part.type === "toolCall" && typeof part.name === "string")
+		.filter((part): part is { type: string; name: string } => isRecord(part) && part.type === "toolCall" && typeof part.name === "string")
 		.map((part) => part.name);
 }
 
@@ -2958,8 +2959,8 @@ async function readTaskTranscriptPreview(run: TaskRunView, selectedStep?: TaskRu
 interface TaskUiChromeSink {
 	hasUI?: boolean;
 	ui?: {
-		setWidget?: (...args: unknown[]) => void;
-		setStatus?: (...args: unknown[]) => void;
+		setWidget?: (key: string, content: any, options?: any) => void;
+		setStatus?: (key: string, text?: string) => void;
 		theme?: { fg?: (color: any, text: string) => string; bold?: (text: string) => string };
 	};
 }
@@ -3157,7 +3158,7 @@ function canPersistTaskSnapshotUpdate(
 
 async function attachTaskRunInTerminal(
 	ctx: {
-		sessionManager: { getSessionFile?: () => string | undefined; appendCustomEntry(customType: string, data?: unknown): string };
+		sessionManager: { getBranch?: () => readonly SessionEntry[]; getSessionFile?: () => string | undefined; appendCustomEntry?: (customType: string, data?: unknown) => string };
 	},
 	run: TaskRunView,
 	preferredStep?: TaskRunStepView,
@@ -4107,24 +4108,25 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const { run, step } = resolved.resolution;
+			const selectedStep = step as TaskRunStepView | undefined;
 			if (parsed.action === "show") {
 				const hasWarnings = run.warnings.length > 0 || run.steps.some((candidate) => candidate.warnings.length > 0);
-				ctx.ui.notify(await formatTaskRunDetails(parsed.scope, run, step), hasWarnings ? "warning" : "info");
+				ctx.ui.notify(await formatTaskRunDetails(parsed.scope, run, selectedStep), hasWarnings ? "warning" : "info");
 				syncTaskUiChrome(ctx);
 				return;
 			}
 			if (parsed.action === "view") {
-				await openTaskViewerOverlay(ctx, parsed.scope, run, step);
+				await openTaskViewerOverlay(ctx, parsed.scope, run, selectedStep);
 				return;
 			}
 			if (parsed.action === "attach") {
-				const attachResult = await attachTaskRunInTerminal(ctx, run, step);
+				const attachResult = await attachTaskRunInTerminal(ctx, run, selectedStep);
 				ctx.ui.notify(attachResult.message, attachResult.level);
 				syncTaskUiChrome(ctx);
 				return;
 			}
 			if (parsed.action === "origin") {
-				const originResult = await revealTaskRunOrigin(ctx, run, step);
+				const originResult = await revealTaskRunOrigin(ctx, run, selectedStep);
 				ctx.ui.notify(originResult.message, originResult.level);
 				syncTaskUiChrome(ctx);
 				return;
@@ -4135,13 +4137,13 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify(`Missing steering message. Usage: ${TASKS_COMMAND_USAGE}`, "error");
 					return;
 				}
-				const steerResult = await sendTaskSteeringMessage(run, step, message);
+				const steerResult = await sendTaskSteeringMessage(run, selectedStep, message);
 				ctx.ui.notify(steerResult.message, steerResult.level);
 				syncTaskUiChrome(ctx);
 				return;
 			}
 
-			const openResult = await openTaskRunSession(ctx, run, step);
+			const openResult = await openTaskRunSession(ctx, run, selectedStep);
 			if (!openResult.opened) {
 				if (openResult.message) ctx.ui.notify(openResult.message, openResult.level);
 				syncTaskUiChrome(ctx);
@@ -4321,9 +4323,10 @@ export default function (pi: ExtensionAPI) {
 			if (preflight.error || !preflight.prepared) {
 				throwTaskError(preflight.error ?? "Failed to prepare task run.", makeDetails(mode)([]));
 			}
-			sessionRunId = preflight.prepared.sessionRunId;
-			sessionRunRoot = preflight.prepared.sessionRunRoot;
-			preparedSteps = preflight.prepared.steps;
+			const preparedRun = preflight.prepared!;
+			sessionRunId = preparedRun.sessionRunId;
+			sessionRunRoot = preparedRun.sessionRunRoot;
+			preparedSteps = preparedRun.steps;
 			childMetadataRunId = sessionRunId ?? `${toolCallId}-run`;
 
 			if (mode === "chain") {

@@ -6,11 +6,11 @@ import {
 	MAX_PERSISTED_HISTORY_ENTRIES,
 	reconstructTodoSession,
 } from "./state";
-import type { TodoDetails } from "./types";
+import type { TodoDetails, TodoItem } from "./types";
 
 const FIXED_TIMESTAMP = "2024-01-01T00:00:00.000Z";
 
-function createPersistedTodo(id: number, overrides: Record<string, unknown> = {}) {
+function createPersistedTodo(id: number, overrides: Record<string, unknown> = {}): TodoItem {
 	return {
 		id,
 		title: `Todo ${id}`,
@@ -24,7 +24,7 @@ function createPersistedTodo(id: number, overrides: Record<string, unknown> = {}
 		createdAt: FIXED_TIMESTAMP,
 		updatedAt: FIXED_TIMESTAMP,
 		...overrides,
-	};
+	} as TodoItem;
 }
 
 describe("todo state helpers", () => {

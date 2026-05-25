@@ -3,6 +3,7 @@ import type { LearningCandidate, LearningEvidence } from "./types";
 
 type TextBlock = { type?: string; text?: string };
 type ToolCallBlock = { type?: string; name?: string; arguments?: Record<string, unknown> };
+type ContentBlock = { type?: string; text?: string; name?: string; arguments?: Record<string, unknown> };
 type MessageEntry = {
 	type: string;
 	id?: string;
@@ -83,7 +84,7 @@ export function extractText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
 	return content
-		.map((part: TextBlock | ToolCallBlock) => {
+		.map((part: ContentBlock) => {
 			if (part?.type === "text" && typeof part.text === "string") return part.text;
 			if (part?.type === "toolCall" && typeof part.name === "string") return `Tool ${part.name} was called.`;
 			return "";

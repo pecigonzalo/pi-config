@@ -5,8 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { EventEmitter } from "node:events";
 
-let taskExtension: Awaited<ReturnType<typeof import("./task")>>["default"];
-let __test__: Awaited<ReturnType<typeof import("./task")>>["__test"];
+let taskExtension: (typeof import("./task"))["default"];
+let __test__: any;
 let testAgentDir: string;
 let sessionCounter = 0;
 let mockResources: any;
@@ -513,10 +513,10 @@ describe("main-session effort command", () => {
 		const { commandHandlers, pi } = createExtensionHarness();
 		const thinkingLevels: string[] = [];
 		const models: Array<{ provider: string; id: string }> = [];
-		pi.setThinkingLevel = (level: string) => {
+		(pi as any).setThinkingLevel = (level: string) => {
 			thinkingLevels.push(level);
 		};
-		pi.setModel = async (model: { provider: string; id: string }) => {
+		(pi as any).setModel = async (model: { provider: string; id: string }) => {
 			models.push(model);
 			return true;
 		};

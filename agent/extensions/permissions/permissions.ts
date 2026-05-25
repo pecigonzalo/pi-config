@@ -134,6 +134,7 @@ import {
 	type PermissionToolInput,
 	type PermissionToolName,
 	type PermissionsConfig,
+	type Rule,
 	type SandboxManagerLike,
 	type SandboxRuntimeConfigLike,
 } from "./shared";
@@ -199,12 +200,12 @@ export default function (pi: ExtensionAPI) {
 		async execute(id, params, signal, onUpdate, ctx) {
 			const localBash = createBashTool(ctx.cwd);
 			if (!sandboxEnabled || !sandboxAvailable || !sandboxManager) {
-				return localBash.execute(id, params, signal, onUpdate, ctx);
+				return localBash.execute(id, params, signal, onUpdate);
 			}
 			const sandboxedBash = createBashTool(ctx.cwd, {
 				operations: createSandboxedBashOps(sandboxManager, sandboxTmpDir, config.sandbox?.env),
 			});
-			return sandboxedBash.execute(id, params, signal, onUpdate, ctx);
+			return sandboxedBash.execute(id, params, signal, onUpdate);
 		},
 	});
 

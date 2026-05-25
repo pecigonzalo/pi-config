@@ -270,7 +270,7 @@ function renderResults(query: string, mode: WebsearchMode, domains: string[], re
 
 async function callExaMcpSearch(
 	request: { query: string; limit: number; domains: string[]; mode: WebsearchMode },
-	options?: { signal?: AbortSignal; fetchImpl?: typeof fetch },
+	options?: { signal?: AbortSignal; fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response> },
 ): Promise<{ response: Response; requestId?: string; text: string; endpoint: string; bodyTruncated: boolean }> {
 	const mcpRequest = buildExaMcpRequest();
 
@@ -307,7 +307,7 @@ async function callExaMcpSearch(
 
 export async function executeWebsearch(
 	params: WebsearchParamsInput,
-	options?: { signal?: AbortSignal; fetchImpl?: typeof fetch },
+	options?: { signal?: AbortSignal; fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response> },
 ): Promise<{ content: { type: "text"; text: string }[]; details: WebsearchDetails }> {
 	const query = normalizeQuery(params.query);
 	const appliedLimit = normalizeLimit(params.limit);

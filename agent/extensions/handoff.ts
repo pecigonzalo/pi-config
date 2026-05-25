@@ -114,8 +114,10 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					return response.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
-						.map((c) => c.text)
+						.filter((c: unknown): c is { type: "text"; text: string } =>
+							typeof c === "object" && c !== null && (c as { type?: unknown }).type === "text" && typeof (c as { text?: unknown }).text === "string",
+						)
+						.map((c: { text: string }) => c.text)
 						.join("\n");
 				};
 

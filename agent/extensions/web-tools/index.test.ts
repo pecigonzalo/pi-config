@@ -4,7 +4,7 @@ import webToolsExtension from "./index";
 test("registers both web tools", () => {
 	const tools: Array<{ name: string }> = [];
 	webToolsExtension({
-		registerTool(tool) {
+		registerTool(tool: { name: string }) {
 			tools.push({ name: tool.name });
 		},
 	} as never);

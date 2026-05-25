@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
+	type AgentProfile,
 	type EffectivePolicy,
 	type ExternalPathPolicy,
 	type PermissionMode,
@@ -227,7 +228,11 @@ export function interpolateConfig(config: PermissionsConfig): PermissionsConfig 
 	};
 	const interpolateProfileMap = (profiles: PermissionsConfig["profiles"]): PermissionsConfig["profiles"] | undefined => {
 		if (!profiles) return undefined;
-		return Object.fromEntries(Object.entries(profiles).map(([name, profile]) => [name, interpolateProfile(profile)]));
+		return Object.fromEntries(
+			Object.entries(profiles)
+				.map(([name, profile]) => [name, interpolateProfile(profile)] as const)
+				.filter((entry): entry is readonly [string, AgentProfile] => entry[1] !== undefined),
+		);
 	};
 
 	return {

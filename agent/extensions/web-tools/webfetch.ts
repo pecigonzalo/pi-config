@@ -163,7 +163,7 @@ export async function executeWebfetch(
 	params: WebfetchParamsInput,
 	options?: {
 		signal?: AbortSignal;
-		fetchImpl?: typeof fetch;
+		fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 	},
 ): Promise<{ content: { type: "text"; text: string }[]; details: WebfetchDetails }> {
 	const fetchImpl = options?.fetchImpl ?? fetch;

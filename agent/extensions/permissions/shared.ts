@@ -104,6 +104,7 @@ export interface ApprovalFile {
 export interface SandboxSettings {
 	enabled?: boolean;
 	network?: boolean;
+	enableWeakerNetworkIsolation?: boolean;
 	allowedDomains?: string[];
 	deniedDomains?: string[];
 	tmpDir?: string;
@@ -120,6 +121,7 @@ export interface SandboxSettings {
 }
 
 export interface SandboxRuntimeConfigLike {
+	enableWeakerNetworkIsolation?: boolean;
 	network?: {
 		allowedDomains?: string[];
 		deniedDomains?: string[];

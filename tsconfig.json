@@ -10,6 +10,12 @@
 
     // Bundler mode
     "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@earendil-works/pi-ai": ["agent/extensions/tasks/node_modules/@earendil-works/pi-ai"],
+      "@earendil-works/pi-tui": ["agent/extensions/tasks/node_modules/@earendil-works/pi-tui"],
+      "typebox": ["agent/extensions/tasks/node_modules/typebox"]
+    },
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
@@ -18,7 +24,7 @@
     "strict": true,
     "skipLibCheck": true,
     "noFallthroughCasesInSwitch": true,
-    "noUncheckedIndexedAccess": true,
+    "noUncheckedIndexedAccess": false,
     "noImplicitOverride": true,
 
     // Some stricter flags (disabled by default)

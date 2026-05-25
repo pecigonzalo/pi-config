@@ -417,6 +417,9 @@
   //   "env": { "GIT_SSH_COMMAND": "ssh -o ControlMaster=no" },
   //   "allowUnixSockets": ["/path/to/ssh-agent.sock"],
   //   "allowAllUnixSockets": false,
+  //   // macOS only: allow trustd for Go-based TLS verification (go, buf, gh, kubectl).
+  //   // This weakens network isolation because trustd can be an exfiltration vector.
+  //   "enableWeakerNetworkIsolation": true,
   //   // macOS only: extra XPC/Mach services to allow. Pi includes
   //   // com.apple.SystemConfiguration.configd by default when network=true
   //   // so c-ares-based tools (for example Nix curl) can read DNS settings.
@@ -427,6 +430,7 @@
   // }
   "sandbox": {
     "enabled": true,
+    "enableWeakerNetworkIsolation": true,
     "allowSshAuthSock": true,
     "denyRead": ["~/.aws", "~/.gnupg"],
   },

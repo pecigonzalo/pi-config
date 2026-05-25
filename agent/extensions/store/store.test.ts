@@ -103,8 +103,8 @@ describe("store extension core", () => {
 	test("storeread filters tags with AND logic and excludes archived by default", async () => {
 		await writeLegacyItems(tmpDir, legacyItems);
 
-		const authResult = (await storeRead(tmpDir, { tags: ["auth", "critical"] })) as { list: Array<{ id: string }> };
-		const archivedResult = (await storeRead(tmpDir, { tags: ["database"] })) as { list: Array<{ id: string }> };
+		const authResult = (await storeRead(tmpDir, { tags: ["auth", "critical"] })) as { list: Array<Record<string, unknown>> };
+		const archivedResult = (await storeRead(tmpDir, { tags: ["database"] })) as { list: Array<Record<string, unknown>> };
 
 		expect(authResult.list).toEqual([{ id: "aaa-111", summary: "Legacy first", tags: ["auth", "critical"], status: "active", links: undefined, createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-02T00:00:00.000Z" }]);
 		expect(archivedResult.list).toEqual([]);

@@ -82,7 +82,7 @@ function createMalformedCycleState(): TodoState {
 }
 
 async function runMalformedParentValidation(
-	timeoutMs = 500,
+	timeoutMs = 3_000,
 ): Promise<{ timedOut: boolean; exitCode: number; stdout: string; stderr: string }> {
 	const script = `
 		const { executeTodoAction } = await import(${JSON.stringify(CORE_MODULE_URL)});

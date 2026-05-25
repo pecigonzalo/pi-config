@@ -17,6 +17,7 @@ import {
 } from "./shell-policy";
 import { compileSandboxConfig, createSandboxedBashOps, getWorkspaceWritePaths, runSandboxedCommand } from "./sandbox";
 import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-parse";
+import type { Rule } from "./shared";
 
 const execFile = promisify(execFileCallback);
 
@@ -437,7 +438,7 @@ describe("sandboxed command runner", () => {
 				wrapWithSandbox: async (command) => command,
 			},
 			{
-				command: "printf '%s\n%s\n%s\n%s\n' \"$TMPDIR\" \"$XDG_CACHE_HOME\" \"$BUN_INSTALL_CACHE_DIR\" \"$NPM_CONFIG_CACHE\"",
+				command: "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$TMPDIR\" \"$XDG_CACHE_HOME\" \"$BUN_INSTALL_CACHE_DIR\" \"$NPM_CONFIG_CACHE\" \"$GOCACHE\" \"$GOPATH\" \"$GOMODCACHE\"",
 				cwd: process.cwd(),
 				env: { TMPDIR: sandboxTmpDir },
 				onData: (chunk) => chunks.push(chunk.toString("utf8")),
@@ -450,6 +451,38 @@ describe("sandboxed command runner", () => {
 			path.join(sandboxTmpDir, "xdg-cache"),
 			path.join(sandboxTmpDir, "bun-cache"),
 			path.join(sandboxTmpDir, "npm-cache"),
+			path.join(sandboxTmpDir, "go-build-cache"),
+			path.join(sandboxTmpDir, "go"),
+			path.join(sandboxTmpDir, "go", "pkg", "mod"),
+			"",
+		].join("\n"));
+	});
+
+	it("lets sandbox env override Go cache redirection", async () => {
+		const chunks: string[] = [];
+		const result = await runSandboxedCommand(
+			{
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command) => command,
+			},
+			{
+				command: "printf '%s\n%s\n%s\n' \"$GOCACHE\" \"$GOPATH\" \"$GOMODCACHE\"",
+				cwd: process.cwd(),
+				env: {
+					GOCACHE: "/tmp/custom-go-cache",
+					GOPATH: "/tmp/custom-go-path",
+					GOMODCACHE: "/tmp/custom-go-mod-cache",
+				},
+				onData: (chunk) => chunks.push(chunk.toString("utf8")),
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(chunks.join("")).toBe([
+			"/tmp/custom-go-cache",
+			"/tmp/custom-go-path",
+			"/tmp/custom-go-mod-cache",
 			"",
 		].join("\n"));
 	});
@@ -546,6 +579,18 @@ describe("sandbox network config", () => {
 		});
 		expect(compiled.config.network?.allowMachLookup).toContain("com.example.service");
 		expect(compiled.config.network?.allowMachLookup?.filter((value) => value === "com.example.service")).toHaveLength(1);
+	});
+
+	it("forwards weaker macOS network isolation for Go TLS verification when configured", () => {
+		const disabled = compileSandboxConfig(policy, "/repo", { enabled: true, network: true });
+		expect(disabled.config.enableWeakerNetworkIsolation).toBeUndefined();
+
+		const enabled = compileSandboxConfig(policy, "/repo", {
+			enabled: true,
+			network: true,
+			enableWeakerNetworkIsolation: true,
+		});
+		expect(enabled.config.enableWeakerNetworkIsolation).toBe(true);
 	});
 
 	it("blocks all network when disabled", () => {

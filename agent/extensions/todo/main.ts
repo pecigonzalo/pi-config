@@ -348,7 +348,7 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		renderCall(args, theme, _context) {
-			const callArgs = isRecord(args) ? args : {};
+			const callArgs: Record<string, unknown> = isRecord(args) ? args : {};
 			let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", String(callArgs.action ?? ""));
 			if (typeof callArgs.id === "number") text += " " + theme.fg("accent", `#${callArgs.id}`);
 			if (typeof callArgs.title === "string") text += " " + theme.fg("dim", `"${callArgs.title}"`);

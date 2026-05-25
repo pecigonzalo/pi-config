@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, mock } from "bun:test";
 import { EventEmitter } from "node:events";
 
-let __test__: Awaited<ReturnType<typeof import("./typescript")>>["__test"];
+let __test__: any;
 
 beforeAll(async () => {
 	mock.module("@earendil-works/pi-ai", () => ({

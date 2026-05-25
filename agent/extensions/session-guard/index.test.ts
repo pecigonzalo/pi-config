@@ -43,9 +43,9 @@ describe("session-guard safety hardening", () => {
     const result = await __test__.restoreCheckpoint(pi as never, "/cwd", {
       entryIds: ["entry-1"],
       ref: "missing-ref",
-      kind: "commit",
-      capture: "pre-turn",
-      completeness: "full",
+      kind: "commit" as const,
+      capture: "pre-turn" as const,
+      completeness: "full" as const,
       createdAt: Date.now(),
     });
 
@@ -95,9 +95,9 @@ describe("session-guard safety hardening", () => {
     const result = await __test__.restoreCheckpoint(pi as never, "/cwd", {
       entryIds: ["entry-1"],
       ref: "abc123",
-      kind: "commit",
-      capture: "post-turn",
-      completeness: "full",
+      kind: "commit" as const,
+      capture: "post-turn" as const,
+      completeness: "full" as const,
       createdAt: Date.now(),
     });
 
@@ -136,11 +136,11 @@ describe("session-guard safety hardening", () => {
     const checkpoint = {
       entryIds: ["entry-1"],
       ref: "abc123",
-      kind: "commit",
-      capture: "pre-turn",
-      completeness: "full",
+      kind: "commit" as const,
+      capture: "pre-turn" as const,
+      completeness: "full" as const,
       createdAt: Date.now(),
-    } as const;
+    };
 
     const warnMessages: string[] = [];
     const originalWarn = console.warn;

@@ -5,6 +5,7 @@
 import type {
 	TodoAction,
 	TodoDetails,
+	TodoEvent,
 	TodoEventMeta,
 	TodoEventMetaValue,
 	TodoEventType,
@@ -113,6 +114,7 @@ export function cloneTodos(items: TodoItem[]): TodoItem[] {
 export function normalizeTodo(raw: unknown): TodoItem | null {
 	if (!isRecord(raw) || typeof raw.id !== "number") return null;
 	const value = raw;
+	const id = raw.id;
 
 	const createdAt = typeof value.createdAt === "string" ? value.createdAt : now();
 	const updatedAt = typeof value.updatedAt === "string" ? value.updatedAt : createdAt;
@@ -121,12 +123,12 @@ export function normalizeTodo(raw: unknown): TodoItem | null {
 			? value.title
 			: typeof value.text === "string"
 				? value.text
-				: `Todo #${value.id}`;
+				: `Todo #${id}`;
 	const status = normalizeStatus(value.status, value.done);
-	const history = normalizeHistory(value.history, value.id);
+	const history = normalizeHistory(value.history, id);
 
 	return {
-		id: value.id,
+		id,
 		title,
 		description: typeof value.description === "string" ? value.description : undefined,
 		status,
@@ -168,9 +170,9 @@ function isTodoEventType(value: unknown): value is TodoEventType {
 function normalizeHistory(history: unknown, todoId: number): TodoItem["history"] {
 	if (!Array.isArray(history)) return [];
 
-	const normalized = history
+	const normalized: TodoEvent[] = history
 		.filter(
-			(entry): entry is Record<string, unknown> =>
+			(entry): entry is Record<string, unknown> & { timestamp: string; type: TodoEventType } =>
 				isRecord(entry) && typeof entry.timestamp === "string" && isTodoEventType(entry.type),
 		)
 		.map((entry) => ({

@@ -34,7 +34,7 @@ const TOOL_OUTPUT_MAX_BYTES = Math.min(DEFAULT_MAX_BYTES, 30 * 1024);
 const SUBPROCESS_SIGKILL_TIMEOUT_MS = 5000;
 
 function terminateProcessWithEscalation(
-	proc: Pick<ChildProcessWithoutNullStreams, "kill" | "once" | "exitCode" | "signalCode">,
+	proc: { kill(signal?: NodeJS.Signals | number): boolean; once(event: string, listener: () => void): unknown; exitCode: number | null; signalCode: NodeJS.Signals | null },
 	options?: { timeoutMs?: number; isExited?: () => boolean },
 ): void {
 	let exited = options?.isExited?.() ?? (proc.exitCode !== null || proc.signalCode !== null);
@@ -757,13 +757,13 @@ async function executeBridgeRequest(state: BridgeRuntimeState, request: BridgeRe
 		case "message.info": {
 			const text = typeof (request.args as { text?: unknown })?.text === "string" ? (request.args as { text: string }).text : "";
 			if (!state.capabilities.includes("message")) throw new Error("host.message.info is not available for this profile");
-			state.onUpdate?.({ content: [{ type: "text", text }] });
+			state.onUpdate?.({ content: [{ type: "text", text }], details: {} });
 			return { ok: true };
 		}
 		case "message.warn": {
 			const text = typeof (request.args as { text?: unknown })?.text === "string" ? (request.args as { text: string }).text : "";
 			if (!state.capabilities.includes("message")) throw new Error("host.message.warn is not available for this profile");
-			state.onUpdate?.({ content: [{ type: "text", text: `WARNING: ${text}` }] });
+			state.onUpdate?.({ content: [{ type: "text", text: `WARNING: ${text}` }], details: {} });
 			return { ok: true };
 		}
 		case "artifact.write": {
@@ -968,7 +968,7 @@ export default function (pi: ExtensionAPI) {
 				throw new Error(`TypeScript requires sandboxing, but sandboxing is disabled: ${resolvedPolicy.sandbox.reason}`);
 			}
 
-			onUpdate?.({ content: [{ type: "text", text: `Starting TypeScript (${profile})...` }] });
+			onUpdate?.({ content: [{ type: "text", text: `Starting TypeScript (${profile})...` }], details: {} });
 
 			let exitCode: number | null = null;
 			const rawOutputState = createRawOutputCaptureState();

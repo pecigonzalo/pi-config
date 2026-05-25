@@ -172,6 +172,8 @@ function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): No
 	const xdgCacheHome = overrides.XDG_CACHE_HOME ?? path.join(effectiveTmpDir, "xdg-cache");
 	const xdgStateHome = overrides.XDG_STATE_HOME ?? path.join(effectiveTmpDir, "xdg-state");
 	const npmCache = overrides.NPM_CONFIG_CACHE ?? overrides.npm_config_cache ?? path.join(effectiveTmpDir, "npm-cache");
+	const goPath = overrides.GOPATH ?? path.join(effectiveTmpDir, "go");
+	const goModCache = overrides.GOMODCACHE ?? path.join(goPath, "pkg", "mod");
 
 	return {
 		...mergedEnv,
@@ -184,6 +186,9 @@ function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): No
 		YARN_CACHE_FOLDER: overrides.YARN_CACHE_FOLDER ?? path.join(effectiveTmpDir, "yarn-cache"),
 		PIP_CACHE_DIR: overrides.PIP_CACHE_DIR ?? path.join(effectiveTmpDir, "pip-cache"),
 		UV_CACHE_DIR: overrides.UV_CACHE_DIR ?? path.join(effectiveTmpDir, "uv-cache"),
+		GOCACHE: overrides.GOCACHE ?? path.join(effectiveTmpDir, "go-build-cache"),
+		GOPATH: goPath,
+		GOMODCACHE: goModCache,
 	};
 }
 
@@ -229,6 +234,7 @@ export function compileSandboxConfig(
 	const explicitDeniedDomains = overrides?.deniedDomains;
 	const hasExplicitDomainPolicy = explicitAllowedDomains !== undefined || explicitDeniedDomains !== undefined;
 
+	const enableWeakerNetworkIsolation = overrides?.enableWeakerNetworkIsolation || undefined;
 	const networkConfig = !networkEnabled
 		? {
 				allowedDomains: [],
@@ -255,6 +261,7 @@ export function compileSandboxConfig(
 		enabled,
 		reason: enabled ? `mode=${policy.mode}, tmpDir=${effectiveTmpDir}` : `disabled by mode=${policy.mode}`,
 		config: {
+			enableWeakerNetworkIsolation,
 			network: networkConfig,
 			filesystem: {
 				denyRead,

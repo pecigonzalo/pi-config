@@ -9,81 +9,81 @@ export const footerSectionSchema = z
   .describe("Footer section id. `a`-`c` are left-aligned; `x`-`z` are right-aligned.");
 
 export const footerStarshipConfigFileSchema = z.object({
-  enabled: z.boolean().describe("Enable or disable the Starship item.").catch(undefined).optional(),
+  enabled: z.boolean().describe("Enable or disable the Starship item.").optional().catch(undefined),
   command: z
     .string()
     .trim()
     .min(1)
     .describe("Command used to invoke Starship.")
-    .catch(undefined)
-    .optional(),
+    .optional()
+    .catch(undefined),
   timeoutMs: z
     .number()
     .int()
     .positive()
     .describe("Maximum time to wait for the Starship process in milliseconds.")
-    .catch(undefined)
-    .optional(),
+    .optional()
+    .catch(undefined),
   shell: z
     .string()
     .trim()
     .min(1)
     .describe("Value passed as STARSHIP_SHELL.")
-    .catch(undefined)
-    .optional(),
+    .optional()
+    .catch(undefined),
 });
 
 export const footerItemOverrideSchema = z.object({
-  enabled: z.boolean().describe("Enable or disable the item for this layout.").catch(undefined).optional(),
-  row: z.string().describe("Row id where the item should render.").catch(undefined).optional(),
-  section: footerSectionSchema.describe("Footer section for this item.").catch(undefined).optional(),
-  order: z.number().int().describe("Sort order within the row section.").catch(undefined).optional(),
+  enabled: z.boolean().describe("Enable or disable the item for this layout.").optional().catch(undefined),
+  row: z.string().describe("Row id where the item should render.").optional().catch(undefined),
+  section: footerSectionSchema.describe("Footer section for this item.").optional().catch(undefined),
+  order: z.number().int().describe("Sort order within the row section.").optional().catch(undefined),
 });
 
 export const footerRowOverrideSchema = z.object({
-  order: z.number().int().describe("Row render order; lower numbers render first.").catch(undefined).optional(),
+  order: z.number().int().describe("Row render order; lower numbers render first.").optional().catch(undefined),
   itemSeparator: z
     .string()
     .describe("Separator used between items inside the same section.")
-    .catch(undefined)
-    .optional(),
+    .optional()
+    .catch(undefined),
   sectionSeparator: z
     .string()
     .describe("Separator used between left-side sections and, by default, right-side sections.")
-    .catch(undefined)
-    .optional(),
+    .optional()
+    .catch(undefined),
   rightSectionSeparator: z
     .string()
     .describe("Optional separator used only between right-side sections (`x`, `y`, `z`).")
-    .catch(undefined)
-    .optional(),
+    .optional()
+    .catch(undefined),
 });
 
 export const footerLayoutOverrideSchema = z.object({
   items: z
     .record(z.string(), footerItemOverrideSchema.catch({}))
     .describe("Per-item overrides keyed by item id.")
-    .catch(undefined)
-    .optional(),
+    .optional()
+    .catch(undefined),
   rows: z
     .record(z.string(), footerRowOverrideSchema.catch({}))
     .describe("Per-row overrides keyed by row id.")
-    .catch(undefined)
-    .optional(),
+    .optional()
+    .catch(undefined),
 });
 
 export const footerLayoutsOverrideSchema = z.object({
-  default: footerLayoutOverrideSchema.catch(undefined).optional(),
-  minimal: footerLayoutOverrideSchema.catch(undefined).optional(),
-  compact: footerLayoutOverrideSchema.catch(undefined).optional(),
-  full: footerLayoutOverrideSchema.catch(undefined).optional(),
+  default: footerLayoutOverrideSchema.optional().catch(undefined),
+  minimal: footerLayoutOverrideSchema.optional().catch(undefined),
+  compact: footerLayoutOverrideSchema.optional().catch(undefined),
+  full: footerLayoutOverrideSchema.optional().catch(undefined),
 });
 
 export const footerConfigFileSchema = z.object({
-  $schema: z.string().describe("Optional JSON Schema reference used by editors.").catch(undefined).optional(),
-  layout: footerLayoutNameSchema.describe("Active layout when a session starts.").catch(undefined).optional(),
-  starship: footerStarshipConfigFileSchema.describe("Starship command settings.").catch(undefined).optional(),
-  layouts: footerLayoutsOverrideSchema.describe("Per-layout row and item overrides.").catch(undefined).optional(),
+  $schema: z.string().describe("Optional JSON Schema reference used by editors.").optional().catch(undefined),
+  layout: footerLayoutNameSchema.describe("Active layout when a session starts.").optional().catch(undefined),
+  starship: footerStarshipConfigFileSchema.describe("Starship command settings.").optional().catch(undefined),
+  layouts: footerLayoutsOverrideSchema.describe("Per-layout row and item overrides.").optional().catch(undefined),
 });
 
 export const footerStarshipSettingsSchema = z.object({

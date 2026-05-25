@@ -167,7 +167,7 @@ export function decodeBuffer(buffer: Buffer, charset: string | undefined): strin
 
 	if (charset) {
 		try {
-			return new TextDecoder(charset).decode(buffer);
+			return new TextDecoder(charset as any).decode(buffer);
 		} catch {
 			// Fall back to utf-8.
 		}

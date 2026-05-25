@@ -6,7 +6,7 @@ export interface McpToolCallOptions {
 	args: Record<string, unknown>;
 	timeoutSeconds: number;
 	signal?: AbortSignal;
-	fetchImpl?: typeof fetch;
+	fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 	headers?: Record<string, string>;
 }
 
