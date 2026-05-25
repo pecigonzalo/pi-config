@@ -113,6 +113,7 @@ export interface SandboxSettings {
 	allowSshAuthSock?: boolean;
 	allowUnixSockets?: string[];
 	allowAllUnixSockets?: boolean;
+	allowLocalBinding?: boolean;
 	allowMachLookup?: string[];
 	allowPty?: boolean;
 	allowWrite?: string[];
@@ -129,6 +130,7 @@ export interface SandboxRuntimeConfigLike {
 		deniedDomains?: string[];
 		allowUnixSockets?: string[];
 		allowAllUnixSockets?: boolean;
+		allowLocalBinding?: boolean;
 		allowMachLookup?: string[];
 	};
 	filesystem?: {

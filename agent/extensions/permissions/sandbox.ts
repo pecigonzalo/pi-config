@@ -26,7 +26,7 @@ export function getEffectiveSandboxTmpDir(cwd: string, overrides: SandboxSetting
 }
 
 export function getSandboxTmpDirMode(overrides: SandboxSettings | undefined): "shared" | "session" {
-	return overrides?.tmpDirMode ?? "session";
+	return overrides?.tmpDirMode ?? "shared";
 }
 
 function getCompatWritePaths(): string[] {
@@ -229,6 +229,7 @@ export function compileSandboxConfig(
 	if (overrides?.allowSshAuthSock && process.env.SSH_AUTH_SOCK) socketSet.add(process.env.SSH_AUTH_SOCK);
 	const allowUnixSockets = [...socketSet];
 	const allowAllUnixSockets = overrides?.allowAllUnixSockets ?? false;
+	const allowLocalBinding = overrides?.allowLocalBinding || undefined;
 	const defaultMachLookups = process.platform === "darwin" && networkEnabled ? DARWIN_DNS_CONFIG_MACH_LOOKUPS : [];
 	const allowMachLookup = dedupeStrings([...defaultMachLookups, ...(overrides?.allowMachLookup ?? [])]);
 	const explicitAllowedDomains = overrides?.allowedDomains;
@@ -242,6 +243,7 @@ export function compileSandboxConfig(
 				deniedDomains: [],
 				allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
 				allowAllUnixSockets: allowAllUnixSockets || undefined,
+				allowLocalBinding,
 				allowMachLookup: allowMachLookup.length > 0 ? allowMachLookup : undefined,
 			}
 		: hasExplicitDomainPolicy
@@ -250,11 +252,13 @@ export function compileSandboxConfig(
 					deniedDomains: dedupeStrings(explicitDeniedDomains ?? []),
 					allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
 					allowAllUnixSockets: allowAllUnixSockets || undefined,
+					allowLocalBinding,
 					allowMachLookup: allowMachLookup.length > 0 ? allowMachLookup : undefined,
 				}
 			: {
 					allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
 					allowAllUnixSockets: allowAllUnixSockets || undefined,
+					allowLocalBinding,
 					allowMachLookup: allowMachLookup.length > 0 ? allowMachLookup : undefined,
 				};
 

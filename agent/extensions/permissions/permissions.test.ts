@@ -16,7 +16,7 @@ import {
 	isParsedCommandAllowed,
 	sandboxFallbackModeForPolicy,
 } from "./shell-policy";
-import { compileSandboxConfig, createSandboxedBashOps, getWorkspaceWritePaths, runSandboxedCommand } from "./sandbox";
+import { compileSandboxConfig, createSandboxedBashOps, getSandboxTmpDirMode, getWorkspaceWritePaths, runSandboxedCommand } from "./sandbox";
 import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-parse";
 import type { Rule } from "./shared";
 
@@ -539,6 +539,18 @@ describe("sandboxed command runner", () => {
 	});
 });
 
+describe("sandbox tmpDir mode", () => {
+	it("defaults to shared", () => {
+		expect(getSandboxTmpDirMode(undefined)).toBe("shared");
+		expect(getSandboxTmpDirMode({})).toBe("shared");
+	});
+
+	it("respects explicit mode overrides", () => {
+		expect(getSandboxTmpDirMode({ tmpDirMode: "session" })).toBe("session");
+		expect(getSandboxTmpDirMode({ tmpDirMode: "shared" })).toBe("shared");
+	});
+});
+
 describe("sandbox network config", () => {
 	const policy = {
 		mode: "workspace-write" as const,
@@ -593,6 +605,29 @@ describe("sandbox network config", () => {
 			enableWeakerNetworkIsolation: true,
 		});
 		expect(enabled.config.enableWeakerNetworkIsolation).toBe(true);
+	});
+
+	it("forwards allowLocalBinding when configured", () => {
+		const disabled = compileSandboxConfig(policy, "/repo", { enabled: true, network: true });
+		expect(disabled.config.network?.allowLocalBinding).toBeUndefined();
+
+		const enabled = compileSandboxConfig(policy, "/repo", {
+			enabled: true,
+			network: true,
+			allowLocalBinding: true,
+		});
+		expect(enabled.config.network?.allowLocalBinding).toBe(true);
+	});
+
+	it("allows localhost binding even when outbound network is disabled when explicitly configured", () => {
+		const compiled = compileSandboxConfig(policy, "/repo", {
+			enabled: true,
+			network: false,
+			allowLocalBinding: true,
+		});
+		expect(compiled.config.network?.allowedDomains).toEqual([]);
+		expect(compiled.config.network?.deniedDomains).toEqual([]);
+		expect(compiled.config.network?.allowLocalBinding).toBe(true);
 	});
 
 	it("blocks all network when disabled", () => {

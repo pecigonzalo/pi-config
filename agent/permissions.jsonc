@@ -402,9 +402,9 @@
   //   // Defaults to os.tmpdir()/pi
   //   // "tmpDir": "/tmp/pi",
   //   // Temp dir strategy:
-  //   // - "session" (default): creates mkdtemp() session-* dirs under tmpDir
-  //   // - "shared": uses tmpDir directly
-  //   // "tmpDirMode": "session",
+  //   // - "shared" (default): uses tmpDir directly
+  //   // - "session": creates mkdtemp() session-* dirs under tmpDir
+  //   // "tmpDirMode": "shared",
   //   // Include compatibility write paths (/tmp, /private/tmp, os.tmpdir())
   //   // "compatWritePaths": true,
   //   // Optional domain filters (allow-only model).
@@ -417,6 +417,9 @@
   //   "env": { "GIT_SSH_COMMAND": "ssh -o ControlMaster=no" },
   //   "allowUnixSockets": ["/path/to/ssh-agent.sock"],
   //   "allowAllUnixSockets": false,
+  //   // macOS only: allow localhost TCP bind/connect for sandboxed processes.
+  //   // Useful for tests and local clusters that listen on 127.0.0.1:0.
+  //   "allowLocalBinding": true,
   //   // macOS only: allow trustd for Go-based TLS verification (go, buf, gh, kubectl).
   //   // This weakens network isolation because trustd can be an exfiltration vector.
   //   "enableWeakerNetworkIsolation": true,
@@ -432,6 +435,7 @@
     "enabled": true,
     "enableWeakerNetworkIsolation": true,
     "allowSshAuthSock": true,
+    "allowLocalBinding": true,
     "denyRead": ["~/.aws", "~/.gnupg"],
   },
 }
