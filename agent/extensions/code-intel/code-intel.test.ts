@@ -63,6 +63,31 @@ describe("code-intel Phase 1 extraction", () => {
 		expect(ranked[0]?.name).toBe("AuthService");
 	});
 
+	test("parses tree-sitter tags output", () => {
+		const parsed = __test.parseTreeSitterTagsOutput(
+			`    /repo/src/auth.ts\n        AuthService      | class        def (4, 13) - (4, 24) \`export class AuthService {\`\n        TokenStore       | class        ref (5, 30) - (5, 40) \`constructor(private store: TokenStore) {}\`\n`,
+			"/repo",
+		);
+
+		const fileTags = parsed.byFile.get("src/auth.ts");
+		expect(parsed.definitionCount).toBe(1);
+		expect(parsed.referenceCount).toBe(1);
+		expect(fileTags?.definitions[0]?.name).toBe("AuthService");
+		expect(fileTags?.definitions[0]?.kind).toBe("class");
+		expect(fileTags?.references.get("TokenStore")).toBe(1);
+	});
+
+	test("hydrates tree-sitter tags into definitions", () => {
+		const defs = __test.hydrateTreeSitterDefinitions(
+			sourceFile,
+			`export class AuthService {\n  login() {}\n}`,
+			[{ name: "AuthService", kind: "class", role: "def", file: "src/auth.ts", line: 0, column: 13 }],
+		);
+
+		expect(defs[0]?.backend).toBe("tree-sitter-tags");
+		expect(defs[0]?.signatureLines[0]).toContain("AuthService");
+	});
+
 	test("reports unsupported extensions when map scope has no supported files", () => {
 		const notes = __test.renderScanDiagnostics(
 			{

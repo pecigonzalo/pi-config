@@ -13,6 +13,8 @@ Current actions:
 - `/code-intel map [tokens]`
 - `/code-intel status`
 
-The current backend prefers available project/git metadata and uses deterministic syntax-pattern matching. It is intentionally compact and approximate; later phases will add persistent indexing and LSP-backed precision.
+The current backend prefers available project/git metadata, uses `tree-sitter tags` when the CLI/parsers/queries are configured, and falls back to deterministic syntax-pattern matching. It is intentionally compact and approximate; later phases will add LSP-backed precision.
 
-`repo_map`/`symbols` now report when no supported source files were analyzed (for example, unsupported extensions) and when files are using generic fallback patterns instead of language-specific extraction.
+`repo_map`/`symbols` report when no supported source files were analyzed (for example, unsupported extensions), when files are using generic fallback patterns instead of language-specific extraction, and whether Tree-sitter tags contributed definitions/references.
+
+Repo analysis is cached under `${XDG_CACHE_HOME:-~/.cache}/pi-code-intel/<project-hash>/` and invalidated by file size/mtime, backend availability, and cache version.

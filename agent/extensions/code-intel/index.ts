@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
-import { basename, extname, join, relative, resolve, sep } from "node:path";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -28,6 +30,7 @@ interface SourceFile {
 	relPath: string;
 	language: string;
 	size: number;
+	mtimeMs?: number;
 }
 
 interface Definition {
@@ -39,6 +42,7 @@ interface Definition {
 	text: string;
 	signatureLines: string[];
 	score: number;
+	backend?: "tree-sitter-tags" | "syntax-pattern";
 }
 
 interface RepoMapOptions {
@@ -59,6 +63,11 @@ interface RepoMapOptions {
 interface SourceScanDiagnostics {
 	unsupportedExtensions: Map<string, number>;
 	fallbackPatternLanguages: Map<string, number>;
+	treeSitterTagsAvailable?: boolean;
+	treeSitterTaggedFiles?: number;
+	treeSitterTagDefinitions?: number;
+	treeSitterTagReferences?: number;
+	treeSitterTagsError?: string;
 }
 
 interface SourceDiscoveryResult {
@@ -84,6 +93,7 @@ interface CodeIntelDetails {
 	firstLine?: string;
 }
 
+const CODE_INTEL_CACHE_VERSION = 1;
 const DEFAULT_MAP_TOKENS = 1600;
 const DEFAULT_MAX_FILES = 2500;
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024;
@@ -440,7 +450,7 @@ async function buildStatus(pi: ExtensionAPI, ctx: ExtensionContext, signal?: Abo
 		`- ripgrep: ${formatCommandStatus(rg)}`,
 		`- tree-sitter CLI: ${formatCommandStatus(treeSitter)}`,
 		`- universal-ctags: ${universalCtags ? "available" : ctags.available ? "not detected (ctags exists, but does not look like Universal Ctags)" : "not found"}`,
-		`- active Phase 1 backend: ${treeSitter.available ? "syntax-pattern fallback (tree-sitter integration planned)" : "syntax-pattern fallback"}`,
+		`- active backend: ${treeSitter.available ? "tree-sitter tags when queries/parsers are configured, with syntax-pattern fallback" : "syntax-pattern fallback"}`,
 		`- supported extensions: ${Array.from(EXT_TO_LANGUAGE.keys()).sort().join(", ")}`,
 		`- dedicated syntax patterns: ${Array.from(LANGUAGE_SPECIFIC_PATTERN_SUPPORT).sort().join(", ")}`,
 		fallbackPatternLanguages.length > 0 ? `- generic fallback patterns only: ${fallbackPatternLanguages.join(", ")}` : undefined,
@@ -500,6 +510,22 @@ async function buildRepoAnalysis(
 	const maxFileBytes = clampInt(params.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, 1_000, 5 * 1024 * 1024);
 	const sourceDiscovery = await listSourceFiles(pi, root, { maxFiles, maxFileBytes, include: params.include, exclude: params.exclude }, signal);
 	const files = sourceDiscovery.files;
+	const backendSignature = await getBackendSignature(pi, signal);
+	const cached = await loadAnalysisCache(root, files, backendSignature, params);
+	if (cached) {
+		const rankedDefinitions = rankDefinitions(cached.definitionsByName, cached.referencesByName, splitQueryTerms(params.query));
+		return { ...cached, rankedDefinitions };
+	}
+
+	const treeSitterTags = await extractTreeSitterTags(pi, root, files, signal);
+	if (treeSitterTags) {
+		sourceDiscovery.diagnostics.treeSitterTagsAvailable = true;
+		sourceDiscovery.diagnostics.treeSitterTaggedFiles = treeSitterTags.byFile.size;
+		sourceDiscovery.diagnostics.treeSitterTagDefinitions = treeSitterTags.definitionCount;
+		sourceDiscovery.diagnostics.treeSitterTagReferences = treeSitterTags.referenceCount;
+	} else {
+		sourceDiscovery.diagnostics.treeSitterTagsAvailable = false;
+	}
 
 	const analyses = [] as RepoAnalysis["analyses"];
 	const definitionsByName = new Map<string, Definition[]>();
@@ -516,8 +542,11 @@ async function buildRepoAnalysis(
 
 		if (looksBinary(text)) continue;
 
-		const definitions = extractDefinitions(file, text);
-		const references = extractReferences(text);
+		const treeSitterFileTags = treeSitterTags?.byFile.get(file.relPath);
+		const syntaxDefinitions = extractDefinitions(file, text);
+		const definitions = hydrateTreeSitterDefinitions(file, text, treeSitterFileTags?.definitions ?? []);
+		if (definitions.length === 0) definitions.push(...syntaxDefinitions);
+		const references = treeSitterFileTags?.references.size ? treeSitterFileTags.references : extractReferences(text);
 		analyses.push({ file, definitions, references, text });
 
 		for (const definition of definitions) {
@@ -534,7 +563,226 @@ async function buildRepoAnalysis(
 	}
 
 	const rankedDefinitions = rankDefinitions(definitionsByName, referencesByName, splitQueryTerms(params.query));
-	return { root, files, diagnostics: sourceDiscovery.diagnostics, analyses, definitionsByName, referencesByName, rankedDefinitions };
+	const analysis = { root, files, diagnostics: sourceDiscovery.diagnostics, analyses, definitionsByName, referencesByName, rankedDefinitions };
+	await saveAnalysisCache(root, files, backendSignature, analysis).catch(() => undefined);
+	return analysis;
+}
+
+interface CachedAnalysisFile {
+	file: SourceFile;
+	definitions: Definition[];
+	references: Array<[string, number]>;
+}
+
+interface CachedAnalysisPayload {
+	version: number;
+	root: string;
+	backendSignature: string;
+	fileSignature: string;
+	diagnostics: {
+		unsupportedExtensions: Array<[string, number]>;
+		fallbackPatternLanguages: Array<[string, number]>;
+		treeSitterTagsAvailable?: boolean;
+		treeSitterTaggedFiles?: number;
+		treeSitterTagDefinitions?: number;
+		treeSitterTagReferences?: number;
+	};
+	analyses: CachedAnalysisFile[];
+}
+
+async function getBackendSignature(pi: ExtensionAPI, signal?: AbortSignal): Promise<string> {
+	const treeSitter = await commandVersion(pi, "tree-sitter", ["--version"], signal);
+	return `tree-sitter:${treeSitter.available ? treeSitter.version ?? "available" : "missing"};extractor:${CODE_INTEL_CACHE_VERSION}`;
+}
+
+async function loadAnalysisCache(
+	root: string,
+	files: SourceFile[],
+	backendSignature: string,
+	params: RepoMapOptions,
+): Promise<Omit<RepoAnalysis, "rankedDefinitions"> | undefined> {
+	if (params.path) return undefined;
+	const cachePath = getAnalysisCachePath(root);
+	let payload: CachedAnalysisPayload;
+	try {
+		payload = JSON.parse(await readFile(cachePath, "utf8")) as CachedAnalysisPayload;
+	} catch {
+		return undefined;
+	}
+
+	if (payload.version !== CODE_INTEL_CACHE_VERSION || payload.root !== root || payload.backendSignature !== backendSignature) return undefined;
+	if (payload.fileSignature !== fileSignature(files)) return undefined;
+
+	const analyses = payload.analyses.map((item) => ({
+		file: item.file,
+		definitions: item.definitions,
+		references: new Map(item.references),
+	}));
+	const definitionsByName = new Map<string, Definition[]>();
+	const referencesByName = new Map<string, Map<string, number>>();
+	for (const analysis of analyses) {
+		for (const definition of analysis.definitions) {
+			const bucket = definitionsByName.get(definition.name) ?? [];
+			bucket.push(definition);
+			definitionsByName.set(definition.name, bucket);
+		}
+		for (const [name, count] of analysis.references) {
+			const bucket = referencesByName.get(name) ?? new Map<string, number>();
+			bucket.set(analysis.file.relPath, (bucket.get(analysis.file.relPath) ?? 0) + count);
+			referencesByName.set(name, bucket);
+		}
+	}
+
+	return {
+		root,
+		files,
+		diagnostics: {
+			unsupportedExtensions: new Map(payload.diagnostics.unsupportedExtensions),
+			fallbackPatternLanguages: new Map(payload.diagnostics.fallbackPatternLanguages),
+			treeSitterTagsAvailable: payload.diagnostics.treeSitterTagsAvailable,
+			treeSitterTaggedFiles: payload.diagnostics.treeSitterTaggedFiles,
+			treeSitterTagDefinitions: payload.diagnostics.treeSitterTagDefinitions,
+			treeSitterTagReferences: payload.diagnostics.treeSitterTagReferences,
+		},
+		analyses,
+		definitionsByName,
+		referencesByName,
+	};
+}
+
+async function saveAnalysisCache(root: string, files: SourceFile[], backendSignature: string, analysis: RepoAnalysis): Promise<void> {
+	const cachePath = getAnalysisCachePath(root);
+	await mkdir(dirname(cachePath), { recursive: true });
+	const payload: CachedAnalysisPayload = {
+		version: CODE_INTEL_CACHE_VERSION,
+		root,
+		backendSignature,
+		fileSignature: fileSignature(files),
+		diagnostics: {
+			unsupportedExtensions: Array.from(analysis.diagnostics.unsupportedExtensions),
+			fallbackPatternLanguages: Array.from(analysis.diagnostics.fallbackPatternLanguages),
+			treeSitterTagsAvailable: analysis.diagnostics.treeSitterTagsAvailable,
+			treeSitterTaggedFiles: analysis.diagnostics.treeSitterTaggedFiles,
+			treeSitterTagDefinitions: analysis.diagnostics.treeSitterTagDefinitions,
+			treeSitterTagReferences: analysis.diagnostics.treeSitterTagReferences,
+		},
+		analyses: analysis.analyses.map((item) => ({
+			file: item.file,
+			definitions: item.definitions.map((definition) => ({ ...definition, score: 0 })),
+			references: Array.from(item.references),
+		})),
+	};
+	await writeFile(cachePath, JSON.stringify(payload), "utf8");
+}
+
+function getAnalysisCachePath(root: string): string {
+	const cacheRoot = process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
+	const rootHash = createHash("sha256").update(root).digest("hex").slice(0, 24);
+	return join(cacheRoot, "pi-code-intel", rootHash, `analysis-v${CODE_INTEL_CACHE_VERSION}.json`);
+}
+
+function fileSignature(files: SourceFile[]): string {
+	const input = files
+		.map((file) => `${file.relPath}\0${file.size}\0${file.mtimeMs ?? 0}\0${file.language}`)
+		.sort()
+		.join("\n");
+	return createHash("sha256").update(input).digest("hex");
+}
+
+interface TreeSitterFileTags {
+	definitions: TreeSitterTag[];
+	references: Map<string, number>;
+}
+
+interface TreeSitterTag {
+	name: string;
+	kind: string;
+	role: "def" | "ref";
+	file: string;
+	line: number;
+	column: number;
+	text?: string;
+}
+
+async function extractTreeSitterTags(
+	pi: ExtensionAPI,
+	root: string,
+	files: SourceFile[],
+	signal?: AbortSignal,
+): Promise<{ byFile: Map<string, TreeSitterFileTags>; definitionCount: number; referenceCount: number } | undefined> {
+	if (files.length === 0) return undefined;
+	const availability = await commandVersion(pi, "tree-sitter", ["--version"], signal);
+	if (!availability.available) return undefined;
+
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-code-intel-"));
+	const pathsFile = join(tempDir, "paths.txt");
+	try {
+		await writeFile(pathsFile, files.map((file) => file.absPath).join("\n"), "utf8");
+		const result = await pi.exec("tree-sitter", ["tags", "--paths", pathsFile], { signal, timeout: 30_000 });
+		const output = result.stdout.trim();
+		if (!output || (result.code !== 0 && !output.includes("|"))) return undefined;
+		return parseTreeSitterTagsOutput(output, root);
+	} catch {
+		return undefined;
+	} finally {
+		await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+	}
+}
+
+function parseTreeSitterTagsOutput(output: string, root: string): { byFile: Map<string, TreeSitterFileTags>; definitionCount: number; referenceCount: number } {
+	const byFile = new Map<string, TreeSitterFileTags>();
+	let currentFile: string | undefined;
+	let definitionCount = 0;
+	let referenceCount = 0;
+
+	for (const rawLine of output.split(/\r?\n/)) {
+		const line = rawLine.trimEnd();
+		if (!line.trim()) continue;
+
+		if (!line.includes("|") || /^\S.*:$/.test(line.trim())) {
+			const possiblePath = line.trim().replace(/:$/, "");
+			currentFile = normalizePath(possiblePath.startsWith(root) ? relative(root, possiblePath) : possiblePath);
+			continue;
+		}
+
+		const match = line.match(/^\s*(.*?)\s+\|\s+(\S+)\s+(def|ref)\s+\((\d+),\s*(\d+)\)\s*-\s*\((\d+),\s*(\d+)\)(?:\s+`([^`]*)`)?/);
+		if (!match || !currentFile) continue;
+		const name = match[1]?.trim();
+		const kind = match[2]?.trim() || "symbol";
+		const role = match[3] as "def" | "ref";
+		const lineNumber = Number(match[4]);
+		const column = Number(match[5]);
+		const text = match[8]?.trim();
+		if (!name || !Number.isFinite(lineNumber) || !Number.isFinite(column)) continue;
+
+		const bucket = byFile.get(currentFile) ?? { definitions: [], references: new Map<string, number>() };
+		if (role === "def") {
+			bucket.definitions.push({ name, kind, role, file: currentFile, line: lineNumber, column, text });
+			definitionCount++;
+		} else {
+			bucket.references.set(name, (bucket.references.get(name) ?? 0) + 1);
+			referenceCount++;
+		}
+		byFile.set(currentFile, bucket);
+	}
+
+	return { byFile, definitionCount, referenceCount };
+}
+
+function hydrateTreeSitterDefinitions(file: SourceFile, text: string, tags: TreeSitterTag[]): Definition[] {
+	if (tags.length === 0) return [];
+	const lines = text.split(/\r?\n/);
+	return tags.map((tag) => ({
+		name: tag.name,
+		kind: tag.kind,
+		file: file.relPath,
+		line: tag.line,
+		column: tag.column,
+		text: tag.text ?? lines[tag.line]?.trimEnd() ?? tag.name,
+		signatureLines: captureSignature(lines, tag.line, file.language),
+		score: 0,
+		backend: "tree-sitter-tags" as const,
+	}));
 }
 
 async function generateOutline(
@@ -572,7 +820,7 @@ async function generateOutline(
 	for (const definition of definitions) {
 		const endLine = findDefinitionEnd(lines, definition.line, file.language);
 		out.push(
-			`${String(definition.line + 1).padStart(5, " ")}-${String(endLine + 1).padStart(5, " ")} │${definition.kind.padEnd(10)} ${definition.name}`,
+			`${String(definition.line + 1).padStart(5, " ")}-${String(endLine + 1).padStart(5, " ")} │${definition.kind.padEnd(10)} ${definition.name}${definition.backend ? ` [${definition.backend}]` : ""}`,
 		);
 		for (const signatureLine of definition.signatureLines.slice(0, 3)) {
 			out.push(`            │ ${signatureLine.trim()}`);
@@ -606,7 +854,7 @@ async function findSymbols(
 
 	for (const definition of matches.slice(0, limit)) {
 		out.push(
-			`${definition.file}:${definition.line + 1}:${definition.column + 1} │ ${definition.kind} ${definition.name} │ score ${definition.score.toFixed(2)}`,
+			`${definition.file}:${definition.line + 1}:${definition.column + 1} │ ${definition.kind} ${definition.name} │ score ${definition.score.toFixed(2)}${definition.backend ? ` │ ${definition.backend}` : ""}`,
 		);
 		out.push(`  ${definition.signatureLines[0]?.trim() ?? definition.text.trim()}`);
 	}
@@ -637,7 +885,10 @@ async function sliceSymbol(
 		const definition = candidates[0];
 		if (definition) {
 			const fileAnalysis = analysis.analyses.find((item) => item.file.relPath === definition.file);
-			if (fileAnalysis?.text) target = { file: fileAnalysis.file, text: fileAnalysis.text, definition };
+			if (fileAnalysis) {
+				const text = fileAnalysis.text ?? (await readFile(fileAnalysis.file.absPath, "utf8"));
+				target = { file: fileAnalysis.file, text, definition };
+			}
 		}
 	}
 
@@ -645,7 +896,7 @@ async function sliceSymbol(
 	const lines = target.text.split(/\r?\n/);
 	const endLine = findDefinitionEnd(lines, target.definition.line, target.file.language);
 	const slice = lines.slice(target.definition.line, endLine + 1).join("\n");
-	const header = `${target.file.relPath}:${target.definition.line + 1}-${endLine + 1} │ ${target.definition.kind} ${target.definition.name}`;
+	const header = `${target.file.relPath}:${target.definition.line + 1}-${endLine + 1} │ ${target.definition.kind} ${target.definition.name}${target.definition.backend ? ` │ ${target.definition.backend}` : ""}`;
 	return `${header}\n\n${slice}`;
 }
 
@@ -670,7 +921,7 @@ async function findEnclosingSymbol(
 	if (!enclosing) return `No enclosing symbol found at ${loaded.file.relPath}:${params.line}.`;
 	return [
 		`Enclosing symbol at ${loaded.file.relPath}:${params.line}${params.column ? `:${params.column}` : ""}`,
-		`${enclosing.definition.kind} ${enclosing.definition.name}`,
+		`${enclosing.definition.kind} ${enclosing.definition.name}${enclosing.definition.backend ? ` (${enclosing.definition.backend})` : ""}`,
 		`range: ${enclosing.definition.line + 1}-${enclosing.endLine + 1}`,
 		`signature: ${enclosing.definition.signatureLines.map((line) => line.trim()).join(" ")}`,
 	].join("\n");
@@ -693,7 +944,7 @@ async function loadRequestedSourceFile(
 	if (!fileStat.isFile()) return `Not a regular file: ${params.path}`;
 	const text = await readFile(absPath, "utf8");
 	if (looksBinary(text)) return `Refusing to analyze binary-looking file: ${params.path}`;
-	return { root, file: { absPath, relPath, language, size: fileStat.size }, text };
+	return { root, file: { absPath, relPath, language, size: fileStat.size, mtimeMs: fileStat.mtimeMs }, text };
 }
 
 function chooseDefinition(definitions: Definition[], file: SourceFile, text: string, params: RepoMapOptions): { file: SourceFile; text: string; definition: Definition } | undefined {
@@ -814,7 +1065,7 @@ async function listSourceFiles(
 			continue;
 		}
 		if (!fileStat.isFile() || fileStat.size > options.maxFileBytes) continue;
-		files.push({ absPath, relPath, language, size: fileStat.size });
+		files.push({ absPath, relPath, language, size: fileStat.size, mtimeMs: fileStat.mtimeMs });
 	}
 
 	return {
@@ -921,6 +1172,7 @@ function extractDefinitions(file: SourceFile, text: string): Definition[] {
 			text: line.trimEnd(),
 			signatureLines: captureSignature(lines, index, file.language),
 			score: 0,
+			backend: "syntax-pattern",
 		});
 	}
 
@@ -1107,6 +1359,14 @@ function renderScanDiagnostics(diagnostics: SourceScanDiagnostics, analyzedSourc
 		notes.push(`No supported source files were analyzed. Unsupported extensions in scope: ${formatCountBreakdown(diagnostics.unsupportedExtensions)}.`);
 	}
 
+	if (diagnostics.treeSitterTagsAvailable) {
+		notes.push(
+			`Tree-sitter tags: ${diagnostics.treeSitterTagDefinitions ?? 0} definition(s), ${diagnostics.treeSitterTagReferences ?? 0} reference(s) from ${diagnostics.treeSitterTaggedFiles ?? 0} file(s).`,
+		);
+	} else {
+		notes.push("Tree-sitter tags: unavailable or not configured; using syntax-pattern fallback where possible.");
+	}
+
 	const fallbackTotal = mapTotal(diagnostics.fallbackPatternLanguages);
 	if (fallbackTotal > 0) {
 		notes.push(`Limited extraction for languages using generic fallback patterns: ${formatCountBreakdown(diagnostics.fallbackPatternLanguages, " file(s)")}.`);
@@ -1153,7 +1413,7 @@ function renderRepoMap(args: {
 	const rankedFiles = Array.from(selected.entries()).sort((a, b) => maxScore(b[1]) - maxScore(a[1]) || a[0].localeCompare(b[0]));
 	const header = [
 		`Repo map for ${args.root}`,
-		`Generated by code-intel Phase 1 syntax-pattern backend (approximate).`,
+		`Generated by code-intel structural backend (Tree-sitter tags when available, syntax fallback otherwise; approximate).`,
 		`Scanned ${args.files.length} source file(s); found ${args.rankedDefinitions.length} definition(s).`,
 		...renderScanDiagnostics(args.diagnostics, args.files.length),
 		args.query ? `Query bias: ${args.query}` : undefined,
@@ -1199,7 +1459,8 @@ function renderFileBlock(file: string, definitions: Definition[]): string {
 			const key = `${lineNumber}:${text}`;
 			if (seen.has(key)) continue;
 			seen.add(key);
-			out += `${String(lineNumber).padStart(5, " ")} │${text}\n`;
+			const backendMarker = offset === 0 && definition.backend === "tree-sitter-tags" ? "  # tree-sitter" : "";
+			out += `${String(lineNumber).padStart(5, " ")} │${text}${backendMarker}\n`;
 			lastLine = definition.line + offset;
 		}
 	}
@@ -1220,4 +1481,6 @@ export const __test = {
 	languageForPath,
 	findDefinitionEnd,
 	extractImportLines,
+	parseTreeSitterTagsOutput,
+	hydrateTreeSitterDefinitions,
 };
