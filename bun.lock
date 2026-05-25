@@ -9,6 +9,13 @@
         "lefthook": "^2.1.6",
       },
     },
+    "agent/extensions/code-intel": {
+      "name": "code-intel",
+      "dependencies": {
+        "@earendil-works/pi-coding-agent": "0.75.1",
+        "@earendil-works/pi-tui": "0.75.1",
+      },
+    },
     "agent/extensions/footer": {
       "name": "footer",
       "dependencies": {
@@ -16,6 +23,14 @@
         "@earendil-works/pi-coding-agent": "0.75.1",
         "@earendil-works/pi-tui": "0.75.1",
         "zod": "^4.4.3",
+      },
+    },
+    "agent/extensions/learning-review": {
+      "name": "learning-review",
+      "dependencies": {
+        "@earendil-works/pi-ai": "0.75.1",
+        "@earendil-works/pi-coding-agent": "0.75.1",
+        "@earendil-works/pi-tui": "0.75.1",
       },
     },
     "agent/extensions/permissions": {
@@ -32,6 +47,26 @@
       "name": "session-reminder",
       "dependencies": {
         "@earendil-works/pi-coding-agent": "0.75.1",
+      },
+    },
+    "agent/extensions/skill-preservation": {
+      "name": "skill-preservation",
+      "dependencies": {
+        "@earendil-works/pi-agent-core": "0.75.1",
+        "@earendil-works/pi-ai": "0.75.1",
+        "@earendil-works/pi-coding-agent": "0.75.1",
+        "@earendil-works/pi-tui": "0.75.1",
+        "typebox": "^1.1.24",
+      },
+    },
+    "agent/extensions/store": {
+      "name": "store",
+      "dependencies": {
+        "@earendil-works/pi-ai": "0.75.1",
+        "@earendil-works/pi-coding-agent": "0.75.1",
+        "@earendil-works/pi-tui": "0.75.1",
+        "typebox": "^1.1.24",
+        "yaml": "^2.8.2",
       },
     },
     "agent/extensions/tasks": {
@@ -335,6 +370,8 @@
 
     "chalk": ["chalk@5.6.2", "", {}, "sha512-7NzBL0rN6fMUW+f7A6Io4h40qQlG+xGmtMxfbnH/K7TAtt8JQWVQK+6g0UXKMeVJoyV5EkkNsErQ8pVD3bLHbA=="],
 
+    "code-intel": ["code-intel@workspace:agent/extensions/code-intel"],
+
     "commander": ["commander@12.1.0", "", {}, "sha512-Vw8qHK3bZM9y/P10u3Vib8o/DdkvA2OtPtZvD871QKjy74Wj1WSKFILMPRPSdUSx5RFK1arlJzEtA4PkFgnbuA=="],
 
     "data-uri-to-buffer": ["data-uri-to-buffer@4.0.1", "", {}, "sha512-0R9ikRb668HB7QDxT1vkpuUBtqc53YyAwMwGeUFKRojY/NWKvdZ+9UYtRfGmhqNbRkTSVpMbmyhXipFFv2cb/A=="],
@@ -392,6 +429,8 @@
     "jws": ["jws@4.0.1", "", { "dependencies": { "jwa": "^2.0.1", "safe-buffer": "^5.0.1" } }, "sha512-EKI/M/yqPncGUUh44xz0PxSidXFr/+r0pA70+gIYhjv+et7yxM+s29Y+VGDkovRofQem0fs7Uvf4+YmAdyRduA=="],
 
     "koffi": ["koffi@2.16.2", "", {}, "sha512-owU0MRwv6xkrVqCd+33uw6BaYppkTRXbO/rVdJNI2dvZG0gzyRhYwW25eWtc5pauwK8TGh3AbkFONSezdykfSA=="],
+
+    "learning-review": ["learning-review@workspace:agent/extensions/learning-review"],
 
     "lefthook": ["lefthook@2.1.6", "", { "optionalDependencies": { "lefthook-darwin-arm64": "2.1.6", "lefthook-darwin-x64": "2.1.6", "lefthook-freebsd-arm64": "2.1.6", "lefthook-freebsd-x64": "2.1.6", "lefthook-linux-arm64": "2.1.6", "lefthook-linux-x64": "2.1.6", "lefthook-openbsd-arm64": "2.1.6", "lefthook-openbsd-x64": "2.1.6", "lefthook-windows-arm64": "2.1.6", "lefthook-windows-x64": "2.1.6" }, "bin": { "lefthook": "bin/index.js" } }, "sha512-w9sBoR0mdN+kJc3SB85VzpiAAl451/rxdCRcZlwW71QLjkeH3EBQFgc4VMj5apePychYDHAlqEWTB8J8JK/j1Q=="],
 
@@ -460,6 +499,10 @@
     "shell-quote": ["shell-quote@1.8.3", "", {}, "sha512-ObmnIF4hXNg1BqhnHmgbDETF8dLPCggZWBjkQfhZpbszZnYur5DUljTcCHii5LC3J5E0yeO/1LIMyH+UvHQgyw=="],
 
     "signal-exit": ["signal-exit@3.0.7", "", {}, "sha512-wnD2ZE+l+SPC/uoS0vXeE9L1+0wuaMqKlfz9AMUo38JsyLSBWSFcHR1Rri62LZc12vLr1gb3jl7iwQhgwpAbGQ=="],
+
+    "skill-preservation": ["skill-preservation@workspace:agent/extensions/skill-preservation"],
+
+    "store": ["store@workspace:agent/extensions/store"],
 
     "strnum": ["strnum@2.3.0", "", {}, "sha512-ums3KNd42PGyx5xaoVTO1mjU1bH3NpY4vsrVlnv9PNGqQj8wd7rJ6nEypLrJ7z5vxK5RP0yMLo6J/Gsm62DI5Q=="],
 
