@@ -785,6 +785,54 @@ describe("task result formatting", () => {
 
 		expect(output).toBe("part one\npart two");
 	});
+
+	it("shows only edit tool activity in caller-visible display items", () => {
+		const items = __test__.getDisplayItems([
+			{
+				role: "assistant",
+				content: [
+					{ type: "toolCall", name: "read", arguments: { path: "README.md" } },
+					{ type: "toolCall", name: "bash", arguments: { command: "ls -la" } },
+					{ type: "toolCall", name: "edit", arguments: { path: "README.md" } },
+				],
+			},
+			{ role: "toolResult", toolName: "read", content: [{ type: "text", text: "read output" }] },
+			{ role: "toolResult", toolName: "bash", content: [{ type: "text", text: "bash output" }] },
+			{
+				role: "toolResult",
+				toolName: "write",
+				content: [{ type: "text", text: "wrote 900 lines" }],
+				details: { diff: "@@ -0,0 +1,900 @@\n+..." },
+			},
+			{
+				role: "toolResult",
+				toolName: "edit",
+				content: [{ type: "text", text: "applied" }],
+				details: { diff: "@@ -1 +1 @@\n-old\n+new" },
+			},
+		] as any);
+
+		expect(items.filter((item: any) => item.type === "toolCall").map((item: any) => item.name)).toEqual(["edit"]);
+		expect(items.filter((item: any) => item.type === "toolResult").map((item: any) => item.name)).toEqual(["edit"]);
+	});
+
+	it("accepts namespaced edit tool names", () => {
+		const items = __test__.getDisplayItems([
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", name: "functions.edit", arguments: { path: "a.ts" } }],
+			},
+			{
+				role: "toolResult",
+				toolName: "functions.edit",
+				content: [{ type: "text", text: "ok" }],
+				details: { diff: "@@ -1 +1 @@\n-a\n+b" },
+			},
+		] as any);
+
+		expect(items.filter((item: any) => item.type === "toolCall").map((item: any) => item.name)).toEqual(["functions.edit"]);
+		expect(items.filter((item: any) => item.type === "toolResult").map((item: any) => item.name)).toEqual(["functions.edit"]);
+	});
 });
 
 describe("/tasks command parsing", () => {

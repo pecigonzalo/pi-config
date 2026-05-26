@@ -589,6 +589,17 @@ type DisplayItem =
 	| { type: "toolCall"; name: string; args: Record<string, any> }
 	| { type: "toolResult"; name: string; text?: string; diff?: string; isError: boolean };
 
+function normalizeTaskDisplayToolName(toolName: string): string {
+	const trimmed = toolName.trim().toLowerCase();
+	if (!trimmed) return "";
+	const segments = trimmed.split(".").filter(Boolean);
+	return segments.length > 0 ? segments[segments.length - 1] : trimmed;
+}
+
+function shouldDisplayTaskTool(toolName: string): boolean {
+	return normalizeTaskDisplayToolName(toolName) === "edit";
+}
+
 function extractMessageTextContent(message: Message): string | undefined {
 	const content = (message as { content?: unknown }).content;
 	if (typeof content === "string") {
@@ -620,19 +631,26 @@ function getDisplayItems(messages: Message[]): DisplayItem[] {
 	for (const msg of messages) {
 		if (msg.role === "assistant") {
 			for (const part of msg.content) {
-				if (part.type === "text") items.push({ type: "text", text: part.text });
-				else if (part.type === "toolCall") items.push({ type: "toolCall", name: part.name, args: part.arguments });
+				if (part.type === "text") {
+					items.push({ type: "text", text: part.text });
+					continue;
+				}
+				if (part.type === "toolCall" && shouldDisplayTaskTool(part.name)) {
+					items.push({ type: "toolCall", name: part.name, args: part.arguments });
+				}
 			}
 			continue;
 		}
 		if (msg.role === "toolResult") {
 			const toolName = (msg as { toolName?: unknown }).toolName;
+			const name = typeof toolName === "string" && toolName.trim() ? toolName : "tool";
+			if (!shouldDisplayTaskTool(name)) continue;
 			const isError = (msg as { isError?: unknown }).isError === true;
 			const text = extractMessageTextContent(msg);
 			const diff = extractToolResultDiff(msg);
 			items.push({
 				type: "toolResult",
-				name: typeof toolName === "string" && toolName.trim() ? toolName : "tool",
+				name,
 				text,
 				diff,
 				isError,
@@ -4816,6 +4834,7 @@ export const __test__ = {
 	formatTaskRunList,
 	formatParallelResults,
 	formatChainResults,
+	getDisplayItems,
 	getFinalOutput,
 	buildTaskWidgetLines,
 	normalizeChildSessionSnapshot: (data: unknown) => normalizeChildSessionSnapshot(data, TASK_CHILD_SESSION_METADATA_VERSION),
