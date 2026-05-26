@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.75.1",
+  "lastChangelogVersion": "0.75.5",
   "theme": "dracula",
   "enabledModels": [
     "github-copilot/claude-opus-4.6",
@@ -14,13 +14,9 @@
     "github-copilot/claude-haiku-4.5"
   ],
   "defaultProvider": "github-copilot",
-  "defaultModel": "gpt-5.5",
+  "defaultModel": "gpt-5.3-codex",
   "defaultThinkingLevel": "high",
-  "resources": {
-    "skills": [
-      "~/.config/opencode/skills"
-    ]
-  },
+  "skills": ["~/.config/opencode/skills"],
   "compaction": {
     "enabled": true
   },
