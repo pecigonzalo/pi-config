@@ -163,6 +163,19 @@ export function getWorkspaceWritePaths(cwd: string): string[] {
 	]);
 }
 
+function getDockerBuildxWritePaths(cwd: string, overrides: SandboxSettings | undefined): string[] {
+	// Docker Buildx writes state under $DOCKER_CONFIG/buildx/activity. Without
+	// this write allowance, `docker build`/`docker buildx` can fail with EPERM.
+	const configuredDockerConfigDir = overrides?.env?.DOCKER_CONFIG ?? process.env.DOCKER_CONFIG;
+	const dockerConfigDir = configuredDockerConfigDir?.trim()
+		? resolveToken(configuredDockerConfigDir, cwd)
+		: path.join(os.homedir(), ".docker");
+	return dedupeStrings([
+		...existingPathAliases(path.join(dockerConfigDir, "buildx")),
+		...existingPathAliases(path.join(dockerConfigDir, "buildx", "activity")),
+	]);
+}
+
 function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
 	const overrides = env ?? {};
 	const mergedEnv: NodeJS.ProcessEnv = { ...DEFAULT_SANDBOX_ENV, ...process.env, ...overrides };
@@ -212,11 +225,24 @@ export function compileSandboxConfig(
 	const effectiveTmpDir = runtimeTmpDir ?? getEffectiveSandboxTmpDir(cwd, overrides);
 	const compatWritePaths = (overrides?.compatWritePaths ?? true) ? getCompatWritePaths() : [];
 	const platformCachePaths = getPlatformCacheWritePaths();
-	const defaultAllowWrite = dedupeStrings([...modeDefault.allowWrite, ...compatWritePaths, ...platformCachePaths, effectiveTmpDir]);
+	const dockerBuildxWritePaths = policy.mode === "plan" ? [] : getDockerBuildxWritePaths(cwd, overrides);
+	const defaultAllowWrite = dedupeStrings([
+		...modeDefault.allowWrite,
+		...compatWritePaths,
+		...platformCachePaths,
+		...dockerBuildxWritePaths,
+		effectiveTmpDir,
+	]);
 	const configuredAllowWrite = overrides?.allowWrite
 		? resolveSandboxPathTokens(overrides.allowWrite, cwd)
 		: defaultAllowWrite;
-	const allowWrite = dedupeStrings([...configuredAllowWrite, ...compatWritePaths, ...platformCachePaths, effectiveTmpDir]);
+	const allowWrite = dedupeStrings([
+		...configuredAllowWrite,
+		...compatWritePaths,
+		...platformCachePaths,
+		...dockerBuildxWritePaths,
+		effectiveTmpDir,
+	]);
 	const denyRead = dedupeStrings([
 		...getProtectedSandboxDenyPaths(policy.protectedResources.denyRead, PROTECTED_RESOURCE_SANDBOX_DENY_READ, cwd),
 		...resolveSandboxPathTokens(overrides?.denyRead ?? [], cwd),

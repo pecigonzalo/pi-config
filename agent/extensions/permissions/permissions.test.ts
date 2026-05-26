@@ -641,6 +641,20 @@ describe("sandbox network config", () => {
 		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/custom-pi");
 	});
 
+	it("allows Docker Buildx activity writes by default", () => {
+		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
+		expect(compiled.config.filesystem?.allowWrite).toContain(path.join(os.homedir(), ".docker", "buildx", "activity"));
+	});
+
+	it("uses sandbox DOCKER_CONFIG for Docker Buildx write allowances", () => {
+		const compiled = compileSandboxConfig(policy, "/repo", {
+			enabled: true,
+			tmpDir: "/tmp/custom-pi",
+			env: { DOCKER_CONFIG: "/tmp/custom-docker-config" },
+		});
+		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/custom-docker-config/buildx/activity");
+	});
+
 	it("includes current GOCACHE in default allowWrite", () => {
 		const originalGoCache = process.env.GOCACHE;
 		process.env.GOCACHE = "/tmp/custom-go-cache";
