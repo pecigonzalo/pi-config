@@ -1,42 +1,15 @@
 import { readFile } from "node:fs/promises";
-import { dirname, relative } from "node:path";
+import { dirname, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatSize } from "@earendil-works/pi-coding-agent";
 import { EXT_TO_LANGUAGE, LANGUAGE_SPECIFIC_PATTERN_SUPPORT } from "./constants";
 import { buildRepoAnalysis, generateRepoMapOutput, renderScanDiagnostics } from "./analysis";
 import { extractImportLines, findEnclosingDefinition, getDefinitionEnd } from "./extractors";
 import { clampInt } from "./helpers";
+import { formatLspLocations, formatRelativeLocation, getLspService, identifierAtPosition, type LspManagerService, type LspPosition } from "./lsp";
 import { findProjectRoot, loadRequestedSourceFile } from "./source-files";
 import { commandVersion, extractDefinitionsForLoadedSource } from "./tree-sitter";
 import type { Definition, RepoMapOptions, SourceFile } from "./types";
-
-const LSP_MANAGER_SERVICE_KEY = "lsp-manager:service";
-
-interface LspPosition {
-	line: number;
-	column: number;
-}
-
-interface LspLocation {
-	file: string;
-	line: number;
-	column: number;
-	endLine?: number;
-	endColumn?: number;
-}
-
-interface LspHoverInfo {
-	file: string;
-	line: number;
-	column: number;
-	contents: string;
-}
-
-interface LspManagerService {
-	definition(filePath: string, position: LspPosition): Promise<LspLocation[]>;
-	references(filePath: string, position: LspPosition): Promise<LspLocation[]>;
-	hover(filePath: string, position: LspPosition): Promise<LspHoverInfo | undefined>;
-}
 
 export async function buildStatus(pi: ExtensionAPI, ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {
 	const root = await findProjectRoot(pi, ctx.cwd, signal);
@@ -56,8 +29,8 @@ export async function buildStatus(pi: ExtensionAPI, ctx: ExtensionContext, signa
 		`- ripgrep: ${formatCommandStatus(rg)}`,
 		`- tree-sitter CLI: ${formatCommandStatus(treeSitter)}`,
 		`- universal-ctags: ${universalCtags ? "available" : ctags.available ? "not detected (ctags exists, but does not look like Universal Ctags)" : "not found"}`,
-		`- active backend: ${treeSitter.available ? "tree-sitter tags when queries/parsers are configured, with syntax-pattern fallback" : "syntax-pattern fallback"}`,
-		`- LSP manager: ${getLspService(pi) ? "available for semantic lookups" : "not available (load lsp-manager for definition/references/hover)"}`,
+		`- active backend: LSP document symbols when available; ${treeSitter.available ? "tree-sitter tags when queries/parsers are configured, with syntax-pattern fallback" : "syntax-pattern fallback"}`,
+		`- LSP manager: ${formatLspStatus(pi)}`,
 		`- supported extensions: ${Array.from(EXT_TO_LANGUAGE.keys()).sort().join(", ")}`,
 		`- dedicated syntax patterns: ${Array.from(LANGUAGE_SPECIFIC_PATTERN_SUPPORT).sort().join(", ")}`,
 		fallbackPatternLanguages.length > 0 ? `- generic fallback patterns only: ${fallbackPatternLanguages.join(", ")}` : undefined,
@@ -72,19 +45,12 @@ function formatCommandStatus(status: { available: boolean; version?: string }): 
 	return status.version?.split("\n")[0]?.trim() || "available";
 }
 
-function getLspService(pi: ExtensionAPI): LspManagerService | undefined {
-	const registry = pi.events as unknown as Record<string, unknown>;
-	const service = registry[LSP_MANAGER_SERVICE_KEY];
-	if (!service || typeof service !== "object") return undefined;
-	const candidate = service as Partial<LspManagerService>;
-	if (
-		typeof candidate.definition === "function" &&
-		typeof candidate.references === "function" &&
-		typeof candidate.hover === "function"
-	) {
-		return candidate as LspManagerService;
-	}
-	return undefined;
+function formatLspStatus(pi: ExtensionAPI): string {
+	const service = getLspService(pi);
+	if (!service) return "not available (load lsp-manager for definition/references/hover)";
+	return service.documentSymbols
+		? "available for semantic lookups and document symbols"
+		: "available for semantic lookups; document symbols unavailable";
 }
 
 export async function generateRepoMap(
@@ -179,7 +145,7 @@ interface ParsedSymbolQuery {
 	kind?: string;
 	file?: string;
 	declaration?: boolean;
-	backend?: "tree-sitter-tags" | "syntax-pattern";
+	backend?: "lsp-document-symbol" | "tree-sitter-tags" | "syntax-pattern";
 	filters: string[];
 }
 
@@ -215,10 +181,10 @@ function parseSymbolQuery(query: string): ParsedSymbolQuery {
 		rest = rest.replace(declMatch[0], " ").trim();
 	}
 
-	const backendMatch = rest.match(/(?:^|\s)backend:(tree|tree-sitter|syntax|tree-sitter-tags|syntax-pattern)/i);
+	const backendMatch = rest.match(/(?:^|\s)backend:(lsp|tree|tree-sitter|syntax|lsp-document-symbol|tree-sitter-tags|syntax-pattern)/i);
 	if (backendMatch) {
 		const raw = backendMatch[1].toLowerCase();
-		parsed.backend = raw.startsWith("tree") ? "tree-sitter-tags" : "syntax-pattern";
+		parsed.backend = raw.startsWith("lsp") ? "lsp-document-symbol" : raw.startsWith("tree") ? "tree-sitter-tags" : "syntax-pattern";
 		parsed.filters.push(`backend=${backendMatch[1]}`);
 		rest = rest.replace(backendMatch[0], " ").trim();
 	}
@@ -330,63 +296,132 @@ export async function findEnclosingSymbol(
 	].join("\n");
 }
 
-export async function findDefinitionWithLsp(pi: ExtensionAPI, ctx: ExtensionContext, params: RepoMapOptions): Promise<string> {
-	const request = getLspPositionRequest(pi, params, "definition");
+export async function findDefinitionWithLsp(pi: ExtensionAPI, ctx: ExtensionContext, params: RepoMapOptions, signal?: AbortSignal): Promise<string> {
+	const request = await getLspLookupRequest(pi, ctx, params, "definition", signal);
 	if (typeof request === "string") return request;
 	const locations = await request.service.definition(request.path, request.position);
-	return formatLspLocations(ctx.cwd, `LSP definition for ${request.path}:${request.position.line}:${request.position.column}`, locations);
+	return formatLspLocations(ctx.cwd, `LSP definition for ${formatLspLookupTarget(ctx.cwd, request)}`, locations);
 }
 
-export async function findReferencesWithLsp(pi: ExtensionAPI, ctx: ExtensionContext, params: RepoMapOptions): Promise<string> {
-	const request = getLspPositionRequest(pi, params, "references");
+export async function findReferencesWithLsp(pi: ExtensionAPI, ctx: ExtensionContext, params: RepoMapOptions, signal?: AbortSignal): Promise<string> {
+	const request = await getLspLookupRequest(pi, ctx, params, "references", signal);
 	if (typeof request === "string") return request;
 	const locations = await request.service.references(request.path, request.position);
-	return formatLspLocations(ctx.cwd, `LSP references for ${request.path}:${request.position.line}:${request.position.column}`, locations);
+	return formatLspLocations(ctx.cwd, `LSP references for ${formatLspLookupTarget(ctx.cwd, request)}`, locations);
 }
 
-export async function findHoverWithLsp(pi: ExtensionAPI, ctx: ExtensionContext, params: RepoMapOptions): Promise<string> {
-	const request = getLspPositionRequest(pi, params, "hover");
+export async function findHoverWithLsp(pi: ExtensionAPI, ctx: ExtensionContext, params: RepoMapOptions, signal?: AbortSignal): Promise<string> {
+	const request = await getLspLookupRequest(pi, ctx, params, "hover", signal);
 	if (typeof request === "string") return request;
 	const hover = await request.service.hover(request.path, request.position);
-	if (!hover) return `No LSP hover found at ${request.path}:${request.position.line}:${request.position.column}.`;
+	if (!hover) return `No LSP hover found for ${formatLspLookupTarget(ctx.cwd, request)}.`;
 	return [
-		`LSP hover for ${formatRelativeLocation(ctx.cwd, hover.file, hover.line, hover.column)}`,
+		`LSP hover for ${request.symbol ? `${request.symbol} at ` : ""}${formatRelativeLocation(ctx.cwd, hover.file, hover.line, hover.column)}`,
 		"",
 		hover.contents,
 	].join("\n");
 }
 
-function getLspPositionRequest(
+interface LspLookupRequest {
+	service: LspManagerService;
+	path: string;
+	position: LspPosition;
+	symbol?: string;
+}
+
+async function getLspLookupRequest(
 	pi: ExtensionAPI,
+	ctx: ExtensionContext,
 	params: RepoMapOptions,
 	action: "definition" | "references" | "hover",
-): { service: LspManagerService; path: string; position: LspPosition } | string {
+	signal?: AbortSignal,
+): Promise<LspLookupRequest | string> {
 	const service = getLspService(pi);
 	if (!service) return `code_intel ${action} requires lsp-manager to be loaded.`;
-	if (!params.path) return `code_intel ${action} requires path.`;
-	if (!params.line || !params.column) return `code_intel ${action} requires 1-based line and column.`;
+
+	const symbol = params.symbol?.trim();
+	if (symbol) {
+		return resolveLspSymbolRequest(pi, ctx, params, service, symbol, action, signal);
+	}
+
+	if (!params.path || !params.line || !params.column) {
+		return `code_intel ${action} requires symbol or path with 1-based line and column.`;
+	}
+
+	const path = resolve(ctx.cwd, params.path);
+	const position = { line: Math.floor(params.line), column: Math.floor(params.column) };
+	return { service, path, position, symbol: await readIdentifierAtPosition(path, position) };
+}
+
+async function resolveLspSymbolRequest(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	params: RepoMapOptions,
+	service: LspManagerService,
+	symbol: string,
+	action: "definition" | "references" | "hover",
+	signal?: AbortSignal,
+): Promise<LspLookupRequest | string> {
+	if (params.path) {
+		const loaded = await loadRequestedSourceFile(pi, ctx, params, signal);
+		if (typeof loaded === "string") return loaded;
+		if (service.supportsFile && !service.supportsFile(loaded.file.absPath)) {
+			return `code_intel ${action} cannot use LSP for unsupported file ${loaded.file.relPath}.`;
+		}
+		const definitions = await extractDefinitionsForLoadedSource(pi, loaded.root, loaded.file, loaded.text, signal);
+		const definition = chooseSymbolDefinition(definitions, symbol);
+		if (!definition) return `No matching symbol found for "${symbol}" in ${loaded.file.relPath}.`;
+		return { service, path: loaded.file.absPath, position: positionForDefinition(definition, loaded.text, symbol), symbol: definition.name };
+	}
+
+	const analysis = await buildRepoAnalysis(pi, ctx, { ...params, query: symbol }, signal);
+	const lspSupportedDefinitions = service.supportsFile
+		? analysis.rankedDefinitions.filter((definition) => service.supportsFile?.(resolve(analysis.root, definition.file)) ?? true)
+		: analysis.rankedDefinitions;
+	const definition = chooseSymbolDefinition(lspSupportedDefinitions, symbol);
+	if (!definition) return `No matching LSP-supported symbol found for "${symbol}".`;
+	const fileAnalysis = analysis.analyses.find((item) => item.file.relPath === definition.file);
+	const text = fileAnalysis?.text ?? (fileAnalysis ? await readFile(fileAnalysis.file.absPath, "utf8") : "");
 	return {
 		service,
-		path: params.path,
-		position: { line: Math.floor(params.line), column: Math.floor(params.column) },
+		path: fileAnalysis ? fileAnalysis.file.absPath : resolve(analysis.root, definition.file),
+		position: positionForDefinition(definition, text, symbol),
+		symbol: definition.name,
 	};
 }
 
-function formatRelativeLocation(cwd: string, file: string, line: number, column: number): string {
-	const displayFile = relative(cwd, file) || file;
-	return `${displayFile}:${line}:${column}`;
+function chooseSymbolDefinition(definitions: Definition[], symbol: string): Definition | undefined {
+	const lower = symbol.toLowerCase();
+	return (
+		definitions.find((definition) => definition.name.toLowerCase() === lower) ??
+		definitions.find((definition) => definition.name.toLowerCase().includes(lower))
+	);
 }
 
-function formatLspLocations(cwd: string, header: string, locations: LspLocation[]): string {
-	if (locations.length === 0) return `${header}\nNo LSP locations found.`;
-	const out = [header, `Showing ${locations.length} location(s).`, ""];
-	for (const location of locations.slice(0, 100)) {
-		const start = formatRelativeLocation(cwd, location.file, location.line, location.column);
-		const end = location.endLine && location.endColumn ? `-${location.endLine}:${location.endColumn}` : "";
-		out.push(`- ${start}${end}`);
+function positionForDefinition(definition: Definition, text: string, symbol: string): LspPosition {
+	const line = definition.line + 1;
+	const lines = text.split(/\r?\n/);
+	const column = findSymbolColumn(lines[definition.line] ?? "", definition.name || symbol) ?? definition.column + 1;
+	return { line, column };
+}
+
+function findSymbolColumn(line: string, symbol: string): number | undefined {
+	if (!symbol) return undefined;
+	const match = line.match(new RegExp(`\\b${escapeRegExp(symbol)}\\b`));
+	return match?.index == null ? undefined : match.index + 1;
+}
+
+async function readIdentifierAtPosition(path: string, position: LspPosition): Promise<string | undefined> {
+	try {
+		return identifierAtPosition(await readFile(path, "utf8"), position.line, position.column);
+	} catch {
+		return undefined;
 	}
-	if (locations.length > 100) out.push(`- ... ${locations.length - 100} more location(s) omitted.`);
-	return out.join("\n");
+}
+
+function formatLspLookupTarget(cwd: string, request: LspLookupRequest): string {
+	const location = formatRelativeLocation(cwd, request.path, request.position.line, request.position.column);
+	return request.symbol ? `${request.symbol} at ${location}` : location;
 }
 
 function chooseDefinition(
@@ -426,10 +461,11 @@ function isDeclaration(definition: Definition): boolean {
 }
 
 function formatBackendSummary(definitions: Definition[]): string {
+	const lsp = definitions.filter((definition) => definition.backend === "lsp-document-symbol").length;
 	const tree = definitions.filter((definition) => definition.backend === "tree-sitter-tags").length;
 	const syntax = definitions.filter((definition) => definition.backend === "syntax-pattern").length;
 	const declarations = definitions.filter(isDeclaration).length;
-	return `Backend summary: tree-sitter=${tree}, syntax-pattern=${syntax}, declarations=${declarations}.`;
+	return `Backend summary: lsp=${lsp}, tree-sitter=${tree}, syntax-pattern=${syntax}, declarations=${declarations}.`;
 }
 
 interface ImplementationLinkOptions {

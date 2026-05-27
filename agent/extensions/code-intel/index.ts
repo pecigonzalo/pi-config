@@ -19,6 +19,7 @@ import { __analysisTest } from "./src/analysis";
 import { CODE_INTEL_SCHEMA } from "./src/constants";
 import { extractDefinitions, extractImportLines, findDefinitionEnd, getDefinitionEnd, matchDefinition, mergeDefinitions } from "./src/extractors";
 import { buildDetails, formatAction, formatCallHint, textResult, truncateForTool } from "./src/helpers";
+import { hydrateLspDocumentSymbols, identifierAtPosition } from "./src/lsp";
 import { languageForPath } from "./src/source-files";
 import { hydrateTreeSitterDefinitions, parseTreeSitterTagsOutput } from "./src/tree-sitter";
 import type { CodeIntelParams } from "./src/types";
@@ -28,12 +29,13 @@ export default function codeIntelExtension(pi: ExtensionAPI) {
 		name: "code_intel",
 		label: "Code Intel",
 		description:
-			"Generate compact codebase orientation maps and symbol drilldowns without reading whole files into context. Results are syntax-derived and approximate.",
+			"Generate compact codebase orientation maps and symbol drilldowns without reading whole files into context. Uses LSP when available, with Tree-sitter/syntax fallback.",
 		promptSnippet: "Generate compact repo maps, file outlines, symbol search results, and symbol slices before reading many files.",
 		promptGuidelines: [
 			"Use code_intel repo_map before broad file reads when you need to understand an unfamiliar codebase or locate important APIs.",
 			"Use code_intel outline for file structure and code_intel slice for targeted symbol bodies instead of reading entire files.",
-			"Treat code_intel results as approximate syntax-derived orientation; use read on targeted files/ranges before editing.",
+			"Use code_intel definition/references/hover with symbol for LSP-backed lookup by name, or path+line+column for cursor lookup.",
+			"Treat code_intel maps as approximate orientation; use read on targeted files/ranges before editing.",
 		],
 		parameters: CODE_INTEL_SCHEMA as any,
 		renderCall(args, theme) {
@@ -85,13 +87,13 @@ export default function codeIntelExtension(pi: ExtensionAPI) {
 					output = await findEnclosingSymbol(pi, ctx, params, signal);
 					break;
 				case "definition":
-					output = await findDefinitionWithLsp(pi, ctx, params);
+					output = await findDefinitionWithLsp(pi, ctx, params, signal);
 					break;
 				case "references":
-					output = await findReferencesWithLsp(pi, ctx, params);
+					output = await findReferencesWithLsp(pi, ctx, params, signal);
 					break;
 				case "hover":
-					output = await findHoverWithLsp(pi, ctx, params);
+					output = await findHoverWithLsp(pi, ctx, params, signal);
 					break;
 				default:
 					output = `Unknown code_intel action: ${(params as { action?: string }).action}`;
@@ -139,6 +141,8 @@ export const __test = {
 	extractImportLines,
 	parseTreeSitterTagsOutput,
 	hydrateTreeSitterDefinitions,
+	hydrateLspDocumentSymbols,
+	identifierAtPosition,
 	mergeDefinitions,
 	renderTextMatchFallback,
 	findIdentifierLineMatches,

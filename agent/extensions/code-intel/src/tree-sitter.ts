@@ -4,6 +4,7 @@ import { join, relative } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { captureSignature, extractDefinitions, mergeDefinitions } from "./extractors";
 import { normalizePath } from "./helpers";
+import { getLspService, hydrateLspDocumentSymbols } from "./lsp";
 import type { Definition, SourceFile, TreeSitterFileTags, TreeSitterTag } from "./types";
 
 export async function commandVersion(
@@ -115,5 +116,9 @@ export async function extractDefinitionsForLoadedSource(
 	const syntaxDefinitions = extractDefinitions(file, text);
 	const treeSitterTags = await extractTreeSitterTags(pi, root, [file], signal);
 	const treeSitterDefinitions = hydrateTreeSitterDefinitions(file, text, treeSitterTags?.byFile.get(file.relPath)?.definitions ?? []);
-	return mergeDefinitions(treeSitterDefinitions, syntaxDefinitions);
+	const lspService = getLspService(pi);
+	const lspSymbols = lspService?.documentSymbols && (!lspService.supportsFile || lspService.supportsFile(file.absPath))
+		? await lspService.documentSymbols(file.absPath).catch(() => [])
+		: [];
+	return mergeDefinitions(hydrateLspDocumentSymbols(file, text, lspSymbols), mergeDefinitions(treeSitterDefinitions, syntaxDefinitions));
 }

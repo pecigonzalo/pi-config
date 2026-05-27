@@ -6,9 +6,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { CODE_INTEL_CACHE_VERSION, DEFAULT_MAP_TOKENS, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_FILES } from "./constants";
 import { extractReferences, extractDefinitions, mergeDefinitions } from "./extractors";
 import { clampInt, looksBinary } from "./helpers";
+import { getLspService, hydrateLspDocumentSymbols, isMappableLspDocumentSymbol, type LspDocumentSymbol } from "./lsp";
 import { findProjectRoot, listSourceFiles } from "./source-files";
 import { commandVersion, extractTreeSitterTags, hydrateTreeSitterDefinitions } from "./tree-sitter";
 import type { CachedAnalysisPayload, Definition, RepoAnalysis, RepoMapOptions, SourceFile, SourceScanDiagnostics } from "./types";
+
+const MAX_LSP_DOCUMENT_SYMBOL_FILES = 250;
 
 export async function generateRepoMapOutput(
 	pi: ExtensionAPI,
@@ -49,6 +52,16 @@ export async function buildRepoAnalysis(
 		return { ...cached, rankedDefinitions };
 	}
 
+	const lspDocumentSymbols = await extractLspDocumentSymbols(pi, files, signal);
+	if (lspDocumentSymbols) {
+		sourceDiscovery.diagnostics.lspDocumentSymbolsAvailable = true;
+		sourceDiscovery.diagnostics.lspDocumentSymbolFiles = lspDocumentSymbols.byFile.size;
+		sourceDiscovery.diagnostics.lspDocumentSymbolDefinitions = lspDocumentSymbols.definitionCount;
+		sourceDiscovery.diagnostics.lspDocumentSymbolSkippedFiles = lspDocumentSymbols.skippedFiles;
+	} else {
+		sourceDiscovery.diagnostics.lspDocumentSymbolsAvailable = false;
+	}
+
 	const treeSitterTags = await extractTreeSitterTags(pi, root, files, signal);
 	if (treeSitterTags) {
 		sourceDiscovery.diagnostics.treeSitterTagsAvailable = true;
@@ -75,10 +88,11 @@ export async function buildRepoAnalysis(
 
 		if (looksBinary(text)) continue;
 
+		const lspFileSymbols = lspDocumentSymbols?.byFile.get(file.relPath) ?? [];
 		const treeSitterFileTags = treeSitterTags?.byFile.get(file.relPath);
 		const definitions = mergeDefinitions(
-			hydrateTreeSitterDefinitions(file, text, treeSitterFileTags?.definitions ?? []),
-			extractDefinitions(file, text),
+			hydrateLspDocumentSymbols(file, text, lspFileSymbols),
+			mergeDefinitions(hydrateTreeSitterDefinitions(file, text, treeSitterFileTags?.definitions ?? []), extractDefinitions(file, text)),
 		);
 		const references = treeSitterFileTags?.references.size ? treeSitterFileTags.references : extractReferences(text);
 		analyses.push({ file, definitions, references, text });
@@ -105,9 +119,39 @@ export async function buildRepoAnalysis(
 	return analysis;
 }
 
+async function extractLspDocumentSymbols(
+	pi: ExtensionAPI,
+	files: SourceFile[],
+	signal?: AbortSignal,
+): Promise<{ byFile: Map<string, LspDocumentSymbol[]>; definitionCount: number; skippedFiles: number } | undefined> {
+	const service = getLspService(pi);
+	if (!service?.documentSymbols) return undefined;
+
+	const candidates = files.filter((file) => !service.supportsFile || service.supportsFile(file.absPath));
+	const skippedFiles = Math.max(0, candidates.length - MAX_LSP_DOCUMENT_SYMBOL_FILES);
+	const byFile = new Map<string, LspDocumentSymbol[]>();
+	let definitionCount = 0;
+
+	for (const file of candidates.slice(0, MAX_LSP_DOCUMENT_SYMBOL_FILES)) {
+		if (signal?.aborted) throw new Error("code_intel analysis cancelled");
+		try {
+			const symbols = await service.documentSymbols(file.absPath);
+			const mappableSymbols = symbols.filter(isMappableLspDocumentSymbol);
+			if (mappableSymbols.length === 0) continue;
+			byFile.set(file.relPath, mappableSymbols);
+			definitionCount += mappableSymbols.length;
+		} catch {
+			// LSP document symbols are an enhancement; tree-sitter/syntax fallback remains available.
+		}
+	}
+
+	return { byFile, definitionCount, skippedFiles };
+}
+
 async function getBackendSignature(pi: ExtensionAPI, signal?: AbortSignal): Promise<string> {
 	const treeSitter = await commandVersion(pi, "tree-sitter", ["--version"], signal);
-	return `tree-sitter:${treeSitter.available ? treeSitter.version ?? "available" : "missing"};extractor:${CODE_INTEL_CACHE_VERSION}`;
+	const lspDocumentSymbols = getLspService(pi)?.documentSymbols ? "available" : "missing";
+	return `lsp-document-symbols:${lspDocumentSymbols};tree-sitter:${treeSitter.available ? treeSitter.version ?? "available" : "missing"};extractor:${CODE_INTEL_CACHE_VERSION}`;
 }
 
 async function loadAnalysisCache(
@@ -158,6 +202,10 @@ async function loadAnalysisCache(
 			treeSitterTaggedFiles: payload.diagnostics.treeSitterTaggedFiles,
 			treeSitterTagDefinitions: payload.diagnostics.treeSitterTagDefinitions,
 			treeSitterTagReferences: payload.diagnostics.treeSitterTagReferences,
+			lspDocumentSymbolsAvailable: payload.diagnostics.lspDocumentSymbolsAvailable,
+			lspDocumentSymbolFiles: payload.diagnostics.lspDocumentSymbolFiles,
+			lspDocumentSymbolDefinitions: payload.diagnostics.lspDocumentSymbolDefinitions,
+			lspDocumentSymbolSkippedFiles: payload.diagnostics.lspDocumentSymbolSkippedFiles,
 		},
 		analyses,
 		definitionsByName,
@@ -180,6 +228,10 @@ async function saveAnalysisCache(root: string, files: SourceFile[], backendSigna
 			treeSitterTaggedFiles: analysis.diagnostics.treeSitterTaggedFiles,
 			treeSitterTagDefinitions: analysis.diagnostics.treeSitterTagDefinitions,
 			treeSitterTagReferences: analysis.diagnostics.treeSitterTagReferences,
+			lspDocumentSymbolsAvailable: analysis.diagnostics.lspDocumentSymbolsAvailable,
+			lspDocumentSymbolFiles: analysis.diagnostics.lspDocumentSymbolFiles,
+			lspDocumentSymbolDefinitions: analysis.diagnostics.lspDocumentSymbolDefinitions,
+			lspDocumentSymbolSkippedFiles: analysis.diagnostics.lspDocumentSymbolSkippedFiles,
 		},
 		analyses: analysis.analyses.map((item) => ({
 			file: item.file,
@@ -280,6 +332,15 @@ export function renderScanDiagnostics(diagnostics: SourceScanDiagnostics, analyz
 		notes.push(`No supported source files were analyzed. Unsupported extensions in scope: ${formatCountBreakdown(diagnostics.unsupportedExtensions)}.`);
 	}
 
+	if (diagnostics.lspDocumentSymbolsAvailable) {
+		const skipped = diagnostics.lspDocumentSymbolSkippedFiles ? `; skipped ${diagnostics.lspDocumentSymbolSkippedFiles} file(s) over LSP cap` : "";
+		notes.push(
+			`LSP document symbols: ${diagnostics.lspDocumentSymbolDefinitions ?? 0} definition(s) from ${diagnostics.lspDocumentSymbolFiles ?? 0} file(s)${skipped}.`,
+		);
+	} else {
+		notes.push("LSP document symbols: unavailable; using Tree-sitter/syntax fallback for structure.");
+	}
+
 	if (diagnostics.treeSitterTagsAvailable) {
 		notes.push(
 			`Tree-sitter tags: ${diagnostics.treeSitterTagDefinitions ?? 0} definition(s), ${diagnostics.treeSitterTagReferences ?? 0} reference(s) from ${diagnostics.treeSitterTaggedFiles ?? 0} file(s).`,
@@ -333,7 +394,7 @@ function renderRepoMap(args: {
 	const rankedFiles = Array.from(selected.entries()).sort((a, b) => maxScore(b[1]) - maxScore(a[1]) || a[0].localeCompare(b[0]));
 	const header = [
 		`Repo map for ${args.root}`,
-		`Generated by code-intel structural backend (Tree-sitter tags when available, syntax fallback otherwise; approximate).`,
+		`Generated by code-intel structural backend (LSP document symbols when available, then Tree-sitter tags, then syntax fallback; approximate).`,
 		`Scanned ${args.files.length} source file(s); found ${args.rankedDefinitions.length} definition(s).`,
 		...renderScanDiagnostics(args.diagnostics, args.files.length),
 		args.query ? `Query bias: ${args.query}` : undefined,
@@ -379,7 +440,7 @@ function renderFileBlock(file: string, definitions: Definition[]): string {
 			const key = `${lineNumber}:${text}`;
 			if (seen.has(key)) continue;
 			seen.add(key);
-			const backendMarker = offset === 0 && definition.backend === "tree-sitter-tags" ? "  # tree-sitter" : "";
+			const backendMarker = offset === 0 && definition.backend === "lsp-document-symbol" ? "  # lsp" : offset === 0 && definition.backend === "tree-sitter-tags" ? "  # tree-sitter" : "";
 			out += `${String(lineNumber).padStart(5, " ")} │${text}${backendMarker}\n`;
 			lastLine = definition.line + offset;
 		}

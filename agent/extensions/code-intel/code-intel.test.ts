@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { __test } from "./index";
+import type { Definition } from "./src/types";
 
 const sourceFile = {
 	absPath: "/repo/src/auth.ts",
@@ -14,6 +15,18 @@ const goSourceFile = {
 	language: "go",
 	size: 100,
 };
+
+function definition(overrides: Partial<Definition> & Pick<Definition, "name" | "kind">): Definition {
+	return {
+		file: "internal/broker/server.go",
+		line: 0,
+		column: 0,
+		text: overrides.name,
+		signatureLines: [overrides.name],
+		score: 0,
+		...overrides,
+	};
+}
 
 describe("code-intel Phase 1 extraction", () => {
 	test("extracts TypeScript declarations and methods", () => {
@@ -123,6 +136,25 @@ describe("code-intel Phase 1 extraction", () => {
 
 		expect(defs[0]?.backend).toBe("tree-sitter-tags");
 		expect(defs[0]?.signatureLines[0]).toContain("AuthService");
+	});
+
+	test("hydrates LSP document symbols into preferred definitions", () => {
+		const defs = __test.hydrateLspDocumentSymbols(
+			sourceFile,
+			`export class AuthService {\n  login() {}\n}`,
+			[{ name: "AuthService", kind: "Class", file: "src/auth.ts", line: 1, column: 14 }],
+		);
+
+		expect(defs[0]?.backend).toBe("lsp-document-symbol");
+		expect(defs[0]?.line).toBe(0);
+		expect(defs[0]?.column).toBe(13);
+		expect(defs[0]?.signatureLines[0]).toContain("AuthService");
+	});
+
+	test("finds identifier at a 1-based LSP position", () => {
+		const symbol = __test.identifierAtPosition("const root = await findProjectRoot(pi);", 1, 25);
+
+		expect(symbol).toBe("findProjectRoot");
 	});
 
 	test("reports unsupported extensions when map scope has no supported files", () => {
@@ -235,11 +267,11 @@ describe("code-intel Phase 1 extraction", () => {
 	test("matches symbol query DSL filters", () => {
 		const parsed = __test.parseSymbolQuery("kind:method file:internal/broker name:CreateTopic");
 		const match = __test.matchesSymbolQuery(
-			{ name: "CreateTopic", kind: "method", file: "internal/broker/server.go" },
+			definition({ name: "CreateTopic", kind: "method" }),
 			parsed,
 		);
 		const noMatch = __test.matchesSymbolQuery(
-			{ name: "CreateTopic", kind: "interface_method", file: "internal/broker/server.go" },
+			definition({ name: "CreateTopic", kind: "interface_method" }),
 			parsed,
 		);
 
@@ -248,9 +280,9 @@ describe("code-intel Phase 1 extraction", () => {
 	});
 
 	test("parses declaration/backend symbol query filters", () => {
-		const parsed = __test.parseSymbolQuery("decl:true backend:tree CreateTopic");
+		const parsed = __test.parseSymbolQuery("decl:true backend:lsp CreateTopic");
 		expect(parsed.declaration).toBe(true);
-		expect(parsed.backend).toBe("tree-sitter-tags");
+		expect(parsed.backend).toBe("lsp-document-symbol");
 		expect(parsed.text).toBe("createtopic");
 		expect(parsed.filters.length).toBe(2);
 	});
@@ -258,11 +290,11 @@ describe("code-intel Phase 1 extraction", () => {
 	test("matches declaration/backend query filters", () => {
 		const parsed = __test.parseSymbolQuery("decl:true backend:syntax");
 		const decl = __test.matchesSymbolQuery(
-			{ name: "CreateTopic", kind: "interface_method", file: "internal/broker/server.go", declaration: true, backend: "syntax-pattern" },
+			definition({ name: "CreateTopic", kind: "interface_method", declaration: true, backend: "syntax-pattern" }),
 			parsed,
 		);
 		const impl = __test.matchesSymbolQuery(
-			{ name: "CreateTopic", kind: "method", file: "internal/broker/handler_admin.go", declaration: false, backend: "tree-sitter-tags" },
+			definition({ name: "CreateTopic", kind: "method", file: "internal/broker/handler_admin.go", declaration: false, backend: "tree-sitter-tags" }),
 			parsed,
 		);
 		expect(decl).toBe(true);
@@ -270,16 +302,18 @@ describe("code-intel Phase 1 extraction", () => {
 	});
 
 	test("infers callable arity from go signatures", () => {
-		const declArity = __test.inferCallableArity({
+		const declArity = __test.inferCallableArity(definition({
+			name: "CreateTopic",
 			kind: "interface_method",
 			signatureLines: ["\tCreateTopic(ctx context.Context, name string, partitions int32) error"],
 			text: "",
-		});
-		const methodArity = __test.inferCallableArity({
+		}));
+		const methodArity = __test.inferCallableArity(definition({
+			name: "CreateTopic",
 			kind: "method",
 			signatureLines: ["func (c *Cluster) CreateTopic(ctx context.Context, name string, partitions int32) error {"],
 			text: "",
-		});
+		}));
 		expect(declArity).toBe(3);
 		expect(methodArity).toBe(3);
 	});
@@ -287,12 +321,22 @@ describe("code-intel Phase 1 extraction", () => {
 	test("chooses declaration reference for symbol", () => {
 		const chosen = __test.chooseReferenceDeclaration(
 			[
-				{ name: "CreateTopic", kind: "method", declaration: false },
-				{ name: "CreateTopic", kind: "interface_method", declaration: true },
+				definition({ name: "CreateTopic", kind: "method", declaration: false }),
+				definition({ name: "CreateTopic", kind: "interface_method", declaration: true }),
 			],
 			"CreateTopic",
 		);
 		expect(chosen?.kind).toBe("interface_method");
+	});
+
+	test("includes LSP backend counts in backend summaries", () => {
+		const summary = __test.formatBackendSummary([
+			{ name: "AuthService", kind: "class", file: "src/auth.ts", backend: "lsp-document-symbol" },
+			{ name: "buildAuth", kind: "function", file: "src/auth.ts", backend: "syntax-pattern" },
+		] as any);
+
+		expect(summary).toContain("lsp=1");
+		expect(summary).toContain("syntax-pattern=1");
 	});
 
 	test("formats LSP locations relative to cwd", () => {

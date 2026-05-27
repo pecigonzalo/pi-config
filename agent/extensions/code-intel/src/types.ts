@@ -34,7 +34,7 @@ export interface Definition {
 	text: string;
 	signatureLines: string[];
 	score: number;
-	backend?: "tree-sitter-tags" | "syntax-pattern";
+	backend?: "lsp-document-symbol" | "tree-sitter-tags" | "syntax-pattern";
 	declaration?: boolean;
 	container?: string;
 }
@@ -63,6 +63,10 @@ export interface SourceScanDiagnostics {
 	treeSitterTagDefinitions?: number;
 	treeSitterTagReferences?: number;
 	treeSitterTagsError?: string;
+	lspDocumentSymbolsAvailable?: boolean;
+	lspDocumentSymbolFiles?: number;
+	lspDocumentSymbolDefinitions?: number;
+	lspDocumentSymbolSkippedFiles?: number;
 }
 
 export interface SourceDiscoveryResult {
@@ -128,6 +132,10 @@ export interface CachedAnalysisPayload {
 		treeSitterTaggedFiles?: number;
 		treeSitterTagDefinitions?: number;
 		treeSitterTagReferences?: number;
+		lspDocumentSymbolsAvailable?: boolean;
+		lspDocumentSymbolFiles?: number;
+		lspDocumentSymbolDefinitions?: number;
+		lspDocumentSymbolSkippedFiles?: number;
 	};
 	analyses: CachedAnalysisFile[];
 }

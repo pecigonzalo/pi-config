@@ -10,6 +10,7 @@ import {
   DidSaveTextDocumentNotification,
   InitializedNotification,
   DefinitionRequest,
+  DocumentSymbolRequest,
   HoverRequest,
   InitializeRequest,
   PublishDiagnosticsNotification,
@@ -18,7 +19,7 @@ import {
   StreamMessageWriter,
   type MessageConnection,
 } from "vscode-languageserver-protocol/node.js";
-import type { Diagnostic, Hover, Location, LocationLink } from "vscode-languageserver-protocol";
+import type { Diagnostic, DocumentSymbol, Hover, Location, LocationLink, SymbolInformation } from "vscode-languageserver-protocol";
 
 /** Event bus key storing the current LSP manager service. */
 export const LSP_MANAGER_SERVICE_KEY = "lsp-manager:service";
@@ -63,6 +64,17 @@ export interface LspHoverInfo {
   contents: string;
 }
 
+export interface LspDocumentSymbol {
+  name: string;
+  kind: string;
+  file: string;
+  line: number;
+  column: number;
+  endLine?: number;
+  endColumn?: number;
+  container?: string;
+}
+
 export interface LspFileDiagnostics {
   file: string;
   status: LspDiagnosticStatus;
@@ -100,6 +112,7 @@ export interface LspManagerService {
   definition(filePath: string, position: LspPosition): Promise<LspLocation[]>;
   references(filePath: string, position: LspPosition): Promise<LspLocation[]>;
   hover(filePath: string, position: LspPosition): Promise<LspHoverInfo | undefined>;
+  documentSymbols(filePath: string): Promise<LspDocumentSymbol[]>;
   status(): LspStatusItem[];
   shutdown(): Promise<void>;
 }
@@ -294,6 +307,81 @@ function locationToLspLocation(uri: string, range: Location["range"]): LspLocati
   };
 }
 
+function normalizeDocumentSymbols(result: DocumentSymbol[] | SymbolInformation[] | null | undefined, fallbackFile: string): LspDocumentSymbol[] {
+  if (!result) return [];
+  const symbols: LspDocumentSymbol[] = [];
+  for (const item of result) {
+    if ("location" in item) {
+      symbols.push(symbolInformationToDocumentSymbol(item));
+    } else {
+      symbols.push(...documentSymbolToDocumentSymbols(item, fallbackFile));
+    }
+  }
+  return symbols;
+}
+
+function symbolInformationToDocumentSymbol(symbol: SymbolInformation): LspDocumentSymbol {
+  const location = locationToLspLocation(symbol.location.uri, symbol.location.range);
+  return {
+    name: symbol.name,
+    kind: symbolKindName(symbol.kind),
+    file: location.file,
+    line: location.line,
+    column: location.column,
+    endLine: location.endLine,
+    endColumn: location.endColumn,
+    container: symbol.containerName,
+  };
+}
+
+function documentSymbolToDocumentSymbols(symbol: DocumentSymbol, file: string, container?: string): LspDocumentSymbol[] {
+  const current = {
+    name: symbol.name,
+    kind: symbolKindName(symbol.kind),
+    file,
+    line: symbol.selectionRange.start.line + 1,
+    column: symbol.selectionRange.start.character + 1,
+    endLine: symbol.range.end.line + 1,
+    endColumn: symbol.range.end.character + 1,
+    container,
+  };
+  const children = symbol.children?.flatMap((child) => documentSymbolToDocumentSymbols(child, file, symbol.name)) ?? [];
+  return [current, ...children];
+}
+
+function symbolKindName(kind: number): string {
+  const names = [
+    "unknown",
+    "file",
+    "module",
+    "namespace",
+    "package",
+    "class",
+    "method",
+    "property",
+    "field",
+    "constructor",
+    "enum",
+    "interface",
+    "function",
+    "variable",
+    "constant",
+    "string",
+    "number",
+    "boolean",
+    "array",
+    "object",
+    "key",
+    "null",
+    "enum_member",
+    "struct",
+    "event",
+    "operator",
+    "type_parameter",
+  ];
+  return names[kind] ?? `symbol_${kind}`;
+}
+
 function hoverContentsToText(contents: Hover["contents"]): string {
   if (typeof contents === "string") return contents;
   if (Array.isArray(contents)) {
@@ -456,6 +544,16 @@ export class DefaultLspManagerService implements LspManagerService {
     return { file: loaded.absolutePath, line: position.line, column: position.column, contents };
   }
 
+  async documentSymbols(filePath: string): Promise<LspDocumentSymbol[]> {
+    if (this.shuttingDown) return [];
+    const loaded = await this.loadSyncedFile(filePath);
+    if (!loaded || this.shuttingDown || loaded.client.closed) return [];
+    const result = await loaded.client.connection.sendRequest(DocumentSymbolRequest.type, {
+      textDocument: { uri: loaded.uri },
+    }).catch(() => undefined);
+    return normalizeDocumentSymbols(result, loaded.absolutePath);
+  }
+
   status(): LspStatusItem[] {
     const clientsById = new Map<string, LspClientState[]>();
     for (const client of this.clients.values()) {
@@ -613,6 +711,13 @@ export class DefaultLspManagerService implements LspManagerService {
             textDocument: {
               synchronization: { didOpen: true, didChange: true, didSave: true, didClose: true },
               publishDiagnostics: { versionSupport: true },
+              definition: {},
+              references: {},
+              hover: { contentFormat: ["markdown", "plaintext"] },
+              documentSymbol: {
+                hierarchicalDocumentSymbolSupport: true,
+                symbolKind: { valueSet: Array.from({ length: 26 }, (_value, index) => index + 1) },
+              },
             },
           },
         }),

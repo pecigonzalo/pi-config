@@ -1,6 +1,6 @@
 import { formatSize } from "@earendil-works/pi-coding-agent";
 
-export const CODE_INTEL_CACHE_VERSION = 3;
+export const CODE_INTEL_CACHE_VERSION = 5;
 export const DEFAULT_MAP_TOKENS = 1600;
 export const DEFAULT_MAX_FILES = 2500;
 export const DEFAULT_MAX_FILE_BYTES = 512 * 1024;
@@ -30,7 +30,7 @@ export const CODE_INTEL_SCHEMA = {
 		exclude: { type: "array", items: { type: "string" }, description: "Optional substrings paths must not include." },
 		query: { type: "string", description: "Optional identifier/file hint for repo_map or symbols." },
 		path: { type: "string", description: "File path for outline, slice, enclosing_symbol, definition, references, or hover." },
-		symbol: { type: "string", description: "Symbol name for slice." },
+		symbol: { type: "string", description: "Symbol name for slice, definition, references, or hover." },
 		line: { type: "number", description: "1-based line number for enclosing_symbol or LSP-backed position lookups." },
 		column: { type: "number", description: "1-based column number for LSP-backed position lookups." },
 		limit: { type: "number", description: "Maximum symbol results for symbols action. Default 50." },
