@@ -285,9 +285,86 @@ describe("tasks extension UI chrome", () => {
 	});
 });
 
+describe("tasks extension compact schema", () => {
+	it("publishes mode + steps parameters instead of duplicated mode arrays", () => {
+		const tool = createTaskTool();
+
+		expect(tool.parameters.properties.mode).toBeTruthy();
+		expect(tool.parameters.properties.steps).toBeTruthy();
+		expect(tool.parameters.properties.task).toBeUndefined();
+		expect(tool.parameters.properties.tasks).toBeUndefined();
+		expect(tool.parameters.properties.chain).toBeUndefined();
+	});
+
+	it("normalizes legacy task shapes before validation", () => {
+		const tool = createTaskTool();
+
+		expect(tool.prepareArguments({ agent: "reviewer", task: "Review", cwd: "/tmp" })).toMatchObject({
+			mode: "single",
+			steps: [{ agent: "reviewer", task: "Review", cwd: "/tmp" }],
+		});
+		expect(tool.prepareArguments({ tasks: [{ agent: "a", task: "A" }] })).toMatchObject({
+			mode: "parallel",
+			steps: [{ agent: "a", task: "A" }],
+		});
+		expect(tool.prepareArguments({ chain: [{ agent: "a", task: "Use {previous}" }] })).toMatchObject({
+			mode: "chain",
+			steps: [{ agent: "a", task: "Use {previous}" }],
+		});
+	});
+
+	it("rejects invalid compact modes", async () => {
+		const tool = createTaskTool();
+
+		const result = await tool.execute(
+			"tc-invalid-mode",
+			{ mode: "fanout", steps: [{ task: "Work", prompt: "Worker" }] },
+			undefined,
+			undefined,
+			{
+				cwd: process.cwd(),
+				hasUI: false,
+				sessionManager: {
+					getSessionFile: () => undefined,
+					getBranch: () => [],
+					appendCustomEntry: () => "entry-id",
+				},
+			},
+		);
+
+		expect(result.content[0].text).toContain('optional `mode` ("single", "parallel", or "chain")');
+	});
+
+	it("requires an explicit mode for multiple compact steps", async () => {
+		const tool = createTaskTool();
+
+		const result = await tool.execute(
+			"tc-compact",
+			{ steps: [{ task: "First", prompt: "Worker" }, { task: "Second", prompt: "Worker" }] },
+			undefined,
+			undefined,
+			{
+				cwd: process.cwd(),
+				hasUI: false,
+				sessionManager: {
+					getSessionFile: () => undefined,
+					getBranch: () => [],
+					appendCustomEntry: () => "entry-id",
+				},
+			},
+		);
+
+		expect(result.content[0].text).toContain('Set `mode` to "parallel" or "chain"');
+	});
+});
+
 describe("tasks extension persisted-session guardrails", () => {
 	beforeEach(() => {
 		mockResources = undefined;
+	});
+
+	it("rejects runtime persist override in compact steps", () => {
+		expect(__test__.hasRuntimePersistOverride({ steps: [{ task: "Do work", persist: false }] })).toBe(true);
 	});
 
 	it("rejects runtime persist override in task execution", async () => {

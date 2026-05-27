@@ -46,13 +46,26 @@ Resolution uses the same model across agent/profile/tasks defaults:
 - `context.skills`
 - `persist`
 
-## 3) Runtime `task()` overrides
+## 3) Runtime `task()` API
 
-At runtime, `task()` supports a named `effort` preset plus **context mode shorthand**:
+Runtime calls use a compact `mode + steps` shape:
 
-- `effort: "balanced" | "smart" | ...`
+```json
+{
+  "mode": "single | parallel | chain",
+  "steps": [
+    {
+      "task": "Work request; chain steps may use {previous}",
+      "agent": "optional-agent",
+      "profile": "optional-profile",
+      "effort": "balanced",
+      "context": "fresh | fork"
+    }
+  ]
+}
+```
 
-- `context: "fresh" | "fork"`
+`mode` defaults to `single` for one step. Set `mode` explicitly for multiple steps.
 
 Each effort resolves to a concrete model and may also set `thinkingLevel`.
 

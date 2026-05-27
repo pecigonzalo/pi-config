@@ -4,10 +4,10 @@
  * Spawns a separate `pi` process for each delegated task,
  * with fresh/fork child-session context and optional persisted sessions.
  *
- * Supports three modes:
- *   - Single: { agent: "name", task: "..." }
- *   - Parallel: { tasks: [{ agent: "name", task: "..." }, ...] }
- *   - Chain: { chain: [{ agent: "name", task: "... {previous} ..." }, ...] }
+ * Supports a compact mode + steps API:
+ *   - Single: { steps: [{ agent: "name", task: "..." }] }
+ *   - Parallel: { mode: "parallel", steps: [{ agent: "name", task: "..." }, ...] }
+ *   - Chain: { mode: "chain", steps: [{ agent: "name", task: "... {previous} ..." }, ...] }
  *
  * Uses JSON mode to capture structured output from delegated agents.
  */
@@ -456,6 +456,17 @@ interface TaskStepConfig {
 	skills?: string[];
 	prompt?: string;
 	context?: ContextMode;
+}
+
+interface TaskToolParams {
+	mode?: TaskExecutionMode;
+	steps?: TaskStepConfig[];
+	agentScope?: AgentScope;
+	confirmProjectAgents?: boolean;
+}
+
+interface PreparedTaskToolParams extends TaskToolParams {
+	steps: TaskStepConfig[];
 }
 
 interface TaskInlineNotice {
@@ -1481,11 +1492,60 @@ interface PreparedTaskRun {
 	sessionRunRoot?: string;
 }
 
+function isTaskExecutionMode(value: unknown): value is TaskExecutionMode {
+	return value === "single" || value === "parallel" || value === "chain";
+}
+
+type TaskStepStringKey = "agent" | "profile" | "effort" | "cwd" | "model" | "prompt";
+
+function copyLegacyStringField(record: Record<string, unknown>, step: TaskStepConfig, key: TaskStepStringKey): void {
+	const value = record[key];
+	if (typeof value === "string") step[key] = value;
+}
+
+function buildLegacySingleStep(record: Record<string, unknown>): TaskStepConfig | undefined {
+	if (typeof record.task !== "string") return undefined;
+	const step: TaskStepConfig = { task: record.task };
+	for (const key of ["agent", "profile", "effort", "cwd", "model", "prompt"] as const) {
+		copyLegacyStringField(record, step, key);
+	}
+	if (Array.isArray(record.skills) && record.skills.every((value) => typeof value === "string")) {
+		step.skills = record.skills;
+	}
+	if (isTaskExecutionMode(record.context)) step.context = record.context;
+	return step;
+}
+
+function normalizeTaskToolParams(params: unknown): PreparedTaskToolParams {
+	if (!params || typeof params !== "object") return { steps: [] };
+	const record = params as Record<string, unknown>;
+	if (Array.isArray(record.steps)) {
+		return {
+			...record,
+			mode: record.mode as TaskExecutionMode | undefined,
+			steps: record.steps as TaskStepConfig[],
+		};
+	}
+	if (Array.isArray(record.chain)) {
+		return { ...record, mode: "chain", steps: record.chain as TaskStepConfig[] };
+	}
+	if (Array.isArray(record.tasks)) {
+		return { ...record, mode: "parallel", steps: record.tasks as TaskStepConfig[] };
+	}
+	const legacyStep = buildLegacySingleStep(record);
+	if (legacyStep) return { ...record, mode: "single", steps: [legacyStep] };
+	return { ...record, mode: record.mode as TaskExecutionMode | undefined, steps: [] };
+}
+
+function prepareTaskToolArguments(args: unknown): PreparedTaskToolParams {
+	return normalizeTaskToolParams(args);
+}
+
 function hasRuntimePersistOverride(params: unknown): boolean {
 	if (!params || typeof params !== "object") return false;
 	const record = params as Record<string, unknown>;
 	if (Object.prototype.hasOwnProperty.call(record, "persist")) return true;
-	const arrays = [record.tasks, record.chain];
+	const arrays = [record.steps, record.tasks, record.chain];
 	for (const value of arrays) {
 		if (!Array.isArray(value)) continue;
 		for (const item of value) {
@@ -3792,54 +3852,36 @@ async function tryOpenTaskSession(
 }
 
 const ContextModeSchema = StringEnum(["fresh", "fork"] as const, {
-	description: 'Runtime context mode shorthand. "fresh" starts a fresh worker context, "fork" creates a persisted child session forked from the parent snapshot.',
+	description: "Child context mode.",
 });
 
-const TaskItem = Type.Object({
-	agent: Type.Optional(Type.String({ description: "Name of the role agent to invoke" })),
-	profile: Type.Optional(Type.String({ description: "Capability profile to apply" })),
-	effort: Type.Optional(Type.String({ description: "Named effort override for this task step" })),
-	task: Type.String({ description: "Task to delegate to the agent" }),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-	model: Type.Optional(Type.String({ description: "Exact model override for this task step" })),
-	skills: Type.Optional(Type.Array(Type.String(), { description: "Explicit skill names to load for this task step" })),
-	prompt: Type.Optional(Type.String({ description: "Additional system prompt appended after the agent/profile prompts" })),
-	context: Type.Optional(ContextModeSchema),
+const TaskModeSchema = StringEnum(["single", "parallel", "chain"] as const, {
+	description: "Execution mode. Default: single.",
+	default: "single",
 });
 
-const ChainItem = Type.Object({
-	agent: Type.Optional(Type.String({ description: "Name of the role agent to invoke" })),
-	profile: Type.Optional(Type.String({ description: "Capability profile to apply" })),
-	effort: Type.Optional(Type.String({ description: "Named effort override for this task step" })),
-	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-	model: Type.Optional(Type.String({ description: "Exact model override for this task step" })),
-	skills: Type.Optional(Type.Array(Type.String(), { description: "Explicit skill names to load for this task step" })),
-	prompt: Type.Optional(Type.String({ description: "Additional system prompt appended after the agent/profile prompts" })),
+const TaskStep = Type.Object({
+	task: Type.String({ description: "Work request; chain steps may use {previous}." }),
+	agent: Type.Optional(Type.String({ description: "Agent name." })),
+	profile: Type.Optional(Type.String({ description: "Profile name." })),
+	effort: Type.Optional(Type.String({ description: "Effort preset." })),
+	cwd: Type.Optional(Type.String({ description: "Working dir." })),
+	model: Type.Optional(Type.String({ description: "Model override." })),
+	skills: Type.Optional(Type.Array(Type.String(), { description: "Skill names." })),
+	prompt: Type.Optional(Type.String({ description: "Extra system prompt." })),
 	context: Type.Optional(ContextModeSchema),
 });
 
 const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
-	description: 'Which agent directories to use. Default: "user". Use "both" to include project-local agents.',
+	description: "Agent scope.",
 	default: "user",
 });
 
 const SubagentParams = Type.Object({
-	agent: Type.Optional(Type.String({ description: "Name of the role agent to invoke (for single mode)" })),
-	profile: Type.Optional(Type.String({ description: "Capability profile to apply (for single mode)" })),
-	effort: Type.Optional(Type.String({ description: "Named effort override for single mode" })),
-	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
-	model: Type.Optional(Type.String({ description: "Exact model override for single mode" })),
-	skills: Type.Optional(Type.Array(Type.String(), { description: "Explicit skill names to load for single mode" })),
-	prompt: Type.Optional(Type.String({ description: "Additional system prompt appended after the profile/agent prompts for single mode" })),
-	context: Type.Optional(ContextModeSchema),
-	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of task steps for parallel execution" })),
-	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of task steps for sequential execution" })),
+	mode: Type.Optional(TaskModeSchema),
+	steps: Type.Array(TaskStep, { description: "Task step(s). Single mode uses one step." }),
 	agentScope: Type.Optional(AgentScopeSchema),
-	confirmProjectAgents: Type.Optional(
-		Type.Boolean({ description: "Prompt before running project-local role agents. Default: true.", default: true }),
-	),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
+	confirmProjectAgents: Type.Optional(Type.Boolean({ description: "Confirm project agents.", default: true })),
 });
 
 export default function (pi: ExtensionAPI) {
@@ -4191,33 +4233,25 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "task",
 		label: "Task",
-		description: [
-			"Delegate work to specialized agents with configurable child-session context.",
-			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
-			'Runtime context override supports only mode shorthand (`context: "fresh" | "fork"`).',
-			"Session persistence is config-driven (`persist`) and cannot be overridden at runtime.",
-			'Default agent scope is "user" (from ~/.pi/agent/agents).',
-			'To enable project-local agents in .pi/agents, set agentScope: "both" (or "project").',
-		].join(" "),
-		promptSnippet: "Delegate substantial or parallelizable work to specialized agents.",
+		description: "Delegate to agents. Use mode=parallel for independent steps, chain for {previous}; persist is config-only.",
+		promptSnippet: "Delegate substantial focused work to specialized agents.",
 		promptGuidelines: [
-			"Use `task` when work can be delegated to a focused agent, especially for multi-file changes, independent investigations, or parallelizable subtasks.",
-			"Use single mode for one focused delegation, `tasks` for independent work that can run in parallel, and `chain` when later steps depend on earlier output via `{previous}`.",
-			"Choose the most specific agent that fits the job, and set `agentScope` to `both` or `project` only when you need project-local agents.",
-			"Skip `task` for trivial edits or when direct tool use is simpler than delegation.",
+			"Use `task` for substantial focused delegation; skip it for trivial work.",
+			"Use `mode: \"parallel\"` for independent steps and `mode: \"chain\"` only when later steps need `{previous}`.",
 		],
 		parameters: SubagentParams,
+		prepareArguments: prepareTaskToolArguments,
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			const agentScope: AgentScope = params.agentScope ?? "user";
+			const normalizedParams = normalizeTaskToolParams(params as unknown);
+			const agentScope: AgentScope = normalizedParams.agentScope ?? "user";
 			const discovery = discoverResources(ctx.cwd, agentScope);
-			const confirmProjectAgents = params.confirmProjectAgents ?? true;
+			const confirmProjectAgents = normalizedParams.confirmProjectAgents ?? true;
 			const callableAgents = getTaskCallableAgents(discovery);
-
-			const hasChain = (params.chain?.length ?? 0) > 0;
-			const hasTasks = (params.tasks?.length ?? 0) > 0;
-			const hasSingle = Boolean(params.task && (params.agent || params.profile || params.prompt || params.skills?.length));
-			const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle);
+			const stepsToRun = normalizedParams.steps ?? [];
+			const requestedMode = normalizedParams.mode;
+			const mode = requestedMode ?? (stepsToRun.length === 1 ? "single" : undefined);
+			const detailMode: TaskExecutionMode = isTaskExecutionMode(mode) ? mode : "single";
 
 			let sessionRunId: string | undefined;
 			let sessionRunRoot: string | undefined;
@@ -4246,50 +4280,40 @@ export default function (pi: ExtensionAPI) {
 			// Recursion depth guard
 			const depthCheck = checkSubagentDepth();
 			if (depthCheck.blocked) {
-				const mode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
 				throwTaskError(
 					`Task depth limit reached (depth ${depthCheck.depth}, max ${depthCheck.maxDepth}). Nested task delegation is blocked to prevent runaway recursion.`,
-					makeDetails(mode)([]),
+					makeDetails(detailMode)([]),
 				);
 			}
 
-			if (modeCount !== 1) {
+			const invalidParameters = (message: string) => {
 				const available = callableAgents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
 				return {
-					content: [
-						{
-							type: "text",
-							text: `Invalid parameters. Provide exactly one mode.\nAvailable task agents: ${available}`,
-						},
-					],
-					details: makeDetails("single")([]),
+					content: [{ type: "text" as const, text: `${message}\nAvailable task agents: ${available}` }],
+					details: makeDetails(detailMode)([]),
 				};
+			};
+
+			if (stepsToRun.length === 0) {
+				return invalidParameters("Invalid parameters. Provide at least one task step in `steps`.");
+			}
+			if (!requestedMode && stepsToRun.length > 1) {
+				return invalidParameters('Invalid parameters. Set `mode` to "parallel" or "chain" for multiple steps.');
+			}
+			if (!mode || !isTaskExecutionMode(mode)) {
+				return invalidParameters('Invalid parameters. Provide `steps` and optional `mode` ("single", "parallel", or "chain").');
+			}
+			if (mode === "single" && stepsToRun.length !== 1) {
+				return invalidParameters("Invalid parameters. Single mode requires exactly one step.");
 			}
 
-			const mode: TaskExecutionMode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
 			const taskOrigin = resolveTaskOriginForBranch(
 				ctx.sessionManager.getBranch(),
 				createTaskPreview,
 				ctx.sessionManager.getLeafId?.(),
 			);
-			const stepsToRun: TaskStepConfig[] = [];
-			if (params.chain) stepsToRun.push(...params.chain);
-			if (params.tasks) stepsToRun.push(...params.tasks);
-			if (params.task && (params.agent || params.profile || params.prompt || params.skills?.length)) {
-				stepsToRun.push({
-					agent: params.agent,
-					profile: params.profile,
-					effort: params.effort,
-					task: params.task,
-					cwd: params.cwd,
-					model: params.model,
-					skills: params.skills,
-					prompt: params.prompt,
-					context: params.context,
-				});
-			}
 
-			if (hasRuntimePersistOverride(params as unknown)) {
+			if (hasRuntimePersistOverride(normalizedParams)) {
 				throwTaskError("Invalid parameters. Runtime persist overrides are not supported.", makeDetails(mode)([]));
 			}
 
@@ -4314,9 +4338,7 @@ export default function (pi: ExtensionAPI) {
 
 			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
 				const requestedAgentNames = new Set<string>();
-				if (params.chain) for (const step of params.chain) if (step.agent) requestedAgentNames.add(step.agent);
-				if (params.tasks) for (const t of params.tasks) if (t.agent) requestedAgentNames.add(t.agent);
-				if (params.agent) requestedAgentNames.add(params.agent);
+				for (const step of stepsToRun) if (step.agent) requestedAgentNames.add(step.agent);
 
 				const projectAgentsRequested = Array.from(requestedAgentNames)
 					.map((name) => discovery.agents.find((a) => a.name === name))
@@ -4535,23 +4557,26 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		renderCall(args, theme, _context) {
-			if (args.chain && args.chain.length > 0) {
-				const tasks = args.chain.map((step) => step.task.replace(/\{previous\}/g, "").trim());
+			const normalizedArgs = normalizeTaskToolParams(args as unknown);
+			const steps = normalizedArgs.steps ?? [];
+			const mode = normalizedArgs.mode ?? (steps.length > 1 ? "parallel" : "single");
+			if (mode === "chain" && steps.length > 0) {
+				const tasks = steps.map((step) => step.task.replace(/\{previous\}/g, "").trim());
 				const text =
-					formatTaskCallHeading("chain", theme, args.chain.length) +
+					formatTaskCallHeading("chain", theme, steps.length) +
 					formatTaskSnippetLines(tasks, theme.fg.bind(theme), { numbered: true });
 				return new Text(text, 0, 0);
 			}
-			if (args.tasks && args.tasks.length > 0) {
+			if (mode === "parallel" && steps.length > 0) {
 				const text =
-					formatTaskCallHeading("parallel", theme, args.tasks.length) +
+					formatTaskCallHeading("parallel", theme, steps.length) +
 					formatTaskSnippetLines(
-						args.tasks.map((task) => task.task),
+						steps.map((step) => step.task),
 						theme.fg.bind(theme),
 					);
 				return new Text(text, 0, 0);
 			}
-			const task = args.task ?? "...";
+			const task = steps[0]?.task ?? "...";
 			const text =
 				formatTaskCallHeading("simple", theme) +
 				formatTaskSnippetLines([task], theme.fg.bind(theme), { maxItems: 1, maxLength: 80 });
@@ -4831,6 +4856,8 @@ export const __test__ = {
 	addTaskInlineNotice,
 	buildTaskInlineNoticeLines,
 	hasRuntimePersistOverride,
+	normalizeTaskToolParams,
+	prepareTaskToolArguments,
 	formatTaskRunList,
 	formatParallelResults,
 	formatChainResults,
