@@ -116,9 +116,13 @@ describe("code-hints formatting", () => {
 
 describe("code-hints commands", () => {
   it("formats runtime status", () => {
-    const status = __test__.formatStatus({ enabled: true, includeTimeouts: false }, { lspAvailable: true, touchedFiles: 2 });
+    const status = __test__.formatStatus(
+      { enabled: true, includeTimeouts: false, mode: "nudge" },
+      { lspAvailable: true, touchedFiles: 2 },
+    );
 
     expect(status).toContain("enabled: yes");
+    expect(status).toContain("mode: nudge");
     expect(status).toContain("LSP service: connected");
     expect(status).toContain("timeout details: hidden");
     expect(status).toContain("touched files in current loop: 2");
@@ -149,6 +153,62 @@ describe("code-hints commands", () => {
     expect(options.includeTimeouts).toBe(true);
     __test__.applyCommand("debug off", options, () => undefined, status);
     expect(options.includeTimeouts).toBe(false);
+  });
+
+  it("sets remediation mode with mode command and shorthand", () => {
+    const options = __test__.defaultOptions();
+    const status = () => __test__.formatStatus(options, { lspAvailable: false, touchedFiles: 0 });
+
+    const report = __test__.applyCommand("mode report", options, () => undefined, status);
+    expect(report.changed).toBe(true);
+    expect(options.mode).toBe("report");
+    expect(report.status).toContain("mode: report");
+
+    const auto = __test__.applyCommand("auto", options, () => undefined, status);
+    expect(auto.changed).toBe(true);
+    expect(options.mode).toBe("auto");
+  });
+});
+
+describe("code-hints remediation prompts", () => {
+  it("formats next-turn nudges and focused fix prompts", () => {
+    const report = __test__.formatReport("/repo", [
+      {
+        file: "/repo/src/index.ts",
+        status: "ok",
+        diagnostics: [
+          {
+            file: "/repo/src/index.ts",
+            line: 10,
+            column: 5,
+            severity: "error",
+            message: "Cannot find name 'foo'.",
+          },
+        ],
+      },
+    ]);
+
+    expect(report).toBeDefined();
+    expect(__test__.formatNudgePrompt(report!)).toContain("Before continuing, address these if they are relevant");
+    expect(__test__.formatFixPrompt(report!)).toContain("Run a focused follow-up fix");
+  });
+
+  it("keeps only actionable code-hints messages in model context", () => {
+    expect(
+      __test__.shouldKeepInModelContext({
+        role: "custom",
+        customType: "code-hints",
+        details: { audience: "report" },
+      }),
+    ).toBe(false);
+    expect(
+      __test__.shouldKeepInModelContext({
+        role: "custom",
+        customType: "code-hints",
+        details: { audience: "nudge" },
+      }),
+    ).toBe(true);
+    expect(__test__.shouldKeepInModelContext({ role: "user" })).toBe(true);
   });
 });
 

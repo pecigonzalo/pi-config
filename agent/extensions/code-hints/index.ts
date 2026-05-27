@@ -1,5 +1,5 @@
 import { relative } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isEditToolResult, isWriteToolResult } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import {
@@ -14,15 +14,21 @@ const CODE_HINTS_MESSAGE_TYPE = "code-hints";
 const DEFAULT_TIMEOUT_MS = 3_000;
 const MAX_HINTS = 20;
 
+type CodeHintsMode = "report" | "nudge" | "ask" | "auto";
+type CodeHintsAudience = "report" | "nudge" | "auto-fix" | "command";
+
 interface CodeHintsDetails {
   files: string[];
   hintCount: number;
   timedOut: string[];
+  mode?: CodeHintsMode;
+  audience?: CodeHintsAudience;
 }
 
 interface CodeHintsOptions {
   enabled: boolean;
   includeTimeouts: boolean;
+  mode: CodeHintsMode;
 }
 
 type DiagnosticFingerprint = string;
@@ -55,18 +61,37 @@ function defaultOptions(): CodeHintsOptions {
   return {
     enabled: true,
     includeTimeouts: false,
+    mode: "nudge",
   };
+}
+
+function isCodeHintsMode(value: string): value is CodeHintsMode {
+  return value === "report" || value === "nudge" || value === "ask" || value === "auto";
+}
+
+function modeDescription(mode: CodeHintsMode): string {
+  switch (mode) {
+    case "report":
+      return "show diagnostics only";
+    case "nudge":
+      return "show diagnostics and queue a next-turn reminder";
+    case "ask":
+      return "ask before running a focused follow-up fix";
+    case "auto":
+      return "automatically run one focused follow-up fix";
+  }
 }
 
 function formatStatus(options: CodeHintsOptions, state: { lspAvailable: boolean; touchedFiles: number }): string {
   return [
     "Code hints:",
     `- enabled: ${options.enabled ? "yes" : "no"}`,
+    `- mode: ${options.mode} (${modeDescription(options.mode)})`,
     `- LSP service: ${state.lspAvailable ? "connected" : "missing"}`,
     `- timeout details: ${options.includeTimeouts ? "shown when errors are reported" : "hidden"}`,
     `- touched files in current loop: ${state.touchedFiles}`,
     "",
-    "Commands: /code-hints on, /code-hints off, /code-hints debug on, /code-hints debug off, /code-hints reset",
+    "Commands: /code-hints on, /code-hints off, /code-hints mode report|nudge|ask|auto, /code-hints debug on|off, /code-hints reset",
   ].join("\n");
 }
 
@@ -84,6 +109,18 @@ function applyCommand(args: string, options: CodeHintsOptions, reset: () => void
   if (command === "off" || command === "disable") {
     options.enabled = false;
     reset();
+    return { status: status(), changed: true };
+  }
+  if (command === "mode") {
+    const value = tokens[1];
+    if (value && isCodeHintsMode(value)) {
+      options.mode = value;
+      return { status: status(), changed: true };
+    }
+    return { status: `${status()}\n\nUsage: /code-hints mode report|nudge|ask|auto`, changed: false };
+  }
+  if (isCodeHintsMode(command)) {
+    options.mode = command;
     return { status: status(), changed: true };
   }
   if (command === "debug" || command === "timeouts") {
@@ -144,12 +181,17 @@ function filterNewErrors(results: LspFileDiagnostics[], baseline: Map<string, Se
   });
 }
 
+interface CodeHintsReport {
+  content: string;
+  details: CodeHintsDetails;
+}
+
 function formatReport(
   cwd: string,
   results: LspFileDiagnostics[],
   baseline: Map<string, Set<DiagnosticFingerprint>> = new Map(),
   options: { includeTimeouts?: boolean; requireBaseline?: boolean } = {},
-): { content: string; details: CodeHintsDetails } | undefined {
+): CodeHintsReport | undefined {
   const hints = baseline.size > 0 || options.requireBaseline
     ? filterNewErrors(results, baseline)
     : results.flatMap((result) => result.diagnostics.filter((item) => item.severity === "error"));
@@ -185,10 +227,39 @@ function formatReport(
   };
 }
 
+function formatNudgePrompt(report: CodeHintsReport): string {
+  return [
+    `Code hints: the previous edit loop introduced ${report.details.hintCount} new LSP error(s).`,
+    "Before continuing, address these if they are relevant to the user's task.",
+    "",
+    report.content,
+  ].join("\n");
+}
+
+function formatFixPrompt(report: CodeHintsReport): string {
+  return [
+    `Code hints found ${report.details.hintCount} new LSP error(s) after the previous edit loop.`,
+    "Run a focused follow-up fix for only these diagnostics.",
+    "Avoid unrelated changes unless they are necessary to resolve the listed errors.",
+    "After editing, verify the narrowest relevant checks.",
+    "",
+    report.content,
+  ].join("\n");
+}
+
+function shouldKeepInModelContext(message: unknown): boolean {
+  if (!message || typeof message !== "object") return true;
+  const record = message as { role?: unknown; customType?: unknown; details?: unknown };
+  if (record.role !== "custom" || record.customType !== CODE_HINTS_MESSAGE_TYPE) return true;
+  const details = record.details && typeof record.details === "object" ? record.details as { audience?: unknown } : undefined;
+  return details?.audience === "nudge" || details?.audience === "auto-fix";
+}
+
 export default function codeHintsExtension(pi: ExtensionAPI) {
   let lspService: LspManagerService | undefined;
   let generation = 0;
   let active = true;
+  let remediationFollowUpUsed = false;
   const options = defaultOptions();
   const touchedFiles = new Set<string>();
   const baselineByFile = new Map<string, Set<DiagnosticFingerprint>>();
@@ -211,6 +282,63 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
   const currentStatus = () => formatStatus(options, {
     lspAvailable: !!(lspService ?? getLspService(pi)),
     touchedFiles: touchedFiles.size,
+  });
+
+  const sendVisibleReport = (report: CodeHintsReport, mode: CodeHintsMode) => {
+    pi.sendMessage({
+      customType: CODE_HINTS_MESSAGE_TYPE,
+      content: report.content,
+      display: true,
+      details: { ...report.details, mode, audience: "report" } satisfies CodeHintsDetails,
+    });
+  };
+
+  const sendNudge = (report: CodeHintsReport, mode: CodeHintsMode) => {
+    pi.sendMessage({
+      customType: CODE_HINTS_MESSAGE_TYPE,
+      content: formatNudgePrompt(report),
+      display: false,
+      details: { ...report.details, mode, audience: "nudge" } satisfies CodeHintsDetails,
+    }, { deliverAs: "nextTurn" });
+  };
+
+  const triggerFocusedFix = (report: CodeHintsReport, mode: CodeHintsMode) => {
+    if (remediationFollowUpUsed) return;
+    remediationFollowUpUsed = true;
+    pi.sendMessage({
+      customType: CODE_HINTS_MESSAGE_TYPE,
+      content: formatFixPrompt(report),
+      display: false,
+      details: { ...report.details, mode, audience: "auto-fix" } satisfies CodeHintsDetails,
+    }, { deliverAs: "followUp", triggerTurn: true });
+  };
+
+  const handleReportMode = async (report: CodeHintsReport, mode: CodeHintsMode, ctx: ExtensionContext, currentGeneration: number) => {
+    sendVisibleReport(report, mode);
+    if (mode === "nudge") {
+      sendNudge(report, mode);
+      return;
+    }
+    if (mode === "auto") {
+      triggerFocusedFix(report, mode);
+      return;
+    }
+    if (mode !== "ask" || remediationFollowUpUsed || !ctx.hasUI) return;
+
+    const confirmed = await ctx.ui.confirm(
+      "Code hints",
+      `Found ${report.details.hintCount} new LSP error(s). Run a focused follow-up fix?`,
+    );
+    if (!confirmed || !active || generation !== currentGeneration) return;
+    triggerFocusedFix(report, mode);
+  };
+
+  pi.on("context", async (event) => ({
+    messages: event.messages.filter(shouldKeepInModelContext),
+  }));
+
+  pi.on("input", async (event) => {
+    if (event.source !== "extension") remediationFollowUpUsed = false;
   });
 
   pi.registerMessageRenderer(CODE_HINTS_MESSAGE_TYPE, (message, { expanded }, theme) => {
@@ -289,6 +417,7 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
     const currentGeneration = generation;
     const cwd = ctx.cwd;
     const includeTimeouts = options.includeTimeouts;
+    const mode = options.mode;
     if (ctx.hasUI) ctx.ui.setStatus("code-hints", undefined);
     if (!options.enabled || !service || files.length === 0) return;
 
@@ -306,12 +435,7 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
       const timer = setTimeout(() => {
         pendingTimers.delete(timer);
         if (!active || generation !== currentGeneration) return;
-        pi.sendMessage({
-          customType: CODE_HINTS_MESSAGE_TYPE,
-          content: report.content,
-          display: true,
-          details: report.details,
-        });
+        void handleReportMode(report, mode, ctx, currentGeneration);
       }, 0);
       pendingTimers.add(timer);
     })();
@@ -331,7 +455,7 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
       customType: CODE_HINTS_MESSAGE_TYPE,
       content: result.status,
       display: true,
-      details: { files: [], hintCount: 0, timedOut: [] } satisfies CodeHintsDetails,
+      details: { files: [], hintCount: 0, timedOut: [], audience: "command" } satisfies CodeHintsDetails,
     });
   };
 
@@ -350,11 +474,16 @@ export const __test__ = {
   defaultOptions,
   diagnosticFingerprint,
   filterNewErrors,
+  formatFixPrompt,
   formatHintLine,
+  formatNudgePrompt,
   formatReport,
   formatStatus,
   getLspService,
   isLspManagerService,
+  isCodeHintsMode,
   messageText,
+  modeDescription,
+  shouldKeepInModelContext,
   shouldSkipAgentEnd,
 };
