@@ -1,0 +1,14 @@
+{
+  "name": "code-hints",
+  "private": true,
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.75.1",
+    "@earendil-works/pi-tui": "0.75.1"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

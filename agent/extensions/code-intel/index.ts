@@ -4,8 +4,11 @@ import { Text } from "@earendil-works/pi-tui";
 import {
 	__actionsTest,
 	buildStatus,
+	findDefinitionWithLsp,
 	findEnclosingSymbol,
+	findHoverWithLsp,
 	findIdentifierLineMatches,
+	findReferencesWithLsp,
 	findSymbols,
 	generateOutline,
 	generateRepoMap,
@@ -81,6 +84,15 @@ export default function codeIntelExtension(pi: ExtensionAPI) {
 				case "enclosing_symbol":
 					output = await findEnclosingSymbol(pi, ctx, params, signal);
 					break;
+				case "definition":
+					output = await findDefinitionWithLsp(pi, ctx, params);
+					break;
+				case "references":
+					output = await findReferencesWithLsp(pi, ctx, params);
+					break;
+				case "hover":
+					output = await findHoverWithLsp(pi, ctx, params);
+					break;
 				default:
 					output = `Unknown code_intel action: ${(params as { action?: string }).action}`;
 			}
@@ -139,4 +151,5 @@ export const __test = {
 	matchesSymbolQuery: __actionsTest.matchesSymbolQuery,
 	inferCallableArity: __actionsTest.inferCallableArity,
 	chooseReferenceDeclaration: __actionsTest.chooseReferenceDeclaration,
+	formatLspLocations: __actionsTest.formatLspLocations,
 };

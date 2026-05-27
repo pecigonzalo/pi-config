@@ -1,4 +1,4 @@
-export type CodeIntelAction = "repo_map" | "status" | "outline" | "symbols" | "slice" | "enclosing_symbol";
+export type CodeIntelAction = "repo_map" | "status" | "outline" | "symbols" | "slice" | "enclosing_symbol" | "definition" | "references" | "hover";
 
 export interface CodeIntelParams {
 	action: CodeIntelAction;

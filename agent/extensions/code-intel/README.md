@@ -11,11 +11,14 @@ Current actions:
 - `code_intel` with `action: "slice", path: "...", symbol: "..."` for targeted symbol bodies
   - optional `sliceMode: "implementation" | "declaration" | "any"` (default: `"any"`)
 - `code_intel` with `action: "enclosing_symbol", path: "...", line: 123` for location context
+- `code_intel` with `action: "definition" | "references" | "hover", path: "...", line: 123, column: 45` for LSP-backed semantic lookup when `lsp-manager` is loaded
 - `code_intel` with `action: "status"` for backend availability
 - `/code-intel map [tokens]`
 - `/code-intel status`
 
-The current backend prefers available project/git metadata, uses `tree-sitter tags` when the CLI/parsers/queries are configured, and falls back to deterministic syntax-pattern matching. It is intentionally compact and approximate; later phases will add LSP-backed precision.
+The current backend prefers available project/git metadata, uses `tree-sitter tags` when the CLI/parsers/queries are configured, and falls back to deterministic syntax-pattern matching. It is intentionally compact and approximate.
+
+When the sibling `lsp-manager` extension is loaded, `definition`, `references`, and `hover` use live language-server data. Other actions still use the static Tree-sitter/syntax backend.
 
 `repo_map`/`symbols` report when no supported source files were analyzed (for example, unsupported extensions), when files are using generic fallback patterns instead of language-specific extraction, and whether Tree-sitter tags contributed definitions/references.
 

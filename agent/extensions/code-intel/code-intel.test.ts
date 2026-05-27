@@ -294,4 +294,13 @@ describe("code-intel Phase 1 extraction", () => {
 		);
 		expect(chosen?.kind).toBe("interface_method");
 	});
+
+	test("formats LSP locations relative to cwd", () => {
+		const text = __test.formatLspLocations("/repo", "LSP references", [
+			{ file: "/repo/src/index.ts", line: 2, column: 4, endLine: 2, endColumn: 9 },
+		]);
+
+		expect(text).toContain("LSP references");
+		expect(text).toContain("src/index.ts:2:4-2:9");
+	});
 });
