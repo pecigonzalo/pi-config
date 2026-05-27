@@ -115,6 +115,97 @@ const DARWIN_DNS_CONFIG_MACH_LOOKUPS = ["com.apple.SystemConfiguration.configd"]
 const DEFAULT_SANDBOX_ENV: NodeJS.ProcessEnv = {
 	GIT_SSH_COMMAND: "ssh -o ControlMaster=no",
 };
+const SANDBOX_HINT_MAX_ITEMS = 4;
+
+function formatSandboxHintPath(value: string, cwd: string | undefined): string {
+	const home = os.homedir();
+	let formatted = value;
+
+	if (cwd && path.isAbsolute(value)) {
+		const relative = path.relative(cwd, value);
+		if (relative === "") return ".";
+		if (!relative.startsWith("..") && !path.isAbsolute(relative)) {
+			formatted = `./${relative}`;
+		}
+	}
+
+	if (formatted === home) return "~";
+	if (formatted.startsWith(`${home}${path.sep}`)) return `~/${formatted.slice(home.length + 1)}`;
+	return formatted;
+}
+
+function summarizeSandboxHintItems(values: string[] | undefined, cwd?: string, maxItems = SANDBOX_HINT_MAX_ITEMS): string {
+	const uniqueValues = dedupeStrings((values ?? []).filter((value) => value.trim().length > 0));
+	if (uniqueValues.length === 0) return "(none)";
+
+	const shown = uniqueValues.slice(0, maxItems).map((value) => formatSandboxHintPath(value, cwd));
+	const remaining = uniqueValues.length - shown.length;
+	return `${shown.join(", ")}${remaining > 0 ? `, … +${remaining} more` : ""}`;
+}
+
+function summarizeSandboxNetwork(network: SandboxRuntimeConfigLike["network"]): string {
+	if (!network) return "not configured";
+
+	const allowedDomains = network.allowedDomains;
+	const deniedDomains = network.deniedDomains;
+	const domainsBlocked = Array.isArray(allowedDomains)
+		&& allowedDomains.length === 0
+		&& Array.isArray(deniedDomains)
+		&& deniedDomains.length === 0;
+	const segments: string[] = [];
+
+	if (domainsBlocked) {
+		segments.push("blocked");
+	} else if (allowedDomains === undefined && deniedDomains === undefined) {
+		segments.push("unrestricted");
+	} else {
+		segments.push(
+			allowedDomains === undefined
+				? "allowed domains: any"
+				: `allowed domains: ${summarizeSandboxHintItems(allowedDomains)}`,
+		);
+		if (deniedDomains !== undefined && deniedDomains.length > 0) {
+			segments.push(`denied domains: ${summarizeSandboxHintItems(deniedDomains)}`);
+		}
+	}
+
+	if (network.allowLocalBinding) segments.push("localhost binding allowed");
+	if (network.allowAllUnixSockets) {
+		segments.push("all Unix sockets allowed");
+	} else if ((network.allowUnixSockets ?? []).length > 0) {
+		segments.push(`Unix sockets: ${summarizeSandboxHintItems(network.allowUnixSockets, undefined, 2)}`);
+	}
+
+	return segments.join("; ");
+}
+
+/**
+ * Returns a compact prompt hint that helps the agent avoid predictable sandbox denials.
+ */
+export function formatSandboxPromptHint(
+	config: SandboxRuntimeConfigLike,
+	options: { reason?: string; tmpDir?: string; cwd?: string } = {},
+): string {
+	const filesystem = config.filesystem ?? {};
+	const lines = [
+		`Sandbox hint for bash: OS sandbox is active${options.reason ? ` (${options.reason})` : ""}.`,
+		`- Filesystem writes are limited to: ${summarizeSandboxHintItems(filesystem.allowWrite, options.cwd)}.`,
+	];
+	const denyRead = summarizeSandboxHintItems(filesystem.denyRead, options.cwd);
+	const denyWrite = summarizeSandboxHintItems(filesystem.denyWrite, options.cwd);
+
+	if (denyRead !== "(none)" || denyWrite !== "(none)") {
+		lines.push(`- Protected paths blocked: read ${denyRead}; write ${denyWrite}.`);
+	}
+
+	lines.push(`- Network: ${summarizeSandboxNetwork(config.network)}.`);
+	if (options.tmpDir) {
+		lines.push(`- Prefer temporary/cache writes under TMPDIR=${formatSandboxHintPath(options.tmpDir, options.cwd)}.`);
+	}
+	lines.push("- If a command needs broader filesystem or network access, ask instead of retrying blocked variants.");
+
+	return lines.join("\n");
+}
 
 function resolveSandboxPathTokens(values: string[], cwd: string): string[] {
 	return values.map((value) => resolveToken(value, cwd));

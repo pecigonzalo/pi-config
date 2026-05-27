@@ -124,6 +124,7 @@ import {
 import {
 	compileSandboxConfig,
 	createSandboxedBashOps,
+	formatSandboxPromptHint,
 	getEffectiveSandboxTmpDir,
 	getSandboxTmpDirMode,
 } from "./sandbox";
@@ -429,6 +430,20 @@ export default function (pi: ExtensionAPI) {
 		sandboxEnabled = false;
 		sandboxConfig = undefined;
 		clearSandboxEnv();
+	});
+
+	pi.on("before_agent_start", (event, ctx) => {
+		if (!sandboxEnabled || sandboxMode !== "normal" || !sandboxConfig) return;
+
+		const hint = formatSandboxPromptHint(sandboxConfig, {
+			reason: sandboxReason,
+			tmpDir: sandboxTmpDir,
+			cwd: ctx.cwd,
+		});
+
+		return {
+			systemPrompt: `${event.systemPrompt}\n\n${hint}`,
+		};
 	});
 
 	// ── Ask helper ────────────────────────────────────────────────────────────

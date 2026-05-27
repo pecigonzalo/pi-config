@@ -16,7 +16,14 @@ import {
 	isParsedCommandAllowed,
 	sandboxFallbackModeForPolicy,
 } from "./shell-policy";
-import { compileSandboxConfig, createSandboxedBashOps, getSandboxTmpDirMode, getWorkspaceWritePaths, runSandboxedCommand } from "./sandbox";
+import {
+	compileSandboxConfig,
+	createSandboxedBashOps,
+	formatSandboxPromptHint,
+	getSandboxTmpDirMode,
+	getWorkspaceWritePaths,
+	runSandboxedCommand,
+} from "./sandbox";
 import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-parse";
 import type { Rule } from "./shared";
 
@@ -548,6 +555,48 @@ describe("sandbox tmpDir mode", () => {
 	it("respects explicit mode overrides", () => {
 		expect(getSandboxTmpDirMode({ tmpDirMode: "session" })).toBe("session");
 		expect(getSandboxTmpDirMode({ tmpDirMode: "shared" })).toBe("shared");
+	});
+});
+
+describe("sandbox prompt hint", () => {
+	it("summarizes sandbox filesystem and blocked network constraints", () => {
+		const hint = formatSandboxPromptHint(
+			{
+				network: { allowedDomains: [], deniedDomains: [] },
+				filesystem: {
+					allowWrite: ["/repo", "/tmp/pi"],
+					denyRead: ["/repo/**/.env", "/repo/**/.ssh/**"],
+					denyWrite: ["/repo/**/.git/config"],
+				},
+			},
+			{
+				reason: "mode=plan, tmpDir=/tmp/pi",
+				tmpDir: "/tmp/pi",
+				cwd: "/repo",
+			},
+		);
+
+		expect(hint).toContain("Sandbox hint for bash: OS sandbox is active");
+		expect(hint).toContain("Filesystem writes are limited to: ., /tmp/pi");
+		expect(hint).toContain("Protected paths blocked: read ./**/.env, ./**/.ssh/**; write ./**/.git/config");
+		expect(hint).toContain("Network: blocked");
+		expect(hint).toContain("TMPDIR=/tmp/pi");
+	});
+
+	it("keeps unrestricted network hints compact", () => {
+		const hint = formatSandboxPromptHint(
+			{
+				network: { allowLocalBinding: true },
+				filesystem: {
+					allowWrite: ["/repo", "/repo/.git", "/tmp/pi", "/var/tmp/pi", "/tmp/extra"],
+				},
+			},
+			{ cwd: "/repo" },
+		);
+
+		expect(hint).toContain("Network: unrestricted; localhost binding allowed");
+		expect(hint).toContain("Filesystem writes are limited to: ., ./.git, /tmp/pi, /var/tmp/pi, … +1 more");
+		expect(hint).not.toContain("Protected paths blocked");
 	});
 });
 
