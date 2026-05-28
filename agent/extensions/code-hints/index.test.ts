@@ -101,6 +101,32 @@ describe("code-hints formatting", () => {
     expect(report?.content).not.toContain("Existing error.");
   });
 
+  it("suppresses diagnostics that were already reported", () => {
+    const results: LspFileDiagnostics[] = [
+      {
+        file: "/repo/src/index.ts",
+        status: "ok",
+        diagnostics: [
+          {
+            file: "/repo/src/index.ts",
+            line: 10,
+            column: 5,
+            severity: "error",
+            message: "Cannot find name 'foo'.",
+          },
+        ],
+      },
+    ];
+    const first = __test__.formatReport("/repo", results);
+
+    expect(first).toBeDefined();
+    expect(
+      __test__.formatReport("/repo", results, new Map(), {
+        excludeFingerprints: new Set(first!.fingerprints),
+      }),
+    ).toBeUndefined();
+  });
+
   it("returns undefined for clean diagnostics", () => {
     expect(
       __test__.formatReport("/repo", [
@@ -167,6 +193,58 @@ describe("code-hints commands", () => {
     const auto = __test__.applyCommand("auto", options, () => undefined, status);
     expect(auto.changed).toBe(true);
     expect(options.mode).toBe("auto");
+  });
+});
+
+describe("code-hints turn flushing", () => {
+  it("flushes dirty files at the first turn boundary", () => {
+    expect(
+      __test__.shouldFlushAtTurn({
+        touchedFiles: 1,
+        flushInFlight: false,
+        firstDirtyAt: 1_000,
+      }, 2_000),
+    ).toBe(true);
+  });
+
+  it("rate-limits later turn-boundary flushes", () => {
+    expect(
+      __test__.shouldFlushAtTurn({
+        touchedFiles: 1,
+        flushInFlight: false,
+        firstDirtyAt: 11_000,
+        lastFlushAt: 10_000,
+      }, 15_000),
+    ).toBe(false);
+    expect(
+      __test__.shouldFlushAtTurn({
+        touchedFiles: 1,
+        flushInFlight: false,
+        firstDirtyAt: 11_000,
+        lastFlushAt: 10_000,
+      }, 20_000),
+    ).toBe(true);
+  });
+
+  it("flushes old dirty state even inside the rate limit", () => {
+    expect(
+      __test__.shouldFlushAtTurn({
+        touchedFiles: 1,
+        flushInFlight: false,
+        firstDirtyAt: 1_000,
+        lastFlushAt: 25_000,
+      }, 31_000),
+    ).toBe(true);
+  });
+
+  it("does not start another flush while one is running", () => {
+    expect(
+      __test__.shouldFlushAtTurn({
+        touchedFiles: 1,
+        flushInFlight: true,
+        firstDirtyAt: 1_000,
+      }, 31_000),
+    ).toBe(false);
   });
 });
 

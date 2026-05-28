@@ -12,10 +12,14 @@ import {
 
 const CODE_HINTS_MESSAGE_TYPE = "code-hints";
 const DEFAULT_TIMEOUT_MS = 3_000;
+const MIN_TURN_FLUSH_INTERVAL_MS = 10_000;
+const MAX_DIRTY_AGE_MS = 30_000;
 const MAX_HINTS = 20;
 
 type CodeHintsMode = "report" | "nudge" | "ask" | "auto";
 type CodeHintsAudience = "report" | "nudge" | "auto-fix" | "command";
+type CodeHintsDelivery = "steer" | "nextTurn" | "followUp";
+type CodeHintsFlushReason = "turn" | "final";
 
 interface CodeHintsDetails {
   files: string[];
@@ -184,17 +188,32 @@ function filterNewErrors(results: LspFileDiagnostics[], baseline: Map<string, Se
 interface CodeHintsReport {
   content: string;
   details: CodeHintsDetails;
+  fingerprints: DiagnosticFingerprint[];
+}
+
+interface CodeHintsReportOptions {
+  includeTimeouts?: boolean;
+  requireBaseline?: boolean;
+  excludeFingerprints?: Set<DiagnosticFingerprint>;
+}
+
+interface CodeHintsFlushTimingState {
+  touchedFiles: number;
+  flushInFlight: boolean;
+  firstDirtyAt?: number;
+  lastFlushAt?: number;
 }
 
 function formatReport(
   cwd: string,
   results: LspFileDiagnostics[],
   baseline: Map<string, Set<DiagnosticFingerprint>> = new Map(),
-  options: { includeTimeouts?: boolean; requireBaseline?: boolean } = {},
+  options: CodeHintsReportOptions = {},
 ): CodeHintsReport | undefined {
-  const hints = baseline.size > 0 || options.requireBaseline
+  const candidateHints = baseline.size > 0 || options.requireBaseline
     ? filterNewErrors(results, baseline)
     : results.flatMap((result) => result.diagnostics.filter((item) => item.severity === "error"));
+  const hints = candidateHints.filter((hint) => !options.excludeFingerprints?.has(diagnosticFingerprint(hint)));
   const timedOut = results.filter((result) => result.status === "timeout").map((result) => relative(cwd, result.file) || result.file);
   if (hints.length === 0) return undefined;
 
@@ -224,7 +243,15 @@ function formatReport(
       hintCount: hints.length,
       timedOut,
     },
+    fingerprints: hints.map(diagnosticFingerprint),
   };
+}
+
+function shouldFlushAtTurn(state: CodeHintsFlushTimingState, now = Date.now()): boolean {
+  if (state.touchedFiles === 0 || state.flushInFlight) return false;
+  if (!state.lastFlushAt) return true;
+  if (now - state.lastFlushAt >= MIN_TURN_FLUSH_INTERVAL_MS) return true;
+  return state.firstDirtyAt !== undefined && now - state.firstDirtyAt >= MAX_DIRTY_AGE_MS;
 }
 
 function formatNudgePrompt(report: CodeHintsReport): string {
@@ -264,7 +291,11 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
   const touchedFiles = new Set<string>();
   const baselineByFile = new Map<string, Set<DiagnosticFingerprint>>();
   const baselinePromises = new Map<string, Promise<void>>();
-  const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
+  const reportedFingerprints = new Set<DiagnosticFingerprint>();
+  let dirtyGeneration = 0;
+  let firstDirtyAt: number | undefined;
+  let lastFlushAt: number | undefined;
+  let flushInFlight: Promise<void> | undefined;
 
   pi.events.on(LSP_MANAGER_READY_EVENT, (service) => {
     if (isLspManagerService(service)) lspService = service;
@@ -274,8 +305,10 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
     touchedFiles.clear();
     baselineByFile.clear();
     baselinePromises.clear();
-    for (const timer of pendingTimers) clearTimeout(timer);
-    pendingTimers.clear();
+    reportedFingerprints.clear();
+    dirtyGeneration = 0;
+    firstDirtyAt = undefined;
+    lastFlushAt = undefined;
     generation++;
   };
 
@@ -293,16 +326,21 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
     });
   };
 
-  const sendNudge = (report: CodeHintsReport, mode: CodeHintsMode) => {
+  const sendNudge = (report: CodeHintsReport, mode: CodeHintsMode, deliverAs: CodeHintsDelivery) => {
     pi.sendMessage({
       customType: CODE_HINTS_MESSAGE_TYPE,
       content: formatNudgePrompt(report),
       display: false,
       details: { ...report.details, mode, audience: "nudge" } satisfies CodeHintsDetails,
-    }, { deliverAs: "nextTurn" });
+    }, { deliverAs });
   };
 
-  const triggerFocusedFix = (report: CodeHintsReport, mode: CodeHintsMode) => {
+  const triggerFocusedFix = (
+    report: CodeHintsReport,
+    mode: CodeHintsMode,
+    deliverAs: CodeHintsDelivery,
+    triggerTurn: boolean,
+  ) => {
     if (remediationFollowUpUsed) return;
     remediationFollowUpUsed = true;
     pi.sendMessage({
@@ -310,17 +348,30 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
       content: formatFixPrompt(report),
       display: false,
       details: { ...report.details, mode, audience: "auto-fix" } satisfies CodeHintsDetails,
-    }, { deliverAs: "followUp", triggerTurn: true });
+    }, { deliverAs, triggerTurn });
   };
 
-  const handleReportMode = async (report: CodeHintsReport, mode: CodeHintsMode, ctx: ExtensionContext, currentGeneration: number) => {
+  const handleReportMode = async (
+    report: CodeHintsReport,
+    mode: CodeHintsMode,
+    ctx: ExtensionContext,
+    currentGeneration: number,
+    reason: CodeHintsFlushReason,
+  ) => {
     sendVisibleReport(report, mode);
+    for (const fingerprint of report.fingerprints) reportedFingerprints.add(fingerprint);
+
+    const isFinal = reason === "final";
     if (mode === "nudge") {
-      sendNudge(report, mode);
+      sendNudge(report, mode, isFinal ? "nextTurn" : "steer");
       return;
     }
     if (mode === "auto") {
-      triggerFocusedFix(report, mode);
+      triggerFocusedFix(report, mode, isFinal ? "followUp" : "steer", isFinal);
+      return;
+    }
+    if (mode === "ask" && !isFinal) {
+      sendNudge(report, mode, "steer");
       return;
     }
     if (mode !== "ask" || remediationFollowUpUsed || !ctx.hasUI) return;
@@ -330,7 +381,58 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
       `Found ${report.details.hintCount} new LSP error(s). Run a focused follow-up fix?`,
     );
     if (!confirmed || !active || generation !== currentGeneration) return;
-    triggerFocusedFix(report, mode);
+    triggerFocusedFix(report, mode, "followUp", true);
+  };
+
+  const clearDirtyState = (ctx?: ExtensionContext) => {
+    touchedFiles.clear();
+    baselineByFile.clear();
+    baselinePromises.clear();
+    firstDirtyAt = undefined;
+    if (ctx?.hasUI) ctx.ui.setStatus("code-hints", undefined);
+  };
+
+  const flushCodeHints = async (ctx: ExtensionContext, reason: CodeHintsFlushReason) => {
+    if (flushInFlight) {
+      await flushInFlight;
+      if (reason !== "final" || touchedFiles.size === 0) return;
+    }
+
+    const service = lspService ?? getLspService(pi);
+    const files = [...touchedFiles];
+    if (!options.enabled || !service || files.length === 0) return;
+
+    const currentGeneration = generation;
+    const currentDirtyGeneration = dirtyGeneration;
+    const pendingBaselines = files.map((file) => baselinePromises.get(file)).filter((promise): promise is Promise<void> => !!promise);
+    const cwd = ctx.cwd;
+    const includeTimeouts = options.includeTimeouts;
+    const mode = options.mode;
+
+    flushInFlight = (async () => {
+      await Promise.all(pendingBaselines);
+      if (!active || generation !== currentGeneration || dirtyGeneration !== currentDirtyGeneration) return;
+
+      const baselineSnapshot = new Map(baselineByFile);
+      const results = await service.diagnostics(files, { severity: "error", timeoutMs: DEFAULT_TIMEOUT_MS }).catch(() => []);
+      if (!active || generation !== currentGeneration || dirtyGeneration !== currentDirtyGeneration) return;
+
+      const report = formatReport(cwd, results, baselineSnapshot, {
+        requireBaseline: true,
+        includeTimeouts,
+        excludeFingerprints: reportedFingerprints,
+      });
+      clearDirtyState(ctx);
+      lastFlushAt = Date.now();
+      if (!report) return;
+      await handleReportMode(report, mode, ctx, currentGeneration, reason);
+    })();
+
+    try {
+      await flushInFlight;
+    } finally {
+      flushInFlight = undefined;
+    }
   };
 
   pi.on("context", async (event) => ({
@@ -376,8 +478,10 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
     if (!service?.supportsFile(input.path)) return;
     if (baselinePromises.has(input.path)) return;
 
+    const baselineGeneration = generation;
     const promise = service.diagnostics([input.path], { severity: "error", timeoutMs: DEFAULT_TIMEOUT_MS })
       .then((results) => {
+        if (!active || generation !== baselineGeneration) return;
         const baseline = collectErrorFingerprints(results);
         for (const [file, fingerprints] of baseline) baselineByFile.set(file, fingerprints);
       })
@@ -395,50 +499,33 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
 
     const service = lspService ?? getLspService(pi);
     if (!service?.supportsFile(input.path)) return;
+    if (touchedFiles.size === 0) firstDirtyAt = Date.now();
     touchedFiles.add(input.path);
+    dirtyGeneration++;
 
     // Keep the LSP document cache warm without returning per-edit diagnostics.
     service.touchFile(input.path, { waitForDiagnostics: false }).catch(() => undefined);
     if (ctx.hasUI) ctx.ui.setStatus("code-hints", ctx.ui.theme.fg("dim", `hints: ${touchedFiles.size} touched`));
   });
 
+  pi.on("turn_end", async (_event, ctx) => {
+    if (!shouldFlushAtTurn({
+      touchedFiles: touchedFiles.size,
+      flushInFlight: !!flushInFlight,
+      firstDirtyAt,
+      lastFlushAt,
+    })) return;
+
+    await flushCodeHints(ctx, "turn");
+  });
+
   pi.on("agent_end", async (event, ctx) => {
     if (shouldSkipAgentEnd(event)) {
-      touchedFiles.clear();
-      baselineByFile.clear();
-      baselinePromises.clear();
+      clearDirtyState(ctx);
       return;
     }
 
-    const files = [...touchedFiles];
-    const pendingBaselines = files.map((file) => baselinePromises.get(file)).filter((promise): promise is Promise<void> => !!promise);
-    touchedFiles.clear();
-    const service = lspService ?? getLspService(pi);
-    const currentGeneration = generation;
-    const cwd = ctx.cwd;
-    const includeTimeouts = options.includeTimeouts;
-    const mode = options.mode;
-    if (ctx.hasUI) ctx.ui.setStatus("code-hints", undefined);
-    if (!options.enabled || !service || files.length === 0) return;
-
-    void (async () => {
-      await Promise.all(pendingBaselines);
-      if (!active || generation !== currentGeneration) return;
-      const baselineSnapshot = new Map(baselineByFile);
-      baselineByFile.clear();
-      baselinePromises.clear();
-      const results = await service.diagnostics(files, { severity: "error", timeoutMs: DEFAULT_TIMEOUT_MS }).catch(() => []);
-      if (!active || generation !== currentGeneration) return;
-      const report = formatReport(cwd, results, baselineSnapshot, { requireBaseline: true, includeTimeouts });
-      if (!report) return;
-
-      const timer = setTimeout(() => {
-        pendingTimers.delete(timer);
-        if (!active || generation !== currentGeneration) return;
-        void handleReportMode(report, mode, ctx, currentGeneration);
-      }, 0);
-      pendingTimers.add(timer);
-    })();
+    await flushCodeHints(ctx, "final");
   });
 
   pi.on("session_shutdown", async () => {
@@ -484,6 +571,7 @@ export const __test__ = {
   isCodeHintsMode,
   messageText,
   modeDescription,
+  shouldFlushAtTurn,
   shouldKeepInModelContext,
   shouldSkipAgentEnd,
 };
