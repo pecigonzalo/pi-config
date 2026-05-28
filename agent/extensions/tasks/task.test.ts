@@ -521,8 +521,41 @@ describe("tasks extension persisted-session guardrails", () => {
 		});
 	});
 
+	it("falls back to the session file when the in-memory branch omits the session header", async () => {
+		const parentSessionFile = path.join(testAgentDir, "sessions", "workspace", "main", "parent-from-file.jsonl");
+		const childSessionFile = path.join(testAgentDir, "sessions", "workspace", "child", "task-child-from-file.jsonl");
+		await fs.mkdir(path.dirname(childSessionFile), { recursive: true });
+		await fs.writeFile(
+			childSessionFile,
+			JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "child-session-id",
+				timestamp: new Date().toISOString(),
+				cwd: process.cwd(),
+				parentSession: parentSessionFile,
+			}) + "\n",
+			"utf-8",
+		);
+
+		const resolved = await __test__.resolveParentSessionForCurrentSession(childSessionFile, []);
+
+		expect(resolved.error).toBeUndefined();
+		expect(resolved.resolved).toMatchObject({
+			parentSessionPath: parentSessionFile,
+			source: "header",
+		});
+	});
+
 	it("does not resolve a parent session without a parentSession header", async () => {
-		const currentSessionFile = path.join(testAgentDir, "sessions", "workspace", "child", "task-child.jsonl");
+		const currentSessionFile = path.join(testAgentDir, "sessions", "workspace", "child", "task-child-without-parent.jsonl");
+		await fs.mkdir(path.dirname(currentSessionFile), { recursive: true });
+		await fs.writeFile(
+			currentSessionFile,
+			JSON.stringify({ type: "session", id: "child-session-id", timestamp: new Date().toISOString() }) + "\n",
+			"utf-8",
+		);
+
 		const resolved = await __test__.resolveParentSessionForCurrentSession(currentSessionFile, [
 			{ type: "session", id: "child-session-id" } as any,
 		]);

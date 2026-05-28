@@ -1279,9 +1279,26 @@ async function resolveParentSessionForCurrentSession(
 		};
 	}
 
+	let fileReadError: string | undefined;
+	try {
+		const fileHeaderParentSession = readSessionHeaderParentSession(readSessionEntriesFromFile(currentSessionFile));
+		if (fileHeaderParentSession) {
+			return {
+				resolved: {
+					parentSessionPath: resolveSessionReferencePath(fileHeaderParentSession, currentSessionFile),
+					source: "header",
+				},
+			};
+		}
+	} catch (error) {
+		fileReadError = error instanceof Error ? error.message : String(error);
+	}
+
 	return {
 		noParent: true,
-		error: "Current session has no parentSession header, so a parent session cannot be resolved automatically.",
+		error: fileReadError
+			? `Current session has no parentSession header in memory, and the session file could not be read: ${fileReadError}`
+			: "Current session has no parentSession header, so a parent session cannot be resolved automatically.",
 	};
 }
 
