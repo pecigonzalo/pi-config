@@ -1011,6 +1011,42 @@ describe("task result formatting", () => {
 	});
 });
 
+describe("/task command alias", () => {
+	it("registers singular /task as an alias for /tasks", () => {
+		const { commandHandlers } = createExtensionHarness();
+
+		expect(commandHandlers.task).toBeDefined();
+		expect(commandHandlers.task.handler).toBe(commandHandlers.tasks.handler);
+	});
+
+	it("routes /task parent through the task-session parent handler", async () => {
+		const { commandHandlers } = createExtensionHarness();
+		const notifications: Array<{ message: string; level?: string }> = [];
+		let waitedForIdle = false;
+
+		await commandHandlers.task.handler("parent", {
+			waitForIdle: async () => {
+				waitedForIdle = true;
+			},
+			ui: {
+				notify: (message: string, level?: string) => {
+					notifications.push({ message, level });
+				},
+			},
+			sessionManager: {
+				getSessionFile: () => undefined,
+				getBranch: () => [],
+			},
+		});
+
+		expect(waitedForIdle).toBe(true);
+		expect(notifications[0]).toMatchObject({
+			level: "error",
+			message: expect.stringContaining("Current session is not persisted"),
+		});
+	});
+});
+
 describe("/tasks command parsing", () => {
 	it("parses steer commands with selector and message", () => {
 		const parsed = __test__.parseTasksCommand("steer task-1 focus only on auth");

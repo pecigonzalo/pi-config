@@ -107,7 +107,7 @@ User-visible task results include compact child-session summaries (session id/st
 
 ## 7) `/tasks` command surface
 
-Supported commands:
+Supported commands (`/task ...` is accepted as a singular alias for `/tasks ...`):
 
 - `/tasks` or `/tasks list` (current session)
 - `/tasks parent`

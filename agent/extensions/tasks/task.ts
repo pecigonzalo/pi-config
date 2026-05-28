@@ -3679,7 +3679,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("tasks", {
+	const tasksCommand = {
 		description: `Inspect persisted task child sessions. Usage: ${TASKS_COMMAND_USAGE}`,
 		handler: async (args, ctx) => {
 			const parsed = parseTasksCommand(args);
@@ -3828,6 +3828,12 @@ export default function (pi: ExtensionAPI) {
 				syncTaskUiChrome(ctx);
 			}
 		},
+	} satisfies Parameters<ExtensionAPI["registerCommand"]>[1];
+
+	pi.registerCommand("tasks", tasksCommand);
+	pi.registerCommand("task", {
+		...tasksCommand,
+		description: `Alias for /tasks. Usage: ${TASKS_COMMAND_USAGE}`,
 	});
 
 	pi.registerShortcut(TASKS_BROWSER_SHORTCUT, {
