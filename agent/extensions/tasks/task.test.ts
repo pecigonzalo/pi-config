@@ -697,6 +697,64 @@ describe("tasks extension RPC UI relay", () => {
 		expect(responses).toEqual([{ type: "extension_ui_response", id: "req-select", value: "Allow once" }]);
 	});
 
+	it("serializes dialog relays from parallel child tasks", async () => {
+		const confirmCalls: string[] = [];
+		const responses: Record<string, unknown>[] = [];
+		let releaseFirstConfirm: (() => void) | undefined;
+		let firstConfirmStarted: (() => void) | undefined;
+		const firstConfirmStartedPromise = new Promise<void>((resolve) => {
+			firstConfirmStarted = resolve;
+		});
+
+		const parentUi = {
+			hasUI: true,
+			ui: {
+				confirm: async (title: string) => {
+					confirmCalls.push(title);
+					if (title.includes("step 1")) {
+						firstConfirmStarted?.();
+						await new Promise<void>((resolve) => {
+							releaseFirstConfirm = resolve;
+						});
+					}
+					return true;
+				},
+			},
+		};
+
+		const firstRelay = __test__.relayTaskExtensionUiRequest({
+			request: { type: "extension_ui_request", id: "req-confirm-1", method: "confirm", title: "Permission required" },
+			controller: { agent: "thinker", step: 1, key: "run-dialog:1" },
+			parentUi,
+			sendResponse: async (payload: Record<string, unknown>) => {
+				responses.push(payload);
+			},
+		});
+		const secondRelay = __test__.relayTaskExtensionUiRequest({
+			request: { type: "extension_ui_request", id: "req-confirm-2", method: "confirm", title: "Permission required" },
+			controller: { agent: "thinker", step: 2, key: "run-dialog:2" },
+			parentUi,
+			sendResponse: async (payload: Record<string, unknown>) => {
+				responses.push(payload);
+			},
+		});
+
+		await firstConfirmStartedPromise;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(confirmCalls).toHaveLength(1);
+		expect(confirmCalls[0]).toContain("step 1");
+
+		releaseFirstConfirm?.();
+		await Promise.all([firstRelay, secondRelay]);
+
+		expect(confirmCalls).toHaveLength(2);
+		expect(confirmCalls[1]).toContain("step 2");
+		expect(responses).toEqual([
+			{ type: "extension_ui_response", id: "req-confirm-1", confirmed: true },
+			{ type: "extension_ui_response", id: "req-confirm-2", confirmed: true },
+		]);
+	});
+
 	it("cancels dialog requests when no parent UI is available", async () => {
 		const responses: Record<string, unknown>[] = [];
 

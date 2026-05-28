@@ -140,6 +140,7 @@ const TASKS_COMMAND_USAGE = [
 ].join(" | ");
 
 const taskWidgetEnabledSessions = new Set<string>();
+let taskDialogRelayQueue: Promise<void> = Promise.resolve();
 const SUBPROCESS_SIGKILL_TIMEOUT_MS = 5000;
 
 function formatShortcutLabel(shortcut: string): string {
@@ -343,6 +344,12 @@ function getTaskExtensionUiDialogOptions(timeout: unknown, signal: AbortSignal |
 	};
 }
 
+function enqueueTaskDialogRelay(action: () => Promise<void>): Promise<void> {
+	const run = taskDialogRelayQueue.catch(() => {}).then(action);
+	taskDialogRelayQueue = run.catch(() => {});
+	return run;
+}
+
 function isTaskExtensionUiNotifyType(value: unknown): value is TaskExtensionUiNotifyType {
 	return value === "info" || value === "warning" || value === "error";
 }
@@ -373,52 +380,60 @@ async function relayTaskExtensionUiRequest(options: {
 
 	switch (request.method) {
 		case "select": {
-			if (!hasParentUi || typeof ui?.select !== "function") {
-				await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
-				return;
-			}
-			const relayOptions = Array.isArray(request.options) ? request.options.filter((value): value is string => typeof value === "string") : [];
-			const value = await ui.select(title, relayOptions, dialogOptions);
-			await sendResponse(
-				value !== undefined
-					? { type: "extension_ui_response", id: request.id, value }
-					: { type: "extension_ui_response", id: request.id, cancelled: true },
-			);
+			await enqueueTaskDialogRelay(async () => {
+				if (!hasParentUi || typeof ui?.select !== "function" || dialogSignal?.aborted) {
+					await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+					return;
+				}
+				const relayOptions = Array.isArray(request.options) ? request.options.filter((value): value is string => typeof value === "string") : [];
+				const value = await ui.select(title, relayOptions, dialogOptions);
+				await sendResponse(
+					value !== undefined
+						? { type: "extension_ui_response", id: request.id, value }
+						: { type: "extension_ui_response", id: request.id, cancelled: true },
+				);
+			});
 			return;
 		}
 		case "confirm": {
-			if (!hasParentUi || typeof ui?.confirm !== "function") {
-				await sendResponse({ type: "extension_ui_response", id: request.id, confirmed: false });
-				return;
-			}
-			const confirmed = await ui.confirm(title, typeof request.message === "string" ? request.message : "", dialogOptions);
-			await sendResponse({ type: "extension_ui_response", id: request.id, confirmed });
+			await enqueueTaskDialogRelay(async () => {
+				if (!hasParentUi || typeof ui?.confirm !== "function" || dialogSignal?.aborted) {
+					await sendResponse({ type: "extension_ui_response", id: request.id, confirmed: false });
+					return;
+				}
+				const confirmed = await ui.confirm(title, typeof request.message === "string" ? request.message : "", dialogOptions);
+				await sendResponse({ type: "extension_ui_response", id: request.id, confirmed });
+			});
 			return;
 		}
 		case "input": {
-			if (!hasParentUi || typeof ui?.input !== "function") {
-				await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
-				return;
-			}
-			const value = await ui.input(title, request.placeholder, dialogOptions);
-			await sendResponse(
-				value !== undefined
-					? { type: "extension_ui_response", id: request.id, value }
-					: { type: "extension_ui_response", id: request.id, cancelled: true },
-			);
+			await enqueueTaskDialogRelay(async () => {
+				if (!hasParentUi || typeof ui?.input !== "function" || dialogSignal?.aborted) {
+					await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+					return;
+				}
+				const value = await ui.input(title, request.placeholder, dialogOptions);
+				await sendResponse(
+					value !== undefined
+						? { type: "extension_ui_response", id: request.id, value }
+						: { type: "extension_ui_response", id: request.id, cancelled: true },
+				);
+			});
 			return;
 		}
 		case "editor": {
-			if (!hasParentUi || typeof ui?.editor !== "function") {
-				await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
-				return;
-			}
-			const value = await ui.editor(title, request.prefill, dialogOptions);
-			await sendResponse(
-				value !== undefined
-					? { type: "extension_ui_response", id: request.id, value }
-					: { type: "extension_ui_response", id: request.id, cancelled: true },
-			);
+			await enqueueTaskDialogRelay(async () => {
+				if (!hasParentUi || typeof ui?.editor !== "function" || dialogSignal?.aborted) {
+					await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+					return;
+				}
+				const value = await ui.editor(title, request.prefill, dialogOptions);
+				await sendResponse(
+					value !== undefined
+						? { type: "extension_ui_response", id: request.id, value }
+						: { type: "extension_ui_response", id: request.id, cancelled: true },
+				);
+			});
 			return;
 		}
 		case "notify": {
@@ -4260,13 +4275,43 @@ export default function (pi: ExtensionAPI) {
 				return text.trimEnd();
 			};
 
+			const appendExpandedTaskResult = (container: Container, r: SingleResult, header: string) => {
+				const isError = r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
+				const displayItems = getDisplayItems(r.messages);
+				const finalOutput = getFinalOutput(r.messages);
+
+				container.addChild(new Text(header, 0, 0));
+				if (isError && r.errorMessage) container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
+				container.addChild(new Spacer(1));
+				container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
+				container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
+				container.addChild(new Spacer(1));
+				container.addChild(new Text(theme.fg("muted", "─── Configuration ───"), 0, 0));
+				container.addChild(new Text(formatTaskConfigurationLines(r, theme.fg.bind(theme)), 0, 0));
+				if (r.childSession) {
+					container.addChild(new Text(formatChildSessionExpanded(r.childSession, theme.fg.bind(theme)), 0, 0));
+				}
+				if ((r.uiNotices?.length ?? 0) > 0) {
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("muted", "─── Notices ───"), 0, 0));
+					container.addChild(new Text(formatTaskInlineNoticeLines(r.uiNotices ?? [], theme.fg.bind(theme)), 0, 0));
+				}
+				container.addChild(new Spacer(1));
+				container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
+				appendTaskOutputSection(container, displayItems, finalOutput, theme.fg.bind(theme));
+				const usageStr = formatUsageStats(r.usage, r.model);
+				if (usageStr) {
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));
+				}
+			};
+
 			if (details.mode === "single" && details.results.length === 1) {
 				const r = details.results[0];
 				if (!r) return new Text("(no output)", 0, 0);
 				const isError = r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
-				const finalOutput = getFinalOutput(r.messages);
 
 				if (expanded) {
 					const container = new Container();
@@ -4275,31 +4320,7 @@ export default function (pi: ExtensionAPI) {
 						theme,
 					);
 					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
-					container.addChild(new Text(header, 0, 0));
-					if (isError && r.errorMessage)
-						container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
-					container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("muted", "─── Configuration ───"), 0, 0));
-					container.addChild(new Text(formatTaskConfigurationLines(r, theme.fg.bind(theme)), 0, 0));
-					if (r.childSession) {
-						container.addChild(new Text(formatChildSessionExpanded(r.childSession, theme.fg.bind(theme)), 0, 0));
-					}
-					if ((r.uiNotices?.length ?? 0) > 0) {
-						container.addChild(new Spacer(1));
-						container.addChild(new Text(theme.fg("muted", "─── Notices ───"), 0, 0));
-						container.addChild(new Text(formatTaskInlineNoticeLines(r.uiNotices ?? [], theme.fg.bind(theme)), 0, 0));
-					}
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
-					appendTaskOutputSection(container, displayItems, finalOutput, theme.fg.bind(theme));
-					const usageStr = formatUsageStats(r.usage, r.model);
-					if (usageStr) {
-						container.addChild(new Spacer(1));
-						container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));
-					}
+					appendExpandedTaskResult(container, r, header);
 					return container;
 				}
 
@@ -4353,8 +4374,6 @@ export default function (pi: ExtensionAPI) {
 
 					for (const r of details.results) {
 						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
-						const displayItems = getDisplayItems(r.messages);
-						const finalOutput = getFinalOutput(r.messages);
 
 						container.addChild(new Spacer(1));
 						const stepHeader = formatTaskHeader(
@@ -4366,18 +4385,7 @@ export default function (pi: ExtensionAPI) {
 							},
 							theme,
 						);
-						container.addChild(new Text(stepHeader, 0, 0));
-						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
-						container.addChild(new Text(formatTaskConfigurationLines(r, theme.fg.bind(theme)), 0, 0));
-						if (r.childSession) {
-							container.addChild(new Text(formatChildSessionExpanded(r.childSession, theme.fg.bind(theme)), 0, 0));
-						}
-						if ((r.uiNotices?.length ?? 0) > 0) {
-							container.addChild(new Text(formatTaskInlineNoticeLines(r.uiNotices ?? [], theme.fg.bind(theme)), 0, 0));
-						}
-						appendTaskOutputSection(container, displayItems, finalOutput, theme.fg.bind(theme));
-						const stepUsage = formatUsageStats(r.usage, r.model);
-						if (stepUsage) container.addChild(new Text(theme.fg("dim", stepUsage), 0, 0));
+						appendExpandedTaskResult(container, r, stepHeader);
 					}
 
 					const usageStr = formatUsageStats(aggregateUsage(details.results));
@@ -4426,7 +4434,7 @@ export default function (pi: ExtensionAPI) {
 					? `${successCount + failCount}/${details.results.length} done, ${running} running`
 					: `${successCount}/${details.results.length} tasks`;
 
-				if (expanded && !isRunning) {
+				if (expanded) {
 					const container = new Container();
 					container.addChild(
 						new Text(
@@ -4437,27 +4445,19 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					for (const r of details.results) {
-						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
-						const displayItems = getDisplayItems(r.messages);
-						const finalOutput = getFinalOutput(r.messages);
+						const rIcon =
+							r.exitCode === -1
+								? theme.fg("warning", "⏳")
+								: r.exitCode === 0
+									? theme.fg("success", "✓")
+									: theme.fg("error", "✗");
 
 						container.addChild(new Spacer(1));
 						const taskHeader = formatTaskHeader(
 							{ prefix: theme.fg("muted", "─── "), agent: r.agent, taskResult: r, suffix: ` ${rIcon}` },
 							theme,
 						);
-						container.addChild(new Text(taskHeader, 0, 0));
-						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
-						container.addChild(new Text(formatTaskConfigurationLines(r, theme.fg.bind(theme)), 0, 0));
-						if (r.childSession) {
-							container.addChild(new Text(formatChildSessionExpanded(r.childSession, theme.fg.bind(theme)), 0, 0));
-						}
-						if ((r.uiNotices?.length ?? 0) > 0) {
-							container.addChild(new Text(formatTaskInlineNoticeLines(r.uiNotices ?? [], theme.fg.bind(theme)), 0, 0));
-						}
-						appendTaskOutputSection(container, displayItems, finalOutput, theme.fg.bind(theme));
-						const taskUsage = formatUsageStats(r.usage, r.model);
-						if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
+						appendExpandedTaskResult(container, r, taskHeader);
 					}
 
 					const usageStr = formatUsageStats(aggregateUsage(details.results));
