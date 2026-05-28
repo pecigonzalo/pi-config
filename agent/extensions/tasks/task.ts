@@ -25,11 +25,10 @@ import {
 	type SessionEntry,
 	SessionManager,
 	getAgentDir,
-	getMarkdownTheme,
 	keyHint,
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { MAIN_SESSION_AGENT_CUSTOM_TYPE } from "../shared/agent-state";
 import {
@@ -43,6 +42,28 @@ import {
 	resolveSkillPaths,
 } from "./agents.js";
 import { parseTasksCommand, resolveTaskSelector, type TasksScope } from "./task-command-utils.js";
+import {
+	type DisplayItem,
+	type TaskInlineNotice,
+	type UsageStats,
+	addTaskInlineNotice,
+	appendTaskOutputSection,
+	buildTaskInlineNoticeLines,
+	createTaskPreview,
+	formatChainResults,
+	formatParallelResults,
+	formatTaskCallHeading,
+	formatTaskHeader,
+	formatTaskInlineNoticeLines,
+	formatTaskSnippetLines,
+	formatToolCall,
+	formatUsageStats,
+	getDisplayItems,
+	getFinalOutput,
+	shortenHomePath,
+	shouldDisplayTaskInlineNotice,
+	truncateOutput,
+} from "./task-display.js";
 import {
 	applyTaskTerminalAttachment,
 	formatTaskTerminalAttachment,
@@ -191,261 +212,6 @@ function getSubagentDepthEnv(): Record<string, string> {
 	return { PI_SUBAGENT_DEPTH: String(next), PI_SUBAGENT_MAX_DEPTH: max };
 }
 
-// Output truncation
-const MAX_OUTPUT_BYTES = 200 * 1024; // 200 KB
-const MAX_OUTPUT_LINES = 5000;
-
-function truncateOutput(text: string): string {
-	const lines = text.split("\n");
-	const bytes = Buffer.byteLength(text, "utf-8");
-	if (bytes <= MAX_OUTPUT_BYTES && lines.length <= MAX_OUTPUT_LINES) return text;
-
-	let truncated = lines.length > MAX_OUTPUT_LINES ? lines.slice(0, MAX_OUTPUT_LINES) : lines;
-	let result = truncated.join("\n");
-	if (Buffer.byteLength(result, "utf-8") > MAX_OUTPUT_BYTES) {
-		let lo = 0;
-		let hi = result.length;
-		while (lo < hi) {
-			const mid = Math.floor((lo + hi + 1) / 2);
-			if (Buffer.byteLength(result.slice(0, mid), "utf-8") <= MAX_OUTPUT_BYTES) lo = mid;
-			else hi = mid - 1;
-		}
-		result = result.slice(0, lo);
-	}
-	const keptLines = result.split("\n").length;
-	const keptBytes = Buffer.byteLength(result, "utf-8");
-	return `[TRUNCATED: showing first ${keptLines} of ${lines.length} lines, ${keptBytes} of ${bytes} bytes]\n${result}`;
-}
-
-function formatTokens(count: number): string {
-	if (count < 1000) return count.toString();
-	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-	if (count < 1000000) return `${Math.round(count / 1000)}k`;
-	return `${(count / 1000000).toFixed(1)}M`;
-}
-
-function formatUsageStats(
-	usage: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		cost: number;
-		contextTokens?: number;
-		turns?: number;
-	},
-	model?: string,
-): string {
-	const parts: string[] = [];
-	if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
-	if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
-	if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
-	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
-	if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
-	if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
-	if (usage.contextTokens && usage.contextTokens > 0) {
-		parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
-	}
-	if (model) parts.push(model);
-	return parts.join(" ");
-}
-
-function formatTaskExecutionSelection(
-	selection: { profile?: string; effort?: string },
-	themeFg: (color: any, text: string) => string,
-): string {
-	const parts: string[] = [];
-	if (selection.profile) {
-		parts.push(themeFg("muted", "profile: ") + themeFg("accent", selection.profile));
-	}
-	if (selection.effort) {
-		parts.push(themeFg("muted", "effort: ") + themeFg("accent", selection.effort));
-	}
-	return parts.join(themeFg("muted", " · "));
-}
-
-function formatTaskExecutionContext(
-	agentSource: string | undefined,
-	sessionMode: ContextMode | undefined,
-	themeFg: (color: any, text: string) => string,
-): string {
-	const source = agentSource ?? "unknown";
-	const mode = sessionMode ?? "fresh";
-	return themeFg("muted", ` (${source}:${mode})`);
-}
-
-function formatTaskExecutionMetadata(
-	taskResult: { agentSource?: string; sessionMode?: ContextMode; profile?: string; effort?: string },
-	themeFg: (color: any, text: string) => string,
-): string {
-	const context = formatTaskExecutionContext(taskResult.agentSource, taskResult.sessionMode, themeFg);
-	const selection = formatTaskExecutionSelection(taskResult, themeFg);
-	return selection ? `${context}${themeFg("muted", " · ")}${selection}` : context;
-}
-
-function formatTaskHeader(
-	options: {
-		agent: string;
-		taskResult: { agentSource?: string; sessionMode?: ContextMode; profile?: string; effort?: string };
-		prefix?: string;
-		leadingIcon?: string;
-		suffix?: string;
-		agentColor?: any;
-		boldAgent?: boolean;
-	},
-	theme: { fg: (color: any, text: string) => string; bold: (text: string) => string },
-): string {
-	const parts: string[] = [];
-	if (options.leadingIcon) parts.push(`${options.leadingIcon} `);
-	if (options.prefix) parts.push(options.prefix);
-	const agentText = options.boldAgent ? theme.bold(options.agent) : options.agent;
-	parts.push(theme.fg(options.agentColor ?? "accent", agentText));
-	parts.push(formatTaskExecutionMetadata(options.taskResult, theme.fg.bind(theme)));
-	if (options.suffix) parts.push(options.suffix);
-	return parts.join("");
-}
-
-function formatTaskCallHeading(
-	kind: "simple" | "chain" | "parallel",
-	theme: { fg: (color: any, text: string) => string; bold: (text: string) => string },
-	count?: number,
-): string {
-	let heading = theme.fg("toolTitle", theme.bold("task ")) + theme.fg("accent", kind);
-	if (kind === "chain" && count !== undefined) heading += theme.fg("muted", ` (${count} steps)`);
-	if (kind === "parallel" && count !== undefined) heading += theme.fg("muted", ` (${count} tasks)`);
-	return heading;
-}
-
-function formatTaskSnippetLines(
-	tasks: string[],
-	themeFg: (color: any, text: string) => string,
-	options: { numbered?: boolean; maxItems?: number; maxLength?: number } = {},
-): string {
-	const maxItems = options.maxItems ?? 3;
-	const maxLength = options.maxLength ?? 50;
-	let text = "";
-	for (let i = 0; i < Math.min(tasks.length, maxItems); i++) {
-		const preview = tasks[i].length > maxLength ? `${tasks[i].slice(0, maxLength)}...` : tasks[i];
-		const index = options.numbered ? `${themeFg("muted", `${i + 1}.`)} ` : "";
-		text += `\n  ${index}${themeFg("dim", preview)}`;
-	}
-	if (tasks.length > maxItems) text += `\n  ${themeFg("muted", `... +${tasks.length - maxItems} more`)}`;
-	return text;
-}
-
-function appendTaskOutputSection(
-	container: Container,
-	displayItems: DisplayItem[],
-	finalOutput: string,
-	mdTheme: ReturnType<typeof getMarkdownTheme>,
-	themeFg: (color: any, text: string) => string,
-): void {
-	if (displayItems.length === 0 && !finalOutput) {
-		container.addChild(new Text(themeFg("muted", "(no output)"), 0, 0));
-		return;
-	}
-	for (const item of displayItems) {
-		if (item.type === "toolCall") {
-			container.addChild(new Text(themeFg("muted", "→ ") + formatToolCall(item.name, item.args, themeFg), 0, 0));
-			continue;
-		}
-		if (item.type === "toolResult") {
-			const icon = item.isError ? themeFg("error", "✗") : themeFg("success", "✓");
-			container.addChild(new Text(`${themeFg("muted", "↳ ")}${icon} ${themeFg("muted", `${item.name} result`)}`, 0, 0));
-			if (item.text) {
-				container.addChild(new Text(themeFg(item.isError ? "error" : "dim", item.text), 0, 0));
-			}
-			if (item.diff) {
-				container.addChild(new Text(themeFg("muted", "diff:"), 0, 0));
-				const diffBody = truncateOutput(item.diff).trim();
-				container.addChild(new Markdown(`\`\`\`diff\n${diffBody}\n\`\`\``, 0, 0, mdTheme));
-			}
-		}
-	}
-	if (finalOutput) {
-		container.addChild(new Spacer(1));
-		container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
-	}
-}
-
-function shortenHomePath(filePath: string): string {
-	const home = os.homedir();
-	return filePath.startsWith(home) ? `~${filePath.slice(home.length)}` : filePath;
-}
-
-function formatToolCall(
-	toolName: string,
-	args: Record<string, unknown>,
-	themeFg: (color: any, text: string) => string,
-): string {
-	switch (toolName) {
-		case "bash": {
-			const command = (args.command as string) || "...";
-			const preview = command.length > 60 ? `${command.slice(0, 60)}...` : command;
-			return themeFg("muted", "$ ") + themeFg("toolOutput", preview);
-		}
-		case "read": {
-			const rawPath = (args.file_path || args.path || "...") as string;
-			const filePath = shortenHomePath(rawPath);
-			const offset = args.offset as number | undefined;
-			const limit = args.limit as number | undefined;
-			let text = themeFg("accent", filePath);
-			if (offset !== undefined || limit !== undefined) {
-				const startLine = offset ?? 1;
-				const endLine = limit !== undefined ? startLine + limit - 1 : "";
-				text += themeFg("warning", `:${startLine}${endLine ? `-${endLine}` : ""}`);
-			}
-			return themeFg("muted", "read ") + text;
-		}
-		case "write": {
-			const rawPath = (args.file_path || args.path || "...") as string;
-			const filePath = shortenHomePath(rawPath);
-			const content = (args.content || "") as string;
-			const lines = content.split("\n").length;
-			let text = themeFg("muted", "write ") + themeFg("accent", filePath);
-			if (lines > 1) text += themeFg("dim", ` (${lines} lines)`);
-			return text;
-		}
-		case "edit": {
-			const rawPath = (args.file_path || args.path || "...") as string;
-			return themeFg("muted", "edit ") + themeFg("accent", shortenHomePath(rawPath));
-		}
-		case "ls": {
-			const rawPath = (args.path || ".") as string;
-			return themeFg("muted", "ls ") + themeFg("accent", shortenHomePath(rawPath));
-		}
-		case "find": {
-			const pattern = (args.pattern || "*") as string;
-			const rawPath = (args.path || ".") as string;
-			return themeFg("muted", "find ") + themeFg("accent", pattern) + themeFg("dim", ` in ${shortenHomePath(rawPath)}`);
-		}
-		case "grep": {
-			const pattern = (args.pattern || "") as string;
-			const rawPath = (args.path || ".") as string;
-			return (
-				themeFg("muted", "grep ") +
-				themeFg("accent", `/${pattern}/`) +
-				themeFg("dim", ` in ${shortenHomePath(rawPath)}`)
-			);
-		}
-		default: {
-			const argsStr = JSON.stringify(args);
-			const preview = argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr;
-			return themeFg("accent", toolName) + themeFg("dim", ` ${preview}`);
-		}
-	}
-}
-
-interface UsageStats {
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	cost: number;
-	contextTokens: number;
-	turns: number;
-}
-
 interface TaskStepConfig {
 	agent?: string;
 	profile?: string;
@@ -467,12 +233,6 @@ interface TaskToolParams {
 
 interface PreparedTaskToolParams extends TaskToolParams {
 	steps: TaskStepConfig[];
-}
-
-interface TaskInlineNotice {
-	level: TaskExtensionUiNotifyType;
-	lines: string[];
-	updatedAt: number;
 }
 
 interface SingleResult {
@@ -546,165 +306,6 @@ interface TaskRpcUiContext {
 	ui?: TaskRpcUiMethods;
 	sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined };
 	refreshTaskUiChrome?: () => void;
-}
-
-function getFinalOutput(messages: Message[]): string {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const msg = messages[i];
-		if (msg.role === "assistant") {
-			const textParts = msg.content
-				.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
-				.map((part) => part.text)
-				.filter((text) => text.length > 0);
-			if (textParts.length > 0) return textParts.join("\n");
-		}
-	}
-	return "";
-}
-
-function getTaskResultOutput(result: SingleResult): string {
-	const finalOutput = getFinalOutput(result.messages).trim();
-	if (finalOutput) return finalOutput;
-	const errorMessage = result.errorMessage?.trim();
-	if (errorMessage) return errorMessage;
-	const stderr = result.stderr.trim();
-	if (stderr) return stderr;
-	return "";
-}
-
-function formatTaskResultSection(result: SingleResult): string {
-	const status = result.exitCode === -1 ? "running" : result.exitCode === 0 ? "completed" : "failed";
-	const step = result.step !== undefined ? `Step ${result.step}` : "Task";
-	const lines = [`### ${step} — ${result.agent} (${status})`];
-	if (result.task) lines.push(`Task: ${createTaskPreview(result.task, 240)}`);
-	const output = getTaskResultOutput(result);
-	lines.push(output ? truncateOutput(output) : "(no output)");
-	return lines.join("\n");
-}
-
-function formatParallelResults(results: SingleResult[]): string {
-	const successCount = results.filter((result) => result.exitCode === 0).length;
-	const sections = results.map(formatTaskResultSection);
-	return [`Parallel: ${successCount}/${results.length} succeeded`, ...sections].join("\n\n");
-}
-
-function formatChainResults(results: SingleResult[]): string {
-	if (results.length === 0) return "Chain: 0/0 succeeded";
-	const successCount = results.filter((result) => result.exitCode === 0).length;
-	const sections = results.map(formatTaskResultSection);
-	return [`Chain: ${successCount}/${results.length} succeeded`, ...sections].join("\n\n");
-}
-
-type DisplayItem =
-	| { type: "text"; text: string }
-	| { type: "toolCall"; name: string; args: Record<string, any> }
-	| { type: "toolResult"; name: string; text?: string; diff?: string; isError: boolean };
-
-function normalizeTaskDisplayToolName(toolName: string): string {
-	const trimmed = toolName.trim().toLowerCase();
-	if (!trimmed) return "";
-	const segments = trimmed.split(".").filter(Boolean);
-	return segments.length > 0 ? segments[segments.length - 1] : trimmed;
-}
-
-function shouldDisplayTaskTool(toolName: string): boolean {
-	return normalizeTaskDisplayToolName(toolName) === "edit";
-}
-
-function extractMessageTextContent(message: Message): string | undefined {
-	const content = (message as { content?: unknown }).content;
-	if (typeof content === "string") {
-		const text = content.trim();
-		return text || undefined;
-	}
-	if (!Array.isArray(content)) return undefined;
-	const text = content
-		.flatMap((part) => {
-			if (typeof part === "string") return [part];
-			if (!isRecord(part)) return [];
-			if (typeof part.text === "string") return [part.text];
-			return [];
-		})
-		.join("\n")
-		.trim();
-	return text || undefined;
-}
-
-function extractToolResultDiff(message: Message): string | undefined {
-	const details = (message as { details?: unknown }).details;
-	if (!isRecord(details) || typeof details.diff !== "string") return undefined;
-	const diff = details.diff.trim();
-	return diff || undefined;
-}
-
-function getDisplayItems(messages: Message[]): DisplayItem[] {
-	const items: DisplayItem[] = [];
-	for (const msg of messages) {
-		if (msg.role === "assistant") {
-			for (const part of msg.content) {
-				if (part.type === "text") {
-					items.push({ type: "text", text: part.text });
-					continue;
-				}
-				if (part.type === "toolCall" && shouldDisplayTaskTool(part.name)) {
-					items.push({ type: "toolCall", name: part.name, args: part.arguments });
-				}
-			}
-			continue;
-		}
-		if (msg.role === "toolResult") {
-			const toolName = (msg as { toolName?: unknown }).toolName;
-			const name = typeof toolName === "string" && toolName.trim() ? toolName : "tool";
-			if (!shouldDisplayTaskTool(name)) continue;
-			const isError = (msg as { isError?: unknown }).isError === true;
-			const text = extractMessageTextContent(msg);
-			const diff = extractToolResultDiff(msg);
-			items.push({
-				type: "toolResult",
-				name,
-				text,
-				diff,
-				isError,
-			});
-		}
-	}
-	return items;
-}
-
-function createTaskPreview(task: string, maxLength = 120): string {
-	const compact = task.replace(/\s+/g, " ").trim();
-	if (!compact) return "(empty task)";
-	return compact.length > maxLength ? `${compact.slice(0, maxLength - 3)}...` : compact;
-}
-
-function addTaskInlineNotice(result: SingleResult, message: string, level: TaskExtensionUiNotifyType): void {
-	const lines = message
-		.split(/\r?\n/)
-		.map((line) => line.trim())
-		.filter(Boolean);
-	if (lines.length === 0) return;
-	const nextNotice: TaskInlineNotice = { level, lines, updatedAt: Date.now() };
-	const existing = result.uiNotices ?? [];
-	const deduped = existing.filter((notice) => notice.lines.join("\n") !== nextNotice.lines.join("\n") || notice.level !== nextNotice.level);
-	result.uiNotices = [...deduped, nextNotice].slice(-5);
-}
-
-function buildTaskInlineNoticeLines(notices: TaskInlineNotice[]): string[] {
-	const lines: string[] = [];
-	for (const notice of notices) {
-		const icon = notice.level === "error" ? "✗" : notice.level === "warning" ? "!" : "ℹ";
-		const [firstLine, ...rest] = notice.lines;
-		if (!firstLine) continue;
-		lines.push(`${icon} ${firstLine}`);
-		for (const line of rest) lines.push(`  ${line}`);
-	}
-	return lines;
-}
-
-function formatTaskInlineNoticeLines(notices: TaskInlineNotice[], themeFg: (color: any, text: string) => string): string {
-	return buildTaskInlineNoticeLines(notices)
-		.map((line) => themeFg("muted", line))
-		.join("\n");
 }
 
 function sanitizeTaskUiKeySegment(value: string | undefined, fallback: string): string {
@@ -1496,6 +1097,10 @@ function isTaskExecutionMode(value: unknown): value is TaskExecutionMode {
 	return value === "single" || value === "parallel" || value === "chain";
 }
 
+function isContextMode(value: unknown): value is ContextMode {
+	return value === "fresh" || value === "fork";
+}
+
 type TaskStepStringKey = "agent" | "profile" | "effort" | "cwd" | "model" | "prompt";
 
 function copyLegacyStringField(record: Record<string, unknown>, step: TaskStepConfig, key: TaskStepStringKey): void {
@@ -1512,7 +1117,7 @@ function buildLegacySingleStep(record: Record<string, unknown>): TaskStepConfig 
 	if (Array.isArray(record.skills) && record.skills.every((value) => typeof value === "string")) {
 		step.skills = record.skills;
 	}
-	if (isTaskExecutionMode(record.context)) step.context = record.context;
+	if (isContextMode(record.context)) step.context = record.context;
 	return step;
 }
 
@@ -4590,7 +4195,6 @@ export default function (pi: ExtensionAPI) {
 				return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
 			}
 
-			const mdTheme = getMarkdownTheme();
 
 			const renderDisplayItems = (items: DisplayItem[], limit?: number) => {
 				const toShow = limit ? items.slice(-limit) : items;
@@ -4646,7 +4250,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					container.addChild(new Spacer(1));
 					container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
-					appendTaskOutputSection(container, displayItems, finalOutput, mdTheme, theme.fg.bind(theme));
+					appendTaskOutputSection(container, displayItems, finalOutput, theme.fg.bind(theme));
 					const usageStr = formatUsageStats(r.usage, r.model);
 					if (usageStr) {
 						container.addChild(new Spacer(1));
@@ -4726,7 +4330,7 @@ export default function (pi: ExtensionAPI) {
 						if ((r.uiNotices?.length ?? 0) > 0) {
 							container.addChild(new Text(formatTaskInlineNoticeLines(r.uiNotices ?? [], theme.fg.bind(theme)), 0, 0));
 						}
-						appendTaskOutputSection(container, displayItems, finalOutput, mdTheme, theme.fg.bind(theme));
+						appendTaskOutputSection(container, displayItems, finalOutput, theme.fg.bind(theme));
 						const stepUsage = formatUsageStats(r.usage, r.model);
 						if (stepUsage) container.addChild(new Text(theme.fg("dim", stepUsage), 0, 0));
 					}
@@ -4805,7 +4409,7 @@ export default function (pi: ExtensionAPI) {
 						if ((r.uiNotices?.length ?? 0) > 0) {
 							container.addChild(new Text(formatTaskInlineNoticeLines(r.uiNotices ?? [], theme.fg.bind(theme)), 0, 0));
 						}
-						appendTaskOutputSection(container, displayItems, finalOutput, mdTheme, theme.fg.bind(theme));
+						appendTaskOutputSection(container, displayItems, finalOutput, theme.fg.bind(theme));
 						const taskUsage = formatUsageStats(r.usage, r.model);
 						if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
 					}
@@ -4861,8 +4465,11 @@ export const __test__ = {
 	formatTaskRunList,
 	formatParallelResults,
 	formatChainResults,
+	formatTaskHeader,
+	formatToolCall,
 	getDisplayItems,
 	getFinalOutput,
+	shouldDisplayTaskInlineNotice,
 	buildTaskWidgetLines,
 	normalizeChildSessionSnapshot: (data: unknown) => normalizeChildSessionSnapshot(data, TASK_CHILD_SESSION_METADATA_VERSION),
 	parseTaskTerminalBackendPreference,

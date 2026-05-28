@@ -798,7 +798,6 @@ describe("tasks extension RPC UI relay", () => {
 		__test__.addTaskInlineNotice(result, "Parent folder approved for this session:\n/private/tmp/pi-docs", "info");
 
 		expect(__test__.buildTaskInlineNoticeLines(result.uiNotices ?? [])).toEqual([
-			"ℹ Bash sandbox active (mode=workspace-write)",
 			"ℹ Parent folder approved for this session:",
 			"  /private/tmp/pi-docs",
 		]);
@@ -863,12 +862,13 @@ describe("task result formatting", () => {
 		expect(output).toBe("part one\npart two");
 	});
 
-	it("shows only edit tool activity in caller-visible display items", () => {
+	it("shows all tool calls but only edit and error tool results", () => {
 		const items = __test__.getDisplayItems([
 			{
 				role: "assistant",
 				content: [
 					{ type: "toolCall", name: "read", arguments: { path: "README.md" } },
+					{ type: "toolCall", name: "grep", arguments: { pattern: "TODO", path: "src" } },
 					{ type: "toolCall", name: "bash", arguments: { command: "ls -la" } },
 					{ type: "toolCall", name: "edit", arguments: { path: "README.md" } },
 				],
@@ -883,14 +883,25 @@ describe("task result formatting", () => {
 			},
 			{
 				role: "toolResult",
+				toolName: "grep",
+				content: [{ type: "text", text: "grep failed" }],
+				isError: true,
+			},
+			{
+				role: "toolResult",
 				toolName: "edit",
 				content: [{ type: "text", text: "applied" }],
 				details: { diff: "@@ -1 +1 @@\n-old\n+new" },
 			},
 		] as any);
 
-		expect(items.filter((item: any) => item.type === "toolCall").map((item: any) => item.name)).toEqual(["edit"]);
-		expect(items.filter((item: any) => item.type === "toolResult").map((item: any) => item.name)).toEqual(["edit"]);
+		expect(items.filter((item: any) => item.type === "toolCall").map((item: any) => item.name)).toEqual([
+			"read",
+			"grep",
+			"bash",
+			"edit",
+		]);
+		expect(items.filter((item: any) => item.type === "toolResult").map((item: any) => item.name)).toEqual(["grep", "edit"]);
 	});
 
 	it("accepts namespaced edit tool names", () => {
@@ -909,6 +920,43 @@ describe("task result formatting", () => {
 
 		expect(items.filter((item: any) => item.type === "toolCall").map((item: any) => item.name)).toEqual(["functions.edit"]);
 		expect(items.filter((item: any) => item.type === "toolResult").map((item: any) => item.name)).toEqual(["functions.edit"]);
+	});
+
+	it("formats namespaced built-in tool calls compactly", () => {
+		const fg = (_color: string, value: string) => value;
+
+		expect(__test__.formatToolCall("functions.read", { path: "README.md" }, fg)).toBe("read: README.md");
+		expect(__test__.formatToolCall("functions.grep", { pattern: "TODO", path: "src" }, fg)).toBe("grep: /TODO/ in src");
+	});
+
+	it("omits unknown fresh task metadata from headers", () => {
+		const theme = {
+			fg: (_color: string, value: string) => value,
+			bold: (value: string) => value,
+		};
+
+		expect(
+			__test__.formatTaskHeader(
+				{
+					agent: "generic",
+					taskResult: { agentSource: "unknown", sessionMode: "fresh", profile: "read-only" },
+				},
+				theme,
+			),
+		).toBe("generic · profile: read-only");
+	});
+
+	it("filters child runtime setup notices from inline task notices", () => {
+		const result: any = { uiNotices: [] };
+
+		expect(__test__.shouldDisplayTaskInlineNotice("Shell parser active: tree-sitter")).toBe(false);
+		expect(__test__.shouldDisplayTaskInlineNotice("Bash sandbox active (mode=workspace-write)")).toBe(false);
+		expect(__test__.shouldDisplayTaskInlineNotice("Running tests")).toBe(true);
+
+		__test__.addTaskInlineNotice(result, "Shell parser active: tree-sitter\nRunning tests", "info");
+
+		expect(result.uiNotices).toHaveLength(1);
+		expect(result.uiNotices[0].lines).toEqual(["Running tests"]);
 	});
 });
 
