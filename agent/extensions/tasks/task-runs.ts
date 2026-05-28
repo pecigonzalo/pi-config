@@ -139,7 +139,16 @@ export function resolveTaskOriginForBranch(
 ): TaskOriginSnapshot | undefined {
 	if (entries.length === 0) return undefined;
 	const lastIndex = entries.length - 1;
-	const targetIndex = leafId ? entries.findLastIndex((entry) => entry.id === leafId) : lastIndex;
+	let targetIndex = lastIndex;
+	if (leafId) {
+		targetIndex = -1;
+		for (let index = lastIndex; index >= 0; index--) {
+			if (entries[index]?.id === leafId) {
+				targetIndex = index;
+				break;
+			}
+		}
+	}
 	let scanIndex = targetIndex >= 0 ? targetIndex : lastIndex;
 	if (scanIndex < 0) return undefined;
 
@@ -149,6 +158,7 @@ export function resolveTaskOriginForBranch(
 
 	for (let index = scanIndex; index >= 0; index--) {
 		const entry = entries[index];
+		if (!entry) continue;
 		if (!originEntryId && typeof entry.id === "string") originEntryId = entry.id;
 		if (entry.type !== "message" || !isRecord(entry.message)) continue;
 		if (entry.message.role !== "user") continue;
@@ -230,8 +240,10 @@ export function collectTaskMetadataRecordsFromEntries(
 	const records: TaskChildSessionRecord[] = [];
 	for (let index = 0; index < entries.length; index++) {
 		const entry = entries[index];
-		if (entry.type !== "custom" || entry.customType !== customType) continue;
-		const snapshot = normalizeChildSessionSnapshot(entry.data, metadataVersion);
+		if (!entry || (entry as { type?: unknown }).type !== "custom") continue;
+		const customEntry = entry as { customType?: unknown; data?: unknown };
+		if (customEntry.customType !== customType) continue;
+		const snapshot = normalizeChildSessionSnapshot(customEntry.data, metadataVersion);
 		if (!snapshot) continue;
 		records.push({ snapshot, sourceOrder: index, sourceSessionFile });
 	}

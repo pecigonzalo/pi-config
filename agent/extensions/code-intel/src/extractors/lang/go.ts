@@ -20,13 +20,15 @@ export function extractGoInterfaceMembers(lines: string[]): GoInterfaceMemberMat
 	const out: GoInterfaceMemberMatch[] = [];
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
+		if (line === undefined) continue;
 		const start = line.trim().match(/^type\s+([A-Za-z_][A-Za-z0-9_]*)\s+interface\s*\{/);
-		if (!start) continue;
-		const container = start[1];
+		const container = start?.[1];
+		if (!start || container === undefined) continue;
 
 		let depth = braceDelta(line);
 		for (let j = i + 1; j < lines.length; j++) {
 			const current = lines[j];
+			if (current === undefined) continue;
 			const trimmed = current.trim();
 			depth += braceDelta(current);
 
@@ -39,8 +41,8 @@ export function extractGoInterfaceMembers(lines: string[]): GoInterfaceMemberMat
 				depth >= 1
 			) {
 				const member = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
-				if (member) {
-					const name = member[1];
+				const name = member?.[1];
+				if (name !== undefined) {
 					out.push({
 						name,
 						line: j,

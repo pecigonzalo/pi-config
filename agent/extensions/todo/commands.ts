@@ -7,7 +7,7 @@ export type ParsedTodosRoute =
 export function parseTodosCommandRoute(args: string): ParsedTodosRoute {
 	const trimmed = args.trim();
 	if (!trimmed) return { kind: "list", listArgs: "" };
-	const [head, ...rest] = trimmed.split(/\s+/);
+	const [head = "", ...rest] = trimmed.split(/\s+/);
 	if (head.toLowerCase() === "widget") {
 		return { kind: "widget", widgetArgs: rest.join(" ") };
 	}

@@ -156,7 +156,7 @@ function candidateFromMessageEntry(
 	idFactory: (text: string, evidence: LearningEvidence) => string,
 ): LearningCandidate | undefined {
 	const entry = messageEntries[index];
-	if (entry.message?.role !== "user") return undefined;
+	if (!entry || entry.message?.role !== "user") return undefined;
 
 	const text = extractText(entry.message.content);
 	const candidateText = summarizeCandidateText(text);
@@ -205,7 +205,7 @@ export function extractCandidatesFromEntries(entries: unknown[], sessionFile: st
 
 	for (let index = 0; index < messageEntries.length; index++) {
 		const entry = messageEntries[index];
-		if (entry.message?.role !== "user") continue;
+		if (!entry || entry.message?.role !== "user") continue;
 
 		const text = extractText(entry.message.content);
 		if (!looksLikeCorrectionOrAdvice(text)) continue;
@@ -230,11 +230,11 @@ export function extractCandidatesFromEntries(entries: unknown[], sessionFile: st
 export function listUserMessageChoices(entries: unknown[]): Array<{ id: string; label: string; text: string }> {
 	const messageEntries = entries.filter((entry): entry is MessageEntry => !!entry && typeof entry === "object" && (entry as MessageEntry).type === "message");
 	return messageEntries
-		.filter((entry) => entry.message?.role === "user" && entry.id)
+		.filter((entry): entry is MessageEntry & { id: string } => entry.message?.role === "user" && typeof entry.id === "string")
 		.map((entry, index) => {
 			const text = summarizeCandidateText(extractText(entry.message?.content));
 			const label = `${String(index + 1).padStart(2, "0")} · ${entry.timestamp ?? "unknown time"} · ${text}`;
-			return { id: entry.id!, label, text };
+			return { id: entry.id, label, text };
 		})
 		.filter((choice) => choice.text.length > 0);
 }

@@ -135,7 +135,9 @@ describe("store extension core", () => {
 	});
 
 	test("storedelete removes duplicates from YAML and legacy JSON", async () => {
-		await writeYamlItem(tmpDir, legacyItems[0]);
+		const firstLegacyItem = legacyItems[0];
+		if (!firstLegacyItem) throw new Error("Missing legacy fixture item");
+		await writeYamlItem(tmpDir, firstLegacyItem);
 		await writeLegacyItems(tmpDir, legacyItems);
 
 		const result = await storeDelete(tmpDir, { id: "aaa-111" });

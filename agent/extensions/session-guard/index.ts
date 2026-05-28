@@ -181,7 +181,11 @@ function parseJsonc(text: string): unknown {
 
     if (ch === ",") {
       let j = i + 1;
-      while (j < noComments.length && /\s/.test(noComments[j])) j++;
+      while (j < noComments.length) {
+        const nextChar = noComments[j];
+        if (nextChar === undefined || !/\s/.test(nextChar)) break;
+        j++;
+      }
       if (
         j < noComments.length &&
         (noComments[j] === "}" || noComments[j] === "]")

@@ -29,6 +29,16 @@ import type { Rule } from "./shared";
 
 const execFile = promisify(execFileCallback);
 
+type ParsedBashCommand = Awaited<ReturnType<typeof parseBashCommand>>;
+
+type ParsedBashSubcommand = ParsedBashCommand["commands"][number];
+
+function commandAt(parsed: ParsedBashCommand, index: number): ParsedBashSubcommand {
+	const command = parsed.commands[index];
+	if (!command) throw new Error(`Expected parsed command at index ${index}`);
+	return command;
+}
+
 let configModule: typeof import("./config");
 
 beforeAll(async () => {
@@ -902,30 +912,30 @@ describe("tree-sitter shell parsing", () => {
 		const parsed = await parseBashCommand("git status");
 		expect(parsed.isComplex).toBe(false);
 		expect(parsed.commands).toHaveLength(1);
-		expect(parsed.commands[0].name).toBe("git");
-		expect(parsed.commands[0].tokens).toEqual(["git", "status"]);
-		expect(parsed.commands[0].alwaysPattern).toBe("git status *");
+		expect(commandAt(parsed, 0).name).toBe("git");
+		expect(commandAt(parsed, 0).tokens).toEqual(["git", "status"]);
+		expect(commandAt(parsed, 0).alwaysPattern).toBe("git status *");
 	});
 
 	it("separates redirections from commands", async () => {
 		const parsed = await parseBashCommand("bun test 2>&1");
 		expect(parsed.commands).toHaveLength(1);
-		expect(parsed.commands[0].name).toBe("bun");
-		expect(parsed.commands[0].tokens).toEqual(["bun", "test"]);
-		expect(parsed.commands[0].command).toBe("bun test");
+		expect(commandAt(parsed, 0).name).toBe("bun");
+		expect(commandAt(parsed, 0).tokens).toEqual(["bun", "test"]);
+		expect(commandAt(parsed, 0).command).toBe("bun test");
 		// source includes the redirect context
-		expect(parsed.commands[0].source).toBe("bun test 2>&1");
+		expect(commandAt(parsed, 0).source).toBe("bun test 2>&1");
 	});
 
 	it("splits compound commands with redirects", async () => {
 		const parsed = await parseBashCommand("cd /some/path && bun test 2>&1");
 		expect(parsed.isComplex).toBe(false);
 		expect(parsed.commands).toHaveLength(2);
-		expect(parsed.commands[0].name).toBe("cd");
-		expect(parsed.commands[0].tokens).toEqual(["cd", "/some/path"]);
-		expect(parsed.commands[1].name).toBe("bun");
-		expect(parsed.commands[1].tokens).toEqual(["bun", "test"]);
-		expect(parsed.commands[1].alwaysPattern).toBe("bun test *");
+		expect(commandAt(parsed, 0).name).toBe("cd");
+		expect(commandAt(parsed, 0).tokens).toEqual(["cd", "/some/path"]);
+		expect(commandAt(parsed, 1).name).toBe("bun");
+		expect(commandAt(parsed, 1).tokens).toEqual(["bun", "test"]);
+		expect(commandAt(parsed, 1).alwaysPattern).toBe("bun test *");
 	});
 
 	it("detects complex constructs", async () => {
@@ -942,32 +952,32 @@ describe("tree-sitter shell parsing", () => {
 	it("handles pipelines", async () => {
 		const parsed = await parseBashCommand("echo hello | grep hello");
 		expect(parsed.commands).toHaveLength(2);
-		expect(parsed.commands[0].name).toBe("echo");
-		expect(parsed.commands[1].name).toBe("grep");
+		expect(commandAt(parsed, 0).name).toBe("echo");
+		expect(commandAt(parsed, 1).name).toBe("grep");
 	});
 
 	it("handles multi-command chains", async () => {
 		const parsed = await parseBashCommand('cd /path && git add . && git commit -m "msg"');
 		expect(parsed.commands).toHaveLength(3);
-		expect(parsed.commands[0].alwaysPattern).toBe("cd *");
-		expect(parsed.commands[1].alwaysPattern).toBe("git add *");
-		expect(parsed.commands[2].alwaysPattern).toBe("git commit *");
+		expect(commandAt(parsed, 0).alwaysPattern).toBe("cd *");
+		expect(commandAt(parsed, 1).alwaysPattern).toBe("git add *");
+		expect(commandAt(parsed, 2).alwaysPattern).toBe("git commit *");
 	});
 
 	it("skips variable assignments in token extraction", async () => {
 		const parsed = await parseBashCommand("FOO=bar bun test");
 		expect(parsed.commands).toHaveLength(1);
-		expect(parsed.commands[0].name).toBe("bun");
-		expect(parsed.commands[0].tokens).toEqual(["bun", "test"]);
+		expect(commandAt(parsed, 0).name).toBe("bun");
+		expect(commandAt(parsed, 0).tokens).toEqual(["bun", "test"]);
 	});
 
 	it("handles output redirection", async () => {
 		const parsed = await parseBashCommand("cat file.txt > output.txt");
 		expect(parsed.commands).toHaveLength(1);
-		expect(parsed.commands[0].name).toBe("cat");
-		expect(parsed.commands[0].tokens).toEqual(["cat", "file.txt"]);
+		expect(commandAt(parsed, 0).name).toBe("cat");
+		expect(commandAt(parsed, 0).tokens).toEqual(["cat", "file.txt"]);
 		// source includes redirect for display
-		expect(parsed.commands[0].source).toBe("cat file.txt > output.txt");
+		expect(commandAt(parsed, 0).source).toBe("cat file.txt > output.txt");
 	});
 });
 

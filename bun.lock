@@ -32,6 +32,13 @@
         "zod": "^4.4.3",
       },
     },
+    "agent/extensions/handoff": {
+      "name": "handoff",
+      "dependencies": {
+        "@earendil-works/pi-ai": "0.75.1",
+        "@earendil-works/pi-coding-agent": "0.75.1",
+      },
+    },
     "agent/extensions/learning-review": {
       "name": "learning-review",
       "dependencies": {
@@ -48,6 +55,13 @@
         "vscode-languageserver-protocol": "^3.17.5",
       },
     },
+    "agent/extensions/performance": {
+      "name": "performance",
+      "dependencies": {
+        "@earendil-works/pi-coding-agent": "0.75.1",
+        "@earendil-works/pi-tui": "0.75.1",
+      },
+    },
     "agent/extensions/permissions": {
       "name": "permissions",
       "dependencies": {
@@ -62,6 +76,14 @@
       "name": "session-reminder",
       "dependencies": {
         "@earendil-works/pi-coding-agent": "0.75.1",
+      },
+    },
+    "agent/extensions/skill": {
+      "name": "skill",
+      "dependencies": {
+        "@earendil-works/pi-coding-agent": "0.75.1",
+        "@earendil-works/pi-tui": "0.75.1",
+        "typebox": "^1.1.24",
       },
     },
     "agent/extensions/skill-preservation": {
@@ -129,6 +151,9 @@
         "@earendil-works/pi-tui": "0.75.1",
         "turndown": "^7.2.0",
         "typebox": "^1.1.24",
+      },
+      "devDependencies": {
+        "@types/turndown": "^5.0.6",
       },
     },
   },
@@ -367,6 +392,8 @@
 
     "@types/retry": ["@types/retry@0.12.0", "", {}, "sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA=="],
 
+    "@types/turndown": ["@types/turndown@5.0.6", "", {}, "sha512-ru00MoyeeouE5BX4gRL+6m/BsDfbRayOskWqUvh7CLGW+UXxHQItqALa38kKnOiZPqJrtzJUgAC2+F0rL1S4Pg=="],
+
     "agent-base": ["agent-base@7.1.4", "", {}, "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="],
 
     "balanced-match": ["balanced-match@4.0.4", "", {}, "sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA=="],
@@ -424,6 +451,8 @@
     "google-logging-utils": ["google-logging-utils@1.1.3", "", {}, "sha512-eAmLkjDjAFCVXg7A1unxHsLf961m6y17QFqXqAXGj/gVkKFrEICfStRfwUlGNfeCEjNRa32JEWOUTlYXPyyKvA=="],
 
     "graceful-fs": ["graceful-fs@4.2.11", "", {}, "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ=="],
+
+    "handoff": ["handoff@workspace:agent/extensions/handoff"],
 
     "highlight.js": ["highlight.js@10.7.3", "", {}, "sha512-tzcUFauisWKNHaRkN4Wjl/ZA07gENAjFl3J/c480dprkGTg5EQstgaNFqBfUqCq54kZRIEcreTsAgF/m2quD7A=="],
 
@@ -503,6 +532,8 @@
 
     "path-scurry": ["path-scurry@2.0.2", "", { "dependencies": { "lru-cache": "^11.0.0", "minipass": "^7.1.2" } }, "sha512-3O/iVVsJAPsOnpwWIeD+d6z/7PmqApyQePUtCndjatj/9I5LylHvt5qluFaBT3I5h3r1ejfR056c+FCv+NnNXg=="],
 
+    "performance": ["performance@workspace:agent/extensions/performance"],
+
     "permissions": ["permissions@workspace:agent/extensions/permissions"],
 
     "proper-lockfile": ["proper-lockfile@4.1.2", "", { "dependencies": { "graceful-fs": "^4.2.4", "retry": "^0.12.0", "signal-exit": "^3.0.2" } }, "sha512-TjNPblN4BwAWMXU8s9AEz4JmQxnD1NNL7bNOY/AKUzyamc379FWASUhc/K1pL2noVb+XmZKLL68cjzLsiOAMaA=="],
@@ -518,6 +549,8 @@
     "shell-quote": ["shell-quote@1.8.3", "", {}, "sha512-ObmnIF4hXNg1BqhnHmgbDETF8dLPCggZWBjkQfhZpbszZnYur5DUljTcCHii5LC3J5E0yeO/1LIMyH+UvHQgyw=="],
 
     "signal-exit": ["signal-exit@3.0.7", "", {}, "sha512-wnD2ZE+l+SPC/uoS0vXeE9L1+0wuaMqKlfz9AMUo38JsyLSBWSFcHR1Rri62LZc12vLr1gb3jl7iwQhgwpAbGQ=="],
+
+    "skill": ["skill@workspace:agent/extensions/skill"],
 
     "skill-preservation": ["skill-preservation@workspace:agent/extensions/skill-preservation"],
 

@@ -1,0 +1,11 @@
+{
+  "name": "handoff",
+  "private": true,
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.75.1",
+    "@earendil-works/pi-coding-agent": "0.75.1"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

@@ -22,12 +22,13 @@ describe("learning candidate extraction", () => {
 
 		const candidates = extractCandidatesFromEntries(entries, "/tmp/session.jsonl", "/tmp/project", 10);
 		expect(candidates).toHaveLength(1);
-		expect(candidates[0].evidence[0].entryId).toBe("b");
-		expect(candidates[0].evidence[0].previousUserText).toContain("explore the API");
-		expect(candidates[0].evidence[0].previousAssistantText).toContain("I used python");
-		expect(candidates[0].evidence[0].nextAssistantText).toContain("should have used typescript");
-		expect(candidates[0].evidence[0].toolCalls).toEqual(["bash"]);
-		expect(candidates[0].evidence[0].contextEntryIds).toEqual(["u1", "a", "b", "c"]);
+		const evidence = candidates[0]?.evidence[0];
+		expect(evidence?.entryId).toBe("b");
+		expect(evidence?.previousUserText).toContain("explore the API");
+		expect(evidence?.previousAssistantText).toContain("I used python");
+		expect(evidence?.nextAssistantText).toContain("should have used typescript");
+		expect(evidence?.toolCalls).toEqual(["bash"]);
+		expect(evidence?.contextEntryIds).toEqual(["u1", "a", "b", "c"]);
 	});
 
 	test("lists user messages and creates explicit candidates", () => {
@@ -38,12 +39,12 @@ describe("learning candidate extraction", () => {
 
 		const choices = listUserMessageChoices(entries);
 		expect(choices).toHaveLength(1);
-		expect(choices[0].id).toBe("u1");
-		expect(choices[0].label).toContain("Please remember");
+		expect(choices[0]?.id).toBe("u1");
+		expect(choices[0]?.label).toContain("Please remember");
 
 		const candidate = extractExplicitCandidateFromEntryId(entries, "u1", "/tmp/session.jsonl", "/tmp/project");
 		expect(candidate?.reason).toContain("explicitly selected");
 		expect(candidate?.confidence).toBe(0.9);
-		expect(candidate?.evidence[0].nextAssistantText).toContain("Acknowledged");
+		expect(candidate?.evidence[0]?.nextAssistantText).toContain("Acknowledged");
 	});
 });

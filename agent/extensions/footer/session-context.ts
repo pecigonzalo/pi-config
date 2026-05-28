@@ -44,7 +44,7 @@ function rainbow(text: string): string {
   let colorIndex = 0;
 
   for (const char of text) {
-    rendered += char === " " || char === ":" || char === "." || char === "/" ? char : hexFg(rainbowColors[colorIndex++ % rainbowColors.length], char);
+    rendered += char === " " || char === ":" || char === "." || char === "/" ? char : hexFg(rainbowColors[colorIndex++ % rainbowColors.length] ?? modelColor, char);
   }
 
   return rendered;

@@ -521,7 +521,7 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 		while (true) {
 			const current = nextIndex++;
 			if (current >= items.length) return;
-			results[current] = await fn(items[current], current);
+			results[current] = await fn(items[current] as TIn, current);
 		}
 	});
 	await Promise.all(workers);
@@ -906,8 +906,10 @@ function parseAgentModelSpec(
 function getPersistedMainAgentState(entries: SessionEntry[]): PersistedMainAgentState {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		if (entry.type !== "custom" || entry.customType !== MAIN_SESSION_AGENT_CUSTOM_TYPE) continue;
-		const data = (entry.data ?? {}) as Record<string, unknown>;
+		if (!entry || (entry as { type?: unknown }).type !== "custom") continue;
+		const customEntry = entry as { customType?: unknown; data?: unknown };
+		if (customEntry.customType !== MAIN_SESSION_AGENT_CUSTOM_TYPE) continue;
+		const data = (customEntry.data ?? {}) as Record<string, unknown>;
 		return {
 			found: true,
 			agent: typeof data.agent === "string" ? data.agent : undefined,
@@ -1400,6 +1402,7 @@ async function preflightTaskRun(
 	const preparedSteps: PreparedTaskStep[] = [];
 	for (let i = 0; i < steps.length; i++) {
 		const step = steps[i];
+		if (!step) return { error: `Invalid missing step at position ${i + 1}.` };
 		if (step.context !== undefined && step.context !== "fresh" && step.context !== "fork") {
 			return { error: `Invalid context.mode at step ${i + 1}: "${String(step.context)}". Expected "fresh" or "fork".` };
 		}
@@ -1480,6 +1483,7 @@ async function preflightTaskRun(
 
 	for (let i = 0; i < preparedSteps.length; i++) {
 		const preparedStep = preparedSteps[i];
+		if (!preparedStep) return { error: `Internal error: missing prepared step ${i + 1}.` };
 		const stepLabel = sanitizeStepLabel(preparedStep.rawStep, i);
 		if (sessionStepsRoot) {
 			preparedStep.session.stepDir = path.join(sessionStepsRoot, stepLabel);
@@ -3990,6 +3994,7 @@ export default function (pi: ExtensionAPI) {
 
 				for (let i = 0; i < preparedSteps.length; i++) {
 					const preparedStep = preparedSteps[i];
+					if (!preparedStep) continue;
 					const taskWithContext = preparedStep.rawStep.task.replace(/\{previous\}/g, previousOutput);
 
 					const chainUpdate: OnUpdateCallback | undefined = onUpdate
@@ -4050,6 +4055,7 @@ export default function (pi: ExtensionAPI) {
 				const allResults: SingleResult[] = new Array(preparedSteps.length);
 				for (let i = 0; i < preparedSteps.length; i++) {
 					const preparedStep = preparedSteps[i];
+					if (!preparedStep) continue;
 					allResults[i] = {
 						agent: preparedStep.worker.displayAgentName,
 						agentSource: preparedStep.worker.agent?.source ?? "unknown",
@@ -4233,6 +4239,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (details.mode === "single" && details.results.length === 1) {
 				const r = details.results[0];
+				if (!r) return new Text("(no output)", 0, 0);
 				const isError = r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);

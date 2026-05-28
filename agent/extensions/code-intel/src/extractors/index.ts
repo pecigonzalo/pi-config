@@ -35,6 +35,7 @@ export function extractDefinitions(file: SourceFile, text: string): Definition[]
 
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index];
+		if (line === undefined) continue;
 		const match = matchDefinition(file.language, line);
 		if (!match) continue;
 		definitions.push({
@@ -94,7 +95,9 @@ export function captureSignature(lines: string[], start: number, language: strin
 	let parenDepth = 0;
 	let bracketDepth = 0;
 	for (let i = start; i < Math.min(lines.length, start + MAX_SIGNATURE_LINES); i++) {
-		const line = lines[i].trimEnd();
+		const sourceLine = lines[i];
+		if (sourceLine === undefined) continue;
+		const line = sourceLine.trimEnd();
 		out.push(line);
 		for (const char of line) {
 			if (char === "(") parenDepth++;
@@ -114,24 +117,28 @@ export function captureSignature(lines: string[], start: number, language: strin
 export function extractImportLines(lines: string[], language?: string): Array<{ line: number; text: string }> {
 	const imports: Array<{ line: number; text: string }> = [];
 	for (let i = 0; i < lines.length; i++) {
-		const trimmed = lines[i].trim();
+		const line = lines[i];
+		if (line === undefined) continue;
+		const trimmed = line.trim();
 
 		if (language === "go" && /^import\s*\($/.test(trimmed)) {
 			for (let j = i + 1; j < lines.length; j++) {
-				const inner = lines[j].trim();
+				const innerLine = lines[j];
+				if (innerLine === undefined) continue;
+				const inner = innerLine.trim();
 				if (inner === ")") {
 					i = j;
 					break;
 				}
 				if (!inner || inner.startsWith("//")) continue;
-				imports.push({ line: j, text: lines[j].trimEnd() });
+				imports.push({ line: j, text: innerLine.trimEnd() });
 			}
 			continue;
 		}
 
 		if (/^(import|export\s+.*from|from\s+\S+\s+import|package\s+|use\s+|mod\s+|require\(|#include\s+)/.test(trimmed)) {
 			if (language === "go" && trimmed.startsWith("package ")) continue;
-			imports.push({ line: i, text: lines[i].trimEnd() });
+			imports.push({ line: i, text: line.trimEnd() });
 		}
 	}
 	return imports;
@@ -152,6 +159,7 @@ function findIndentBlockEnd(lines: string[], start: number): number {
 	let end = start;
 	for (let i = start + 1; i < lines.length; i++) {
 		const line = lines[i];
+		if (line === undefined) continue;
 		if (!line.trim()) {
 			end = i;
 			continue;
@@ -169,6 +177,7 @@ function findBraceBlockEnd(lines: string[], start: number): number {
 	let end = start;
 	for (let i = start; i < Math.min(lines.length, start + 500); i++) {
 		const line = lines[i];
+		if (line === undefined) continue;
 		for (const char of line) {
 			if (char === "{") {
 				depth++;

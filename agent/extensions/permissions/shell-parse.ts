@@ -208,6 +208,7 @@ export async function parseBashCommand(command: string): Promise<ParsedBash> {
 		if (tokens.length === 0) continue;
 
 		const name = tokens[0];
+		if (name === undefined) continue;
 		const source = commandSource(node);
 		const commandText = node.text.trim();
 		const prefixTokens = arityPrefix(tokens);

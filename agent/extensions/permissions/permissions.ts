@@ -502,7 +502,7 @@ export default function (pi: ExtensionAPI) {
 			// Use tree-sitter arity-based prefix when available, fall back to simple first-word
 			const uniquePrefixCandidates = parsedFocusCommand
 				? dedupeStrings([parsedFocusCommand.prefixTokens.join(" ")].filter(Boolean))
-				: dedupeStrings([approvalTarget.trim().split(/\s+/)[0]].filter(Boolean));
+				: dedupeStrings([approvalTarget.trim().split(/\s+/)[0]].filter((value): value is string => Boolean(value)));
 			const segmentNote = approvalTarget !== command ? `Unapproved shell segment: ${approvalTarget}` : undefined;
 			const displayNote = note && note !== segmentNote ? note : undefined;
 
@@ -736,7 +736,9 @@ export default function (pi: ExtensionAPI) {
 		];
 		if (more) lines.push(more.trimStart());
 
-		const approvalTargets = externalPaths.length === 1 ? getFilesystemApprovalTargets(externalPaths[0], ctx.cwd) : undefined;
+		const approvalTargets = externalPaths.length === 1 && externalPaths[0] !== undefined
+			? getFilesystemApprovalTargets(externalPaths[0], ctx.cwd)
+			: undefined;
 		const allowPathSessionLabel = approvalTargets
 			? `Allow ${approvalTargets.targetKind} for this session (${approvalTargets.targetPath})`
 			: "Allow path for this session";
@@ -1016,8 +1018,9 @@ export default function (pi: ExtensionAPI) {
 			const mode = policy.mode;
 			const protectedResources = policy.protectedResources;
 			const profileLabel = profileName ? `${agentName} / ${profileName}` : agentName === "default" ? "default" : agentName;
-			const hasAgentOverride = agentName !== "default" && config.agents?.[agentName] !== undefined;
-			const isFullOverride = hasAgentOverride && config.agents![agentName].inherit === false;
+			const agentOverride = agentName !== "default" ? config.agents?.[agentName] : undefined;
+			const hasAgentOverride = agentOverride !== undefined;
+			const isFullOverride = agentOverride?.inherit === false;
 			const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
 			const bashExecutionMode = sandboxEnabled ? "sandboxed" : sandboxMode === "normal" ? "local" : `local (${sandboxMode})`;
 			const shellParserStatus = treeSitterReady ? "tree-sitter (active)" : "simple fallback";
@@ -1072,8 +1075,9 @@ export default function (pi: ExtensionAPI) {
 					lines.push("");
 					lines.push(`  ${theme.fg("muted", "Rules:        ")}${theme.fg("text", `${rules.length} total`)} ${theme.fg("success", `allow=${actionCounts.allow}`)} ${theme.fg("warning", `ask=${actionCounts.ask}`)} ${theme.fg("error", `block=${actionCounts.block}`)}`);
 					if (topTools) lines.push(`  ${theme.fg("muted", "Top tools:    ")}${theme.fg("dim", topTools)}`);
-					if (sampleRules.length > 0) {
-						lines.push(`  ${theme.fg("muted", "Examples:     ")}${theme.fg("dim", sampleRules[0])}`);
+					const firstSampleRule = sampleRules[0];
+					if (firstSampleRule !== undefined) {
+						lines.push(`  ${theme.fg("muted", "Examples:     ")}${theme.fg("dim", firstSampleRule)}`);
 						for (const sample of sampleRules.slice(1)) {
 							lines.push(`  ${theme.fg("dim", "              ")}${theme.fg("dim", sample)}`);
 						}
@@ -1194,7 +1198,7 @@ export default function (pi: ExtensionAPI) {
 							const epaColor = epa === "allow" ? "success" : epa === "block" ? "error" : epa === "ask" ? "warning" : "dim";
 							const epaStr = theme.fg(epaColor, pad(truncate(epa, extW), extW + 2));
 							const reason = theme.fg("dim", reasonRaw);
-							lines.push(`  ${tool}${theme.fg("muted", pad(matchParts[0], matchW + 2))}${action}${epaStr}${reason}`);
+							lines.push(`  ${tool}${theme.fg("muted", pad(matchParts[0] ?? "", matchW + 2))}${action}${epaStr}${reason}`);
 							for (const continuation of matchParts.slice(1)) {
 								const emptyTool = pad("", toolW + 2);
 								const emptyAction = pad("", actionW);

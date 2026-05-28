@@ -543,7 +543,9 @@ function splitImportsAndBody(code: string): { imports: string; body: string } {
 	let inMultiLineImport = false;
 
 	for (let i = 0; i < lines.length; i++) {
-		const trimmed = lines[i].trim();
+		const line = lines[i];
+		if (line === undefined) continue;
+		const trimmed = line.trim();
 
 		if (inMultiLineImport) {
 			if (/}\s*from\s+['"]/.test(trimmed) || /from\s+['"].*['"]/.test(trimmed)) {
@@ -630,9 +632,9 @@ function normalizeLegacyModelName(model: string | undefined): string | undefined
 function getFinalAssistantText(messages: Message[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
-		if (msg.role !== "assistant") continue;
+		if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
 		for (const part of msg.content) {
-			if (part.type === "text") return part.text;
+			if (typeof part === "object" && part !== null && part.type === "text" && typeof part.text === "string") return part.text;
 		}
 	}
 	return "";

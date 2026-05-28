@@ -64,9 +64,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function getFinalAssistantText(messages: Message[]): string | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
-		if (msg.role !== "assistant") continue;
+		if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
 		for (const part of msg.content) {
-			if (part.type === "text") return part.text;
+			if (typeof part === "object" && part !== null && part.type === "text" && typeof part.text === "string") return part.text;
 		}
 	}
 	return undefined;

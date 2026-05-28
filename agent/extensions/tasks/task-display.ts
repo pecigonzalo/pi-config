@@ -207,7 +207,9 @@ export function formatTaskSnippetLines(
 	const maxLength = options.maxLength ?? 50;
 	let text = "";
 	for (let i = 0; i < Math.min(tasks.length, maxItems); i++) {
-		const preview = tasks[i].length > maxLength ? `${tasks[i].slice(0, maxLength)}...` : tasks[i];
+		const task = tasks[i];
+		if (task === undefined) continue;
+		const preview = task.length > maxLength ? `${task.slice(0, maxLength)}...` : task;
 		const index = options.numbered ? `${themeFg("muted", `${i + 1}.`)} ` : "";
 		text += `\n  ${index}${themeFg("dim", preview)}`;
 	}
@@ -259,7 +261,7 @@ export function normalizeTaskDisplayToolName(toolName: string): string {
 	const trimmed = toolName.trim().toLowerCase();
 	if (!trimmed) return "";
 	const segments = trimmed.split(".").filter(Boolean);
-	return segments.length > 0 ? segments[segments.length - 1] : trimmed;
+	return segments.length > 0 ? (segments[segments.length - 1] ?? trimmed) : trimmed;
 }
 
 export function formatToolCall(
@@ -397,13 +399,12 @@ export function getDisplayItems(messages: Message[]): DisplayItem[] {
 export function getFinalOutput(messages: Message[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
-		if (msg.role === "assistant") {
-			const textParts = msg.content
-				.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
-				.map((part) => part.text)
-				.filter((text) => text.length > 0);
-			if (textParts.length > 0) return textParts.join("\n");
-		}
+		if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+		const textParts = msg.content
+			.filter((part): part is { type: "text"; text: string } => typeof part === "object" && part !== null && part.type === "text" && typeof part.text === "string")
+			.map((part) => part.text)
+			.filter((text) => text.length > 0);
+		if (textParts.length > 0) return textParts.join("\n");
 	}
 	return "";
 }

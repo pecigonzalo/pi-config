@@ -61,7 +61,7 @@ export function clipText(text: string, maxChars: number): string {
 export function parseContentType(headerValue: string | null): ContentTypeInfo {
 	if (!headerValue) return { mime: "", raw: "" };
 	const raw = headerValue.trim();
-	const [mimePart, ...parts] = raw.split(";");
+	const [mimePart = "", ...parts] = raw.split(";");
 	const mime = mimePart.trim().toLowerCase();
 
 	let charset: string | undefined;

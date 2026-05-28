@@ -73,7 +73,9 @@ function tryParseJson(raw: string): unknown | undefined {
 }
 
 function extractJson(text: string): unknown | undefined {
-	const fencedBlocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((match) => match[1]);
+	const fencedBlocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)]
+		.map((match) => match[1])
+		.filter((block): block is string => block !== undefined);
 	for (const block of fencedBlocks) {
 		const balanced = findBalancedJsonObject(block);
 		const parsed = tryParseJson(block.trim()) ?? (balanced ? tryParseJson(balanced) : undefined);

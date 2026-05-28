@@ -154,38 +154,43 @@ function parseSymbolQuery(query: string): ParsedSymbolQuery {
 	const parsed: ParsedSymbolQuery = { text: "", filters: [] };
 
 	const nameMatch = rest.match(/(?:^|\s)name:([^\s]+)/i);
-	if (nameMatch) {
-		parsed.name = nameMatch[1].replace(/^"|"$/g, "").toLowerCase();
-		parsed.filters.push(`name=${nameMatch[1]}`);
+	const nameValue = nameMatch?.[1];
+	if (nameMatch && nameValue !== undefined) {
+		parsed.name = nameValue.replace(/^"|"$/g, "").toLowerCase();
+		parsed.filters.push(`name=${nameValue}`);
 		rest = rest.replace(nameMatch[0], " ").trim();
 	}
 
 	const kindMatch = rest.match(/(?:^|\s)kind:([^\s]+)/i);
-	if (kindMatch) {
-		parsed.kind = kindMatch[1].replace(/^"|"$/g, "").toLowerCase();
-		parsed.filters.push(`kind=${kindMatch[1]}`);
+	const kindValue = kindMatch?.[1];
+	if (kindMatch && kindValue !== undefined) {
+		parsed.kind = kindValue.replace(/^"|"$/g, "").toLowerCase();
+		parsed.filters.push(`kind=${kindValue}`);
 		rest = rest.replace(kindMatch[0], " ").trim();
 	}
 
 	const fileMatch = rest.match(/(?:^|\s)file:([^\s]+)/i);
-	if (fileMatch) {
-		parsed.file = fileMatch[1].replace(/^"|"$/g, "").toLowerCase();
-		parsed.filters.push(`file=${fileMatch[1]}`);
+	const fileValue = fileMatch?.[1];
+	if (fileMatch && fileValue !== undefined) {
+		parsed.file = fileValue.replace(/^"|"$/g, "").toLowerCase();
+		parsed.filters.push(`file=${fileValue}`);
 		rest = rest.replace(fileMatch[0], " ").trim();
 	}
 
 	const declMatch = rest.match(/(?:^|\s)decl:(true|false|1|0|yes|no)/i);
-	if (declMatch) {
-		parsed.declaration = ["true", "1", "yes"].includes(declMatch[1].toLowerCase());
-		parsed.filters.push(`decl=${declMatch[1]}`);
+	const declValue = declMatch?.[1];
+	if (declMatch && declValue !== undefined) {
+		parsed.declaration = ["true", "1", "yes"].includes(declValue.toLowerCase());
+		parsed.filters.push(`decl=${declValue}`);
 		rest = rest.replace(declMatch[0], " ").trim();
 	}
 
 	const backendMatch = rest.match(/(?:^|\s)backend:(lsp|tree|tree-sitter|syntax|lsp-document-symbol|tree-sitter-tags|syntax-pattern)/i);
-	if (backendMatch) {
-		const raw = backendMatch[1].toLowerCase();
+	const backendValue = backendMatch?.[1];
+	if (backendMatch && backendValue !== undefined) {
+		const raw = backendValue.toLowerCase();
 		parsed.backend = raw.startsWith("lsp") ? "lsp-document-symbol" : raw.startsWith("tree") ? "tree-sitter-tags" : "syntax-pattern";
-		parsed.filters.push(`backend=${backendMatch[1]}`);
+		parsed.filters.push(`backend=${backendValue}`);
 		rest = rest.replace(backendMatch[0], " ").trim();
 	}
 
@@ -535,12 +540,12 @@ function inferCallableArity(definition: Definition): number | undefined {
 	const groups = collectParenthesizedGroups(signature);
 	if (groups.length === 0) return;
 
-	let paramsText = groups[0];
+	let paramsText = groups[0] ?? "";
 	if (definition.kind === "method" && signature.trimStart().startsWith("func ") && groups.length >= 2) {
-		paramsText = groups[1];
+		paramsText = groups[1] ?? "";
 	}
 	if (definition.kind === "interface_method" && groups.length >= 1) {
-		paramsText = groups[0];
+		paramsText = groups[0] ?? "";
 	}
 
 	const parts = splitTopLevel(paramsText, ",").map((part) => part.trim()).filter(Boolean);
@@ -660,7 +665,9 @@ export function findIdentifierLineMatches(lines: string[], symbol: string): Arra
 	const re = new RegExp(`(^|[^A-Za-z0-9_])${escaped}([^A-Za-z0-9_]|$)`);
 	const matches: Array<{ line: number; column: number }> = [];
 	for (let i = 0; i < lines.length; i++) {
-		const match = lines[i].match(re);
+		const line = lines[i];
+		if (line === undefined) continue;
+		const match = line.match(re);
 		if (!match || match.index === undefined) continue;
 		matches.push({ line: i, column: match.index + (match[1]?.length ?? 0) });
 	}
