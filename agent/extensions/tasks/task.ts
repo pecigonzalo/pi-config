@@ -53,6 +53,7 @@ import {
 	formatChainResults,
 	formatParallelResults,
 	formatTaskCallHeading,
+	formatTaskConfigurationLines,
 	formatTaskHeader,
 	formatTaskInlineNoticeLines,
 	formatTaskSnippetLines,
@@ -240,6 +241,7 @@ interface SingleResult {
 	agentSource: "user" | "project" | "unknown";
 	profile?: string;
 	effort?: string;
+	skills?: string[];
 	task: string;
 	exitCode: number;
 	messages: Message[];
@@ -1599,6 +1601,7 @@ async function runSingleAgentViaJson(
 				agentSource: agent?.source ?? "unknown",
 				profile: worker.profile?.name,
 				effort: worker.effort?.name,
+				skills: worker.skills,
 				task,
 				exitCode: 1,
 				messages: [],
@@ -1634,6 +1637,7 @@ async function runSingleAgentViaJson(
 				agentSource: agent?.source ?? "unknown",
 				profile: worker.profile?.name,
 				effort: worker.effort?.name,
+				skills: worker.skills,
 				task,
 				exitCode: 1,
 				messages: [],
@@ -1661,6 +1665,7 @@ async function runSingleAgentViaJson(
 		agentSource: agent?.source ?? "unknown",
 		profile: worker.profile?.name,
 		effort: worker.effort?.name,
+		skills: worker.skills,
 		task,
 		exitCode: 0,
 		messages: [],
@@ -1826,6 +1831,7 @@ async function runSingleAgentViaRpc(
 			agentSource: agent?.source ?? "unknown",
 			profile: worker.profile?.name,
 			effort: worker.effort?.name,
+			skills: worker.skills,
 			task,
 			exitCode: 1,
 			messages: [],
@@ -1857,6 +1863,7 @@ async function runSingleAgentViaRpc(
 				agentSource: agent?.source ?? "unknown",
 				profile: worker.profile?.name,
 				effort: worker.effort?.name,
+				skills: worker.skills,
 				task,
 				exitCode: 1,
 				messages: [],
@@ -1883,6 +1890,7 @@ async function runSingleAgentViaRpc(
 		agentSource: agent?.source ?? "unknown",
 		profile: worker.profile?.name,
 		effort: worker.effort?.name,
+		skills: worker.skills,
 		task,
 		exitCode: 0,
 		messages: [],
@@ -2274,6 +2282,7 @@ async function runTaskStepWithMetadata(options: {
 				agentSource: preparedStep.worker.agent?.source ?? "unknown",
 				profile: preparedStep.worker.profile?.name,
 				effort: preparedStep.worker.effort?.name,
+				skills: preparedStep.worker.skills,
 				task,
 				exitCode: 1,
 				messages: [],
@@ -2320,6 +2329,7 @@ async function runTaskStepWithMetadata(options: {
 			agentSource: preparedStep.worker.agent?.source ?? "unknown",
 			profile: preparedStep.worker.profile?.name,
 			effort: preparedStep.worker.effort?.name,
+			skills: preparedStep.worker.skills,
 			task,
 			exitCode: aborted ? 130 : 1,
 			messages: [],
@@ -4045,6 +4055,7 @@ export default function (pi: ExtensionAPI) {
 						agentSource: preparedStep.worker.agent?.source ?? "unknown",
 						profile: preparedStep.worker.profile?.name,
 						effort: preparedStep.worker.effort?.name,
+						skills: preparedStep.worker.skills,
 						task: preparedStep.rawStep.task,
 						exitCode: -1,
 						messages: [],
@@ -4240,6 +4251,9 @@ export default function (pi: ExtensionAPI) {
 					container.addChild(new Spacer(1));
 					container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
 					container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("muted", "─── Configuration ───"), 0, 0));
+					container.addChild(new Text(formatTaskConfigurationLines(r, theme.fg.bind(theme)), 0, 0));
 					if (r.childSession) {
 						container.addChild(new Text(formatChildSessionExpanded(r.childSession, theme.fg.bind(theme)), 0, 0));
 					}
@@ -4324,6 +4338,7 @@ export default function (pi: ExtensionAPI) {
 						);
 						container.addChild(new Text(stepHeader, 0, 0));
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						container.addChild(new Text(formatTaskConfigurationLines(r, theme.fg.bind(theme)), 0, 0));
 						if (r.childSession) {
 							container.addChild(new Text(formatChildSessionExpanded(r.childSession, theme.fg.bind(theme)), 0, 0));
 						}
@@ -4403,6 +4418,7 @@ export default function (pi: ExtensionAPI) {
 						);
 						container.addChild(new Text(taskHeader, 0, 0));
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						container.addChild(new Text(formatTaskConfigurationLines(r, theme.fg.bind(theme)), 0, 0));
 						if (r.childSession) {
 							container.addChild(new Text(formatChildSessionExpanded(r.childSession, theme.fg.bind(theme)), 0, 0));
 						}
@@ -4466,6 +4482,7 @@ export const __test__ = {
 	formatParallelResults,
 	formatChainResults,
 	formatTaskHeader,
+	formatTaskConfigurationLines,
 	formatToolCall,
 	getDisplayItems,
 	getFinalOutput,

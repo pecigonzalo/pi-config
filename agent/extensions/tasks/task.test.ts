@@ -946,6 +946,57 @@ describe("task result formatting", () => {
 		).toBe("generic · profile: read-only");
 	});
 
+	it("summarizes task skills in headers", () => {
+		const theme = {
+			fg: (_color: string, value: string) => value,
+			bold: (value: string) => value,
+		};
+
+		expect(
+			__test__.formatTaskHeader(
+				{
+					agent: "reviewer",
+					taskResult: {
+						agentSource: "user",
+						sessionMode: "fresh",
+						profile: "read-only",
+						effort: "balanced",
+						skills: ["role-code-review", "standards-code"],
+					},
+				},
+				theme,
+			),
+		).toBe("reviewer (user) · profile: read-only · effort: balanced · skills: 2");
+	});
+
+	it("formats expanded task configuration metadata", () => {
+		const fg = (_color: string, value: string) => value;
+
+		expect(
+			__test__.formatTaskConfigurationLines(
+				{
+					agent: "reviewer",
+					agentSource: "user",
+					profile: "read-only",
+					effort: "balanced",
+					sessionMode: "fork",
+					sessionPersist: true,
+					skills: ["role-code-review", "standards-code"],
+				},
+				fg,
+			),
+		).toBe(
+			[
+				"agent: reviewer (user)",
+				"profile: read-only",
+				"effort: balanced",
+				"context: fork",
+				"persist: true",
+				"skills: role-code-review, standards-code",
+			].join("\n"),
+		);
+	});
+
 	it("filters child runtime setup notices from inline task notices", () => {
 		const result: any = { uiNotices: [] };
 

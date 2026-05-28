@@ -31,6 +31,7 @@ interface TaskDisplayResult {
 	agentSource?: string;
 	profile?: string;
 	effort?: string;
+	skills?: string[];
 	task: string;
 	exitCode: number;
 	messages: Message[];
@@ -41,6 +42,7 @@ interface TaskDisplayResult {
 	errorMessage?: string;
 	step?: number;
 	sessionMode?: ContextMode;
+	sessionPersist?: boolean;
 }
 
 export type DisplayItem =
@@ -93,7 +95,7 @@ export function formatUsageStats(usage: UsageStats, model?: string): string {
 }
 
 function formatTaskExecutionSelection(
-	selection: { profile?: string; effort?: string },
+	selection: { profile?: string; effort?: string; skills?: string[] },
 	themeFg: (color: any, text: string) => string,
 ): string {
 	const parts: string[] = [];
@@ -102,6 +104,10 @@ function formatTaskExecutionSelection(
 	}
 	if (selection.effort) {
 		parts.push(themeFg("muted", "effort: ") + themeFg("accent", selection.effort));
+	}
+	const skillCount = (selection.skills ?? []).filter((skill) => skill.trim().length > 0).length;
+	if (skillCount > 0) {
+		parts.push(themeFg("muted", "skills: ") + themeFg("accent", String(skillCount)));
 	}
 	return parts.join(themeFg("muted", " · "));
 }
@@ -119,7 +125,7 @@ function formatTaskExecutionContext(
 }
 
 function formatTaskExecutionMetadata(
-	taskResult: { agentSource?: string; sessionMode?: ContextMode; profile?: string; effort?: string },
+	taskResult: { agentSource?: string; sessionMode?: ContextMode; profile?: string; effort?: string; skills?: string[] },
 	themeFg: (color: any, text: string) => string,
 ): string {
 	const context = formatTaskExecutionContext(taskResult.agentSource, taskResult.sessionMode, themeFg);
@@ -130,10 +136,39 @@ function formatTaskExecutionMetadata(
 	return "";
 }
 
+function formatOptionalValue(value: string | undefined): string {
+	return value?.trim() ? value : "none";
+}
+
+export function formatTaskConfigurationLines(
+	taskResult: {
+		agent: string;
+		agentSource?: string;
+		profile?: string;
+		effort?: string;
+		skills?: string[];
+		sessionMode?: ContextMode;
+		sessionPersist?: boolean;
+	},
+	themeFg: (color: any, text: string) => string,
+): string {
+	const agentSource = taskResult.agentSource && taskResult.agentSource !== "unknown" ? ` (${taskResult.agentSource})` : "";
+	const skills = (taskResult.skills ?? []).filter((skill) => skill.trim().length > 0);
+	const lines = [
+		`${themeFg("muted", "agent: ")}${themeFg("accent", `${taskResult.agent}${agentSource}`)}`,
+		`${themeFg("muted", "profile: ")}${themeFg("accent", formatOptionalValue(taskResult.profile))}`,
+		`${themeFg("muted", "effort: ")}${themeFg("accent", formatOptionalValue(taskResult.effort))}`,
+		`${themeFg("muted", "context: ")}${themeFg("accent", taskResult.sessionMode ?? "fresh")}`,
+		`${themeFg("muted", "persist: ")}${themeFg("accent", taskResult.sessionPersist === undefined ? "unknown" : String(taskResult.sessionPersist))}`,
+		`${themeFg("muted", "skills: ")}${themeFg("accent", skills.length > 0 ? skills.join(", ") : "none")}`,
+	];
+	return lines.join("\n");
+}
+
 export function formatTaskHeader(
 	options: {
 		agent: string;
-		taskResult: { agentSource?: string; sessionMode?: ContextMode; profile?: string; effort?: string };
+		taskResult: { agentSource?: string; sessionMode?: ContextMode; profile?: string; effort?: string; skills?: string[] };
 		prefix?: string;
 		leadingIcon?: string;
 		suffix?: string;
