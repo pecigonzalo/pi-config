@@ -1,7 +1,7 @@
 ---
 name: read-only
 description: Read-only capability profile for exploration, discovery, and analysis
-tools: read, grep, find, ls
+tools: read, grep, find, ls, code_intel
 inheritSkills: false
 inheritProjectContext: false
 permissionsProfile: read-only
