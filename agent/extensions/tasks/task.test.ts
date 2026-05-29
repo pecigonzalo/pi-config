@@ -356,6 +356,58 @@ describe("tasks extension compact schema", () => {
 
 		expect(result.content[0].text).toContain('Set `mode` to "parallel" or "chain"');
 	});
+
+	it("publishes guidance that task steps need worker behavior", () => {
+		const tool = createTaskTool();
+
+		expect(tool.promptSnippet).toContain("each step needs `agent` or behavioral `prompt`");
+		expect(tool.promptGuidelines.join("\n")).toContain("do not send bare `{ task: ... }` steps");
+		expect(tool.parameters.properties.steps.items.properties.agent.description).toContain("Required unless `prompt`");
+		expect(tool.parameters.properties.steps.items.properties.prompt.description).toContain("Required for generic workers");
+	});
+
+	it("rejects bare generic task steps with actionable recovery guidance", async () => {
+		mockResources = createResources({
+			agents: [
+				{
+					name: "reviewer",
+					description: "Review worker",
+					enabled: true,
+					availability: "task",
+					systemPromptMode: "append",
+					systemPrompt: "Review code.",
+					source: "user",
+					filePath: "/tmp/reviewer.md",
+				},
+			],
+		});
+		const tool = createTaskTool();
+
+		try {
+			await tool.execute(
+				"tc-bare-generic",
+				{ steps: [{ task: "Independent read-only code review" }] },
+				undefined,
+				undefined,
+				{
+					cwd: process.cwd(),
+					hasUI: false,
+					sessionManager: {
+						getSessionFile: () => undefined,
+						getBranch: () => [],
+						appendCustomEntry: () => "entry-id",
+					},
+				},
+			);
+			throw new Error("Expected bare generic task step to be rejected");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			expect(message).toContain("Step 1");
+			expect(message).toContain("Generic task steps require worker behavior");
+			expect(message).toContain("Use an agent such as `reviewer`");
+			expect(message).toContain("Do not send bare `{ task: ... }` steps");
+		}
+	});
 });
 
 describe("tasks extension persisted-session guardrails", () => {

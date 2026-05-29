@@ -610,6 +610,26 @@ function formatCallableAgentList(resources: ResourceDiscoveryResult): string {
 		.join(", ") || "none";
 }
 
+function formatGenericWorkerBehaviorError(resources: ResourceDiscoveryResult): string {
+	const callableAgents = getTaskCallableAgents(resources);
+	const preferredAgentNames = ["reviewer", "thinker", "implementer"].filter((name) =>
+		callableAgents.some((agent) => agent.name === name),
+	);
+	const suggestedAgentNames = preferredAgentNames.length > 0 ? preferredAgentNames : callableAgents.slice(0, 3).map((agent) => agent.name);
+	const agentSuggestion =
+		suggestedAgentNames.length > 0
+			? `Use an agent such as ${suggestedAgentNames.map((name) => `\`${name}\``).join(", ")}.`
+			: "No task agents are available, so include a behavioral `prompt`.";
+
+	return [
+		"Invalid task configuration. Generic task steps require worker behavior: set `agent`, select a behavior-bearing `profile`, or provide `prompt`.",
+		agentSuggestion,
+		"For generic workers, add `prompt`, for example: `prompt: \"You are an independent read-only code reviewer. Report findings with severity and file references.\"`.",
+		"Do not send bare `{ task: ... }` steps.",
+		`Available task agents: ${formatCallableAgentList(resources)}.`,
+	].join(" ");
+}
+
 function formatProfileList(resources: ResourceDiscoveryResult): string {
 	return resources.profiles.filter((profile) => profile.enabled).map((profile) => `${profile.name} (${profile.source})`).join(", ") || "none";
 }
@@ -821,10 +841,7 @@ function resolveWorkerConfig(
 	const inheritSkills = agent?.inheritSkills ?? profile?.inheritSkills ?? false;
 
 	if ((options.requireBehavior ?? true) && !agent && !prompt.trim()) {
-		return {
-			error:
-				"Invalid task configuration. Provide an agent or a behavioral prompt. Generic workers require `prompt` when no `agent` is selected.",
-		};
+		return { error: formatGenericWorkerBehaviorError(resources) };
 	}
 
 	return {
@@ -1440,7 +1457,7 @@ async function preflightTaskRun(
 		}
 		const resolved = resolveWorkerConfig(step, resources);
 		if (resolved.error || !resolved.config) {
-			return { error: resolved.error ?? `Failed to resolve step ${i + 1}.` };
+			return { error: `Step ${i + 1}: ${resolved.error ?? "Failed to resolve task worker."}` };
 		}
 		const worker = resolved.config;
 		if (worker.context.mode !== "fresh" && worker.context.mode !== "fork") {
@@ -3513,13 +3530,13 @@ const TaskModeSchema = StringEnum(["single", "parallel", "chain"] as const, {
 
 const TaskStep = Type.Object({
 	task: Type.String({ description: "Work request; chain steps may use {previous}." }),
-	agent: Type.Optional(Type.String({ description: "Agent name." })),
-	profile: Type.Optional(Type.String({ description: "Profile name." })),
+	agent: Type.Optional(Type.String({ description: "Agent name. Required unless `prompt` or a behavior-bearing `profile` is provided." })),
+	profile: Type.Optional(Type.String({ description: "Profile name. Can provide worker behavior when the profile has instructions." })),
 	effort: Type.Optional(Type.String({ description: "Effort preset." })),
 	cwd: Type.Optional(Type.String({ description: "Working dir." })),
 	model: Type.Optional(Type.String({ description: "Model override." })),
 	skills: Type.Optional(Type.Array(Type.String(), { description: "Skill names." })),
-	prompt: Type.Optional(Type.String({ description: "Extra system prompt." })),
+	prompt: Type.Optional(Type.String({ description: "Behavioral system prompt. Required for generic workers with no `agent`." })),
 	context: Type.Optional(ContextModeSchema),
 });
 
@@ -3891,9 +3908,10 @@ export default function (pi: ExtensionAPI) {
 		name: "task",
 		label: "Task",
 		description: "Delegate to agents. Use mode=parallel for independent steps, chain for {previous}; persist is config-only.",
-		promptSnippet: "Delegate substantial focused work to specialized agents.",
+		promptSnippet: "Delegate substantial focused work to specialized agents; each step needs `agent` or behavioral `prompt`.",
 		promptGuidelines: [
 			"Use `task` for substantial focused delegation; skip it for trivial work.",
+			"Every `task` step must define worker behavior: set `agent` (for example `reviewer`, `thinker`, or `implementer`) or provide a behavioral `prompt`; do not send bare `{ task: ... }` steps.",
 			"Use `mode: \"parallel\"` for independent steps and `mode: \"chain\"` only when later steps need `{previous}`.",
 		],
 		parameters: SubagentParams,

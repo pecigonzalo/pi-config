@@ -69,6 +69,9 @@ Runtime calls use a compact `mode + steps` shape:
 
 Each effort resolves to a concrete model and may also set `thinkingLevel`.
 
+Each step must define worker behavior with either `agent`, a behavior-bearing `profile`, or `prompt`.
+Use `agent: "reviewer"` for reviews, `agent: "thinker"` for planning, and `agent: "implementer"` for implementation. Generic workers without an agent require a behavioral `prompt`; do not send bare `{ "task": "..." }` steps.
+
 `persist` is config-driven (agent/profile/tasks defaults) and is **not** a supported runtime override.
 
 ## 4) `fresh` vs `fork`
