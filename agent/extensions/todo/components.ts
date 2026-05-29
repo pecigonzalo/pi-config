@@ -21,49 +21,177 @@ export type TodoDetailAction =
 	| { type: "toggle"; id: number; selectedField: TodoDetailField }
 	| { type: "archive"; id: number; selectedField: TodoDetailField };
 
+export interface TodoBrowserKeybindings {
+	matches(
+		data: string,
+		keybinding:
+			| "tui.select.up"
+			| "tui.select.down"
+			| "tui.select.pageUp"
+			| "tui.select.pageDown"
+			| "tui.select.confirm"
+			| "tui.select.cancel",
+	): boolean;
+}
+
+export interface TodoBrowserOptions {
+	rows: TodoBrowserRow[];
+	title: string;
+	theme: Theme;
+	keybindings: TodoBrowserKeybindings;
+	getMaxLines?: () => number;
+	onAction: (action: TodoBrowserAction) => void;
+}
+
+interface TodoBrowserWindow {
+	lines: string[];
+	startIndex: number;
+	endIndex: number;
+}
+
 export class TodoBrowserComponent {
 	private rows: TodoBrowserRow[];
 	private title: string;
 	private theme: Theme;
+	private keybindings: TodoBrowserKeybindings;
+	private getMaxLines?: () => number;
 	private onAction: (action: TodoBrowserAction) => void;
 	private selectedIndex = 0;
+	private scrollStartIndex = 0;
+	private lastPageSize = 5;
 	private cachedWidth?: number;
+	private cachedMaxLines?: number;
 	private cachedLines?: string[];
 
-	constructor(rows: TodoBrowserRow[], title: string, theme: Theme, onAction: (action: TodoBrowserAction) => void) {
-		this.rows = rows;
-		this.title = title;
-		this.theme = theme;
-		this.onAction = onAction;
+	constructor(options: TodoBrowserOptions) {
+		this.rows = options.rows;
+		this.title = options.title;
+		this.theme = options.theme;
+		this.keybindings = options.keybindings;
+		this.getMaxLines = options.getMaxLines;
+		this.onAction = options.onAction;
 	}
 
 	private getSelected(): TodoBrowserRow | undefined {
 		return this.rows[this.selectedIndex];
 	}
 
+	private getRenderLineLimit(): number {
+		const rawLimit = this.getMaxLines?.() ?? 24;
+		if (!Number.isFinite(rawLimit)) return 24;
+		return Math.max(1, Math.floor(rawLimit));
+	}
+
+	private selectPrevious(): void {
+		if (this.selectedIndex > 0) {
+			this.selectedIndex--;
+			this.invalidate();
+		}
+	}
+
+	private selectNext(): void {
+		if (this.selectedIndex < this.rows.length - 1) {
+			this.selectedIndex++;
+			this.invalidate();
+		}
+	}
+
+	private selectPage(direction: -1 | 1): void {
+		const pageSize = Math.max(1, this.lastPageSize - 1);
+		const nextIndex = this.selectedIndex + direction * pageSize;
+		this.selectedIndex = Math.max(0, Math.min(this.rows.length - 1, nextIndex));
+		this.invalidate();
+	}
+
+	private renderRowChunk(row: TodoBrowserRow, index: number, width: number): string[] {
+		const th = this.theme;
+		const selected = index === this.selectedIndex;
+		const prefix = selected ? th.fg("accent", "› ") : "  ";
+		const summary = truncateToWidth(`${prefix}${row.summary}`, width);
+		const lines = [selected ? th.bg("selectedBg", summary) : summary];
+
+		for (const line of row.details) {
+			lines.push(truncateToWidth(`    ${line}`, width));
+		}
+
+		return lines;
+	}
+
+	private getVisibleEndIndex(chunks: string[][], startIndex: number, maxLines: number): number {
+		let usedLines = 0;
+		let index = startIndex;
+
+		while (index < chunks.length && usedLines < maxLines) {
+			const chunkLength = Math.max(1, chunks[index]?.length ?? 1);
+			if (usedLines > 0 && usedLines + chunkLength > maxLines) break;
+			usedLines += Math.min(chunkLength, maxLines - usedLines);
+			index++;
+		}
+
+		return Math.max(startIndex + 1, index);
+	}
+
+	private ensureSelectedVisible(chunks: string[][], maxLines: number): void {
+		this.scrollStartIndex = Math.max(0, Math.min(this.scrollStartIndex, Math.max(0, this.rows.length - 1)));
+
+		if (this.selectedIndex < this.scrollStartIndex) {
+			this.scrollStartIndex = this.selectedIndex;
+		}
+
+		while (
+			this.selectedIndex >= this.getVisibleEndIndex(chunks, this.scrollStartIndex, maxLines) &&
+			this.scrollStartIndex < this.selectedIndex
+		) {
+			this.scrollStartIndex++;
+		}
+	}
+
+	private renderVisibleRows(chunks: string[][], maxLines: number): TodoBrowserWindow {
+		this.ensureSelectedVisible(chunks, maxLines);
+
+		const lines: string[] = [];
+		let index = this.scrollStartIndex;
+		while (index < chunks.length && lines.length < maxLines) {
+			const chunk = chunks[index] ?? [];
+			const remaining = maxLines - lines.length;
+			if (lines.length > 0 && chunk.length > remaining && index !== this.selectedIndex) break;
+			lines.push(...chunk.slice(0, remaining));
+			index++;
+		}
+
+		this.lastPageSize = Math.max(1, index - this.scrollStartIndex);
+		return { lines, startIndex: this.scrollStartIndex, endIndex: index };
+	}
+
 	handleInput(data: string): void {
-		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+		if (this.keybindings.matches(data, "tui.select.cancel")) {
 			this.onAction({ type: "close" });
 			return;
 		}
 
 		if (this.rows.length === 0) return;
 
-		if (matchesKey(data, "up") && this.selectedIndex > 0) {
-			this.selectedIndex--;
-			this.invalidate();
+		if (this.keybindings.matches(data, "tui.select.up")) {
+			this.selectPrevious();
 			return;
 		}
-		if (matchesKey(data, "down") && this.selectedIndex < this.rows.length - 1) {
-			this.selectedIndex++;
-			this.invalidate();
+		if (this.keybindings.matches(data, "tui.select.down")) {
+			this.selectNext();
+			return;
+		}
+		if (this.keybindings.matches(data, "tui.select.pageUp")) {
+			this.selectPage(-1);
+			return;
+		}
+		if (this.keybindings.matches(data, "tui.select.pageDown")) {
+			this.selectPage(1);
 			return;
 		}
 
 		const selected = this.getSelected();
 		if (!selected) return;
 
-		if (matchesKey(data, "enter")) {
+		if (this.keybindings.matches(data, "tui.select.confirm")) {
 			this.onAction({ type: "read", id: selected.todo.id });
 			return;
 		}
@@ -77,47 +205,50 @@ export class TodoBrowserComponent {
 	}
 
 	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+		const maxLines = this.getRenderLineLimit();
+		if (this.cachedLines && this.cachedWidth === width && this.cachedMaxLines === maxLines) return this.cachedLines;
 
 		const th = this.theme;
 		const out: string[] = [];
-		out.push("");
+		const push = (line: string) => {
+			if (out.length < maxLines) out.push(truncateToWidth(line, width));
+		};
 		const title = th.fg("accent", ` ${this.title} `);
 		const header = th.fg("borderMuted", "─".repeat(3)) + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - this.title.length - 8)));
-		out.push(truncateToWidth(header, width));
-		out.push("");
+		push(header);
 
 		if (this.rows.length === 0) {
-			out.push(truncateToWidth(`  ${th.fg("dim", "No todos")}`, width));
-		} else {
-			out.push(truncateToWidth(`  ${th.fg("dim", "↑↓ select · enter view · t status · a archive · esc close")}`, width));
-			out.push("");
-			this.rows.forEach((row, index) => {
-				const selected = index === this.selectedIndex;
-				const prefix = selected ? th.fg("accent", "› ") : "  ";
-				const summary = truncateToWidth(`${prefix}${row.summary}`, width);
-				out.push(selected ? th.bg("selectedBg", summary) : summary);
-
-				for (const line of row.details) {
-					out.push(truncateToWidth(`    ${line}`, width));
-				}
-			});
+			push(`  ${th.fg("dim", "No todos")}`);
+			push(`  ${th.fg("dim", "Esc close")}`);
+			this.cachedWidth = width;
+			this.cachedMaxLines = maxLines;
+			this.cachedLines = out;
+			return out;
 		}
 
-		out.push("");
+		push(`  ${th.fg("dim", "↑↓ select · page scroll · enter view · t status · a archive · esc close")}`);
+
+		const chunks = this.rows.map((row, index) => this.renderRowChunk(row, index, width));
+		const listBudget = Math.max(1, maxLines - out.length - 2);
+		const window = this.renderVisibleRows(chunks, listBudget);
+		for (const line of window.lines) push(line);
+
 		const selected = this.getSelected();
-		if (selected) {
-			out.push(truncateToWidth(`  ${selected.selectedLabel}`, width));
-		}
-		out.push("");
+		if (selected) push(`  ${selected.selectedLabel}`);
+
+		const showingStart = window.startIndex + 1;
+		const showingEnd = Math.max(showingStart, window.endIndex);
+		push(`  ${th.fg("dim", `showing ${showingStart}-${showingEnd} of ${this.rows.length} · pageUp/pageDown scroll`)}`);
 
 		this.cachedWidth = width;
+		this.cachedMaxLines = maxLines;
 		this.cachedLines = out;
 		return out;
 	}
 
 	invalidate(): void {
 		this.cachedWidth = undefined;
+		this.cachedMaxLines = undefined;
 		this.cachedLines = undefined;
 	}
 }

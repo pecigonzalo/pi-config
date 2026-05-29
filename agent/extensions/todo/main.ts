@@ -5,7 +5,7 @@
  * branch-aware reconstruction from session history.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import {
 	TodoBrowserComponent,
@@ -52,6 +52,21 @@ function isTodoStatus(value: unknown): value is TodoStatus {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return Boolean(value) && typeof value === "object";
+}
+
+const TODO_RESULT_COLLAPSED_LINES = 12;
+const TODO_RESULT_EXPANDED_LINES = 60;
+
+function compactRenderedTodoText(text: string, expanded: boolean, theme: Theme): string {
+	const lines = text.split("\n");
+	const limit = expanded ? TODO_RESULT_EXPANDED_LINES : TODO_RESULT_COLLAPSED_LINES;
+	if (lines.length <= limit) return text;
+
+	const omitted = lines.length - limit;
+	return [
+		...lines.slice(0, limit),
+		theme.fg("dim", `… ${omitted} more line${omitted === 1 ? "" : "s"}. Use /todos to browse interactively.`),
+	].join("\n");
 }
 
 export default function (pi: ExtensionAPI) {
@@ -255,8 +270,24 @@ export default function (pi: ExtensionAPI) {
 
 		while (true) {
 			const title = buildTodoCommandTitle(view, includeArchived, status, tag);
-			const action = await ctx.ui.custom<TodoBrowserAction>((_tui, theme, _kb, done) => {
-				return new TodoBrowserComponent(buildTodoBrowserRows(getState(), view, includeArchived, status, tag, theme), title, theme, done);
+			const action = await ctx.ui.custom<TodoBrowserAction>((tui, theme, keybindings, done) => {
+				const browser = new TodoBrowserComponent({
+					rows: buildTodoBrowserRows(getState(), view, includeArchived, status, tag, theme),
+					title,
+					theme,
+					keybindings,
+					getMaxLines: () => Math.max(8, Math.min(20, Math.floor(tui.terminal.rows * 0.65))),
+					onAction: done,
+				});
+
+				return {
+					render: (width: number) => browser.render(width),
+					invalidate: () => browser.invalidate(),
+					handleInput: (data: string) => {
+						browser.handleInput(data);
+						tui.requestRender();
+					},
+				};
 			});
 
 			if (action.type === "close") return;
@@ -358,11 +389,12 @@ export default function (pi: ExtensionAPI) {
 			return new Text(text, 0, 0);
 		},
 
-		renderResult(result, _opts, theme, _context) {
+		renderResult(result, { expanded }, theme, _context) {
 			const details = isRecord(result.details) ? result.details : undefined;
 			if (typeof details?.error === "string") return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);
 			const text = result.content[0];
-			return new Text(text?.type === "text" ? text.text : "", 0, 0);
+			const renderedText = text?.type === "text" ? compactRenderedTodoText(text.text, expanded, theme) : "";
+			return new Text(renderedText, 0, 0);
 		},
 	});
 
