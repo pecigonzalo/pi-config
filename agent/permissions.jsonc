@@ -113,6 +113,11 @@
       // - "rg *" => command-prefix match ("rg" or "rg ...")
       {
         "tool": "bash",
+        "match": "^set\\s+-euo\\s+pipefail\\s*$",
+        "action": "allow",
+      },
+      {
+        "tool": "bash",
         "match": "(^|[;&|()\\s])g?sed\\b[^;&|\\n]*\\s(-[A-Za-z]*i[A-Za-z]*|--in-place(?:=|\\s|$))",
         "action": "ask",
         "reason": "sed in-place edit may modify files",
