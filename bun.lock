@@ -23,6 +23,13 @@
         "@earendil-works/pi-tui": "0.75.1",
       },
     },
+    "agent/extensions/debug": {
+      "name": "pi-debug",
+      "dependencies": {
+        "@earendil-works/pi-coding-agent": "0.75.1",
+        "@earendil-works/pi-tui": "0.75.1",
+      },
+    },
     "agent/extensions/footer": {
       "name": "footer",
       "dependencies": {
@@ -535,6 +542,8 @@
     "performance": ["performance@workspace:agent/extensions/performance"],
 
     "permissions": ["permissions@workspace:agent/extensions/permissions"],
+
+    "pi-debug": ["pi-debug@workspace:agent/extensions/debug"],
 
     "proper-lockfile": ["proper-lockfile@4.1.2", "", { "dependencies": { "graceful-fs": "^4.2.4", "retry": "^0.12.0", "signal-exit": "^3.0.2" } }, "sha512-TjNPblN4BwAWMXU8s9AEz4JmQxnD1NNL7bNOY/AKUzyamc379FWASUhc/K1pL2noVb+XmZKLL68cjzLsiOAMaA=="],
 
