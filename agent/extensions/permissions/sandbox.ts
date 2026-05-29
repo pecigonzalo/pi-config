@@ -406,6 +406,7 @@ export interface SandboxedCommandOptions {
 	onStderrData?: (chunk: Buffer) => void;
 	stdinMode?: "ignore" | "pipe";
 	onSpawn?: (child: ReturnType<typeof spawn>) => void;
+	sandboxConfig?: SandboxRuntimeConfigLike;
 }
 
 export interface SandboxedCommandResult {
@@ -434,6 +435,7 @@ export async function runSandboxedCommand(
 		onStderrData,
 		stdinMode,
 		onSpawn,
+		sandboxConfig,
 	}: SandboxedCommandOptions,
 ): Promise<SandboxedCommandResult> {
 	const sandboxEnv = getSandboxCacheEnv(cwd, env);
@@ -450,7 +452,7 @@ export async function runSandboxedCommand(
 		// command receives Pi's normal TMPDIR instead.
 		if (sandboxEnv.TMPDIR) process.env.TMPDIR = sandboxEnv.TMPDIR;
 		if (effectiveTmpDir) process.env.CLAUDE_TMPDIR = effectiveTmpDir;
-		wrappedCommand = await sandboxManager.wrapWithSandbox(command);
+		wrappedCommand = await sandboxManager.wrapWithSandbox(command, undefined, sandboxConfig, signal);
 	} finally {
 		if (previousTmpDir === undefined) delete process.env.TMPDIR;
 		else process.env.TMPDIR = previousTmpDir;
@@ -510,6 +512,7 @@ export function createSandboxedBashOps(
 	sandboxManager: SandboxManagerLike,
 	runtimeTmpDir?: string,
 	sandboxEnv?: Record<string, string>,
+	sandboxConfig?: SandboxRuntimeConfigLike,
 ): BashOperations {
 	return {
 		async exec(command, cwd, { onData, signal, timeout }) {
@@ -525,6 +528,7 @@ export function createSandboxedBashOps(
 				timeout,
 				signal,
 				onData,
+				sandboxConfig,
 			});
 		},
 	};

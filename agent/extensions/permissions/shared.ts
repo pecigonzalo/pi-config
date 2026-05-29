@@ -143,7 +143,12 @@ export interface SandboxRuntimeConfigLike {
 
 export interface SandboxManagerLike {
 	initialize(config: SandboxRuntimeConfigLike): Promise<void>;
-	wrapWithSandbox(command: string): Promise<string>;
+	wrapWithSandbox(
+		command: string,
+		binShell?: string,
+		customConfig?: Partial<SandboxRuntimeConfigLike>,
+		abortSignal?: AbortSignal,
+	): Promise<string>;
 	reset(): Promise<void>;
 }
 

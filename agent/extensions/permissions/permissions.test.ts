@@ -25,7 +25,7 @@ import {
 	runSandboxedCommand,
 } from "./sandbox";
 import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-parse";
-import type { Rule } from "./shared";
+import type { Rule, SandboxRuntimeConfigLike } from "./shared";
 
 const execFile = promisify(execFileCallback);
 
@@ -536,6 +536,36 @@ describe("sandboxed command runner", () => {
 		expect(chunks.join("")).toBe([runtimeTmpDir, oldClaudeTmpDir ?? "unset", ""].join("\n"));
 		expect(process.env.TMPDIR).toBe(oldTmpDir);
 		expect(process.env.CLAUDE_TMPDIR).toBe(oldClaudeTmpDir);
+	});
+
+	it("passes the current sandbox config to each wrapped command", async () => {
+		const sandboxConfig: SandboxRuntimeConfigLike = {
+			filesystem: {
+				allowWrite: ["/repo/current"],
+				denyRead: [],
+				denyWrite: [],
+			},
+			network: { allowLocalBinding: true },
+		};
+		let receivedConfig: Partial<SandboxRuntimeConfigLike> | undefined;
+
+		const ops = createSandboxedBashOps(
+			{
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command, _binShell, customConfig) => {
+					receivedConfig = customConfig;
+					return command;
+				},
+			},
+			undefined,
+			undefined,
+			sandboxConfig,
+		);
+
+		await ops.exec("true", process.cwd(), { onData: () => {} });
+
+		expect(receivedConfig).toBe(sandboxConfig);
 	});
 
 	it("rejects with timeout errors", async () => {
