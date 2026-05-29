@@ -1,6 +1,9 @@
 {
   "lastChangelogVersion": "0.75.5",
   "theme": "dracula",
+  "extensions": [
+    "-extensions/store/index.ts"
+  ],
   "enabledModels": [
     "github-copilot/claude-opus-4.6",
     "github-copilot/claude-opus-4.7",
@@ -14,9 +17,8 @@
     "github-copilot/claude-haiku-4.5"
   ],
   "defaultProvider": "github-copilot",
-  "defaultModel": "gpt-5.3-codex",
+  "defaultModel": "gpt-5.5",
   "defaultThinkingLevel": "high",
-  "skills": ["~/.config/opencode/skills"],
   "compaction": {
     "enabled": true
   },
