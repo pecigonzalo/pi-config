@@ -7,6 +7,7 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import { approvalsCoverBash, approvalsCoverPaths, extractApprovalRecords, getApprovalsSettings } from "./approvals";
 import { resolveCodemodePolicy } from "./codemode";
+import { GIT_METADATA_PROTECTED_RESOURCE_MATCH } from "./protected-resources";
 import { findGitRepoRoot, getFilesystemApprovalTargets, isPathOutsideCwd, ruleMatch } from "./matching";
 import {
 	canAutoApproveParsedBash,
@@ -28,6 +29,26 @@ import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-pa
 import type { Rule, SandboxRuntimeConfigLike } from "./shared";
 
 const execFile = promisify(execFileCallback);
+
+const GIT_REPOSITORY_ENV_KEYS = [
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_COMMON_DIR",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_PREFIX",
+] as const;
+
+function gitTestEnv(): NodeJS.ProcessEnv {
+	const env = { ...process.env };
+	for (const key of GIT_REPOSITORY_ENV_KEYS) delete env[key];
+	return env;
+}
+
+function execTestGit(args: string[], cwd: string) {
+	return execFile("git", args, { cwd, env: gitTestEnv() });
+}
 
 type ParsedBashCommand = Awaited<ReturnType<typeof parseBashCommand>>;
 
@@ -75,6 +96,15 @@ describe("permissions config merge", () => {
 
 		expect(resolved.denyRead).toContain("(^|[/])secrets/");
 		expect(resolved.denyRead).not.toContain("\\.env(\\..+)?$");
+	});
+
+	it("includes read-protected defaults in write-protected defaults", () => {
+		const resolved = configModule.resolveProtectedResources({});
+
+		expect(resolved.denyRead).toContain("\\.env(\\..+)?$");
+		expect(resolved.denyWrite).toContain("\\.env(\\..+)?$");
+		expect(resolved.denyRead).toContain("\\.(pem|key|p12|pfx|crt|ca-bundle)$");
+		expect(resolved.denyWrite).toContain("\\.(pem|key|p12|pfx|crt|ca-bundle)$");
 	});
 
 	it("interpolates environment variables in rule matches as regex literals", () => {
@@ -830,7 +860,7 @@ func TestGoCache(t *testing.T) {}
 			...policy,
 			protectedResources: {
 				denyRead: ["\\.env(\\..+)?$", "(^|[/])(\\.aws[/]|\\.ssh[/]|\\.gnupg[/])"],
-				denyWrite: ["(^|[/])\\.git/(hooks/|config$)"],
+				denyWrite: [GIT_METADATA_PROTECTED_RESOURCE_MATCH],
 			},
 		};
 		const compiled = compileSandboxConfig(protectedPolicy, "/repo", { enabled: true });
@@ -841,7 +871,23 @@ func TestGoCache(t *testing.T) {}
 		expect(denyRead).toContain("/repo/**/.ssh/**");
 		expect(denyRead).not.toContain("\\.env(\\..+)?$");
 		expect(denyWrite).toContain("/repo/**/.git/config");
-		expect(denyWrite).not.toContain("(^|[/])\\.git/(hooks/|config$)");
+		expect(denyWrite).not.toContain(GIT_METADATA_PROTECTED_RESOURCE_MATCH);
+	});
+
+	it("warns when protected resource regexes cannot be mapped to sandbox paths", () => {
+		const protectedPolicy = {
+			...policy,
+			protectedResources: {
+				denyRead: [],
+				denyWrite: ["(^|[/])custom-secret(/|$)"],
+			},
+		};
+
+		const compiled = compileSandboxConfig(protectedPolicy, "/repo", { enabled: true });
+
+		expect(compiled.warnings).toContain(
+			"Protected write pattern has no sandbox path mapping and is only enforced by Pi tools: (^|[/])custom-secret(/|$)",
+		);
 	});
 
 	it("resolves configured sandbox paths relative to the command cwd", () => {
@@ -862,7 +908,7 @@ func TestGoCache(t *testing.T) {}
 		const repo = path.join(tmp, "repo");
 		const subdir = path.join(repo, "packages", "app");
 		await fs.mkdir(subdir, { recursive: true });
-		await execFile("git", ["init", "-q"], { cwd: repo });
+		await execTestGit(["init", "-q"], repo);
 
 		try {
 			const repoRealPath = await fs.realpath(repo);
@@ -873,6 +919,61 @@ func TestGoCache(t *testing.T) {}
 
 			const compiled = compileSandboxConfig(policy, subdir, { enabled: true });
 			expect(compiled.config.filesystem?.allowWrite).toContain(path.join(repoRealPath, ".git"));
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("denies resolved git hooks and config writes when cwd is below the repo root", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-git-deny-subdir-"));
+		const repo = path.join(tmp, "repo");
+		const subdir = path.join(repo, "packages", "app");
+		await fs.mkdir(subdir, { recursive: true });
+		await execTestGit(["init", "-q"], repo);
+
+		try {
+			const repoRealPath = await fs.realpath(repo);
+			const protectedPolicy = {
+				...policy,
+				protectedResources: { denyRead: [], denyWrite: [GIT_METADATA_PROTECTED_RESOURCE_MATCH] },
+			};
+			const compiled = compileSandboxConfig(protectedPolicy, subdir, { enabled: true });
+			const denyWrite = compiled.config.filesystem?.denyWrite ?? [];
+
+			expect(denyWrite).toContain(path.join(repoRealPath, ".git", "hooks"));
+			expect(denyWrite).toContain(path.join(repoRealPath, ".git", "hooks", "**"));
+			expect(denyWrite).toContain(path.join(repoRealPath, ".git", "config"));
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("denies resolved git hooks and config writes from worktrees", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-git-deny-worktree-"));
+		const repo = path.join(tmp, "repo");
+		const worktree = path.join(tmp, "worktree");
+		await fs.mkdir(repo, { recursive: true });
+		await execTestGit(["init", "-q"], repo);
+		await fs.writeFile(path.join(repo, "README.md"), "# test\n");
+		await execTestGit(["add", "README.md"], repo);
+		await execTestGit(["-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-q", "-m", "initial"], repo);
+		await execTestGit(["worktree", "add", "-q", worktree], repo);
+
+		try {
+			const repoRealPath = await fs.realpath(repo);
+			const worktreeGitDir = (await execTestGit(["rev-parse", "--git-dir"], worktree)).stdout.trim();
+			const worktreeGitPath = path.isAbsolute(worktreeGitDir) ? worktreeGitDir : path.resolve(worktree, worktreeGitDir);
+			const protectedPolicy = {
+				...policy,
+				protectedResources: { denyRead: [], denyWrite: [GIT_METADATA_PROTECTED_RESOURCE_MATCH] },
+			};
+			const compiled = compileSandboxConfig(protectedPolicy, worktree, { enabled: true });
+			const denyWrite = compiled.config.filesystem?.denyWrite ?? [];
+
+			expect(denyWrite).toContain(path.join(repoRealPath, ".git", "hooks"));
+			expect(denyWrite).toContain(path.join(repoRealPath, ".git", "config"));
+			expect(denyWrite).toContain(path.join(worktreeGitPath, "hooks"));
+			expect(denyWrite).toContain(path.join(worktreeGitPath, "config"));
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
 		}

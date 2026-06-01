@@ -329,6 +329,9 @@ export default function (pi: ExtensionAPI) {
 		const compiled = compileSandboxConfig(policy, ctx.cwd, config.sandbox, effectiveTmpDir);
 		const nextSandboxInitializedKey = JSON.stringify(compiled.config);
 		sandboxConfig = compiled.config;
+		if (ctx.hasUI && compiled.warnings.length > 0) {
+			ctx.ui.notify(compiled.warnings.join("\n"), "warning");
+		}
 
 		if ((pi.getFlag("no-sandbox") as boolean) === true) {
 			await resetSandboxRuntime(ctx, "after --no-sandbox");

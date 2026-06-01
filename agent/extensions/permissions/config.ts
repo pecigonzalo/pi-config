@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getBuiltinProtectedResourceMatches } from "./protected-resources";
 import {
 	type AgentProfile,
 	type EffectivePolicy,
@@ -327,22 +328,6 @@ export function loadConfig(cwd: string, options?: { onWarning?: (message: string
 	});
 }
 
-const BUILTIN_PROTECTED_DENY_READ = [
-	"\\.env(\\..+)?$",
-	"\\.(pem|key|p12|pfx|crt|ca-bundle)$",
-	"(^|[/])(\\.aws[/]|\\.ssh[/]|\\.gnupg[/])",
-] as const;
-
-const BUILTIN_PROTECTED_DENY_WRITE = [
-	"\\.env(\\..+)?$",
-	"\\.(pem|key|p12|pfx|crt|ca-bundle)$",
-	"(^|[/])\\.git/(hooks/|config$)",
-	"(^|[/])(\\.bashrc|\\.bash_profile|\\.zshrc|\\.zprofile|\\.profile)$",
-	"(^|[/])\\.(gitconfig|gitmodules|ripgreprc|mcp\\.json)$",
-	"(^|[/])(\\.vscode/|\\.idea/)",
-	"(^|[/])\\.claude/(commands/|agents/)",
-] as const;
-
 export function resolveProtectedResources(config: PermissionsConfig): ResolvedProtectedResources {
 	const settings = config.protectedResources ?? {};
 	const enabled = settings.enabled ?? true;
@@ -350,11 +335,11 @@ export function resolveProtectedResources(config: PermissionsConfig): ResolvedPr
 
 	const useDefaults = settings.defaults ?? true;
 	const denyReadSource = [
-		...(useDefaults ? BUILTIN_PROTECTED_DENY_READ : []),
+		...(useDefaults ? getBuiltinProtectedResourceMatches("read") : []),
 		...(settings.addDenyRead ?? []),
 	];
 	const denyWriteSource = [
-		...(useDefaults ? BUILTIN_PROTECTED_DENY_WRITE : []),
+		...(useDefaults ? getBuiltinProtectedResourceMatches("write") : []),
 		...(settings.addDenyWrite ?? []),
 	];
 	const unprotectRead = new Set(settings.unprotectRead ?? []);

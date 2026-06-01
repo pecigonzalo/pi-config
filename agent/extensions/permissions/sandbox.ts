@@ -12,6 +12,7 @@ import {
 	dedupeStrings,
 } from "./shared";
 import { resolveToken } from "./matching";
+import { getProtectedResourceSandboxDenySpec, type ProtectedResourceAccess } from "./protected-resources";
 
 /**
  * Capture the real system tmpdir before sandbox overrides $TMPDIR.
@@ -90,21 +91,6 @@ function getPlatformCacheWritePaths(): string[] {
 	const goCacheDir = getGoBuildCacheDir();
 	return dedupeStrings([darwinCacheDir, darwinLibraryCacheDir, goCacheDir].filter((value): value is string => value !== undefined));
 }
-
-const PROTECTED_RESOURCE_SANDBOX_DENY_READ = new Map<string, string[]>([
-	["\\.env(\\..+)?$", ["**/.env", "**/.env.*"]],
-	["\\.(pem|key|p12|pfx|crt|ca-bundle)$", ["**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.crt", "**/*.ca-bundle"]],
-	["(^|[/])(\\.aws[/]|\\.ssh[/]|\\.gnupg[/])", ["**/.aws", "**/.aws/**", "**/.ssh", "**/.ssh/**", "**/.gnupg", "**/.gnupg/**"]],
-]);
-
-const PROTECTED_RESOURCE_SANDBOX_DENY_WRITE = new Map<string, string[]>([
-	...PROTECTED_RESOURCE_SANDBOX_DENY_READ,
-	["(^|[/])\\.git/(hooks/|config$)", ["**/.git/hooks", "**/.git/hooks/**", "**/.git/config"]],
-	["(^|[/])(\\.bashrc|\\.bash_profile|\\.zshrc|\\.zprofile|\\.profile)$", ["**/.bashrc", "**/.bash_profile", "**/.zshrc", "**/.zprofile", "**/.profile"]],
-	["(^|[/])\\.(gitconfig|gitmodules|ripgreprc|mcp\\.json)$", ["**/.gitconfig", "**/.gitmodules", "**/.ripgreprc", "**/.mcp.json"]],
-	["(^|[/])(\\.vscode/|\\.idea/)", ["**/.vscode", "**/.vscode/**", "**/.idea", "**/.idea/**"]],
-	["(^|[/])\\.claude/(commands/|agents/)", ["**/.claude/commands", "**/.claude/commands/**", "**/.claude/agents", "**/.claude/agents/**"]],
-]);
 
 // c-ares-based tools on macOS (for example Nix curl) read DNS settings via
 // SystemConfiguration instead of /etc/resolv.conf. Seatbelt blocks that Mach
@@ -211,8 +197,36 @@ function resolveSandboxPathTokens(values: string[], cwd: string): string[] {
 	return values.map((value) => resolveToken(value, cwd));
 }
 
-function getProtectedSandboxDenyPaths(patterns: string[] | undefined, mappings: Map<string, string[]>, cwd: string): string[] {
-	return resolveSandboxPathTokens((patterns ?? []).flatMap((pattern) => mappings.get(pattern) ?? []), cwd);
+interface ProtectedSandboxDenyPaths {
+	paths: string[];
+	unmappedPatterns: string[];
+}
+
+function getProtectedSandboxDenyPaths(
+	patterns: string[] | undefined,
+	access: ProtectedResourceAccess,
+	cwd: string,
+): ProtectedSandboxDenyPaths {
+	const paths: string[] = [];
+	const unmappedPatterns: string[] = [];
+
+	for (const pattern of patterns ?? []) {
+		const spec = getProtectedResourceSandboxDenySpec(pattern, access);
+		if (!spec) {
+			unmappedPatterns.push(pattern);
+			continue;
+		}
+
+		paths.push(...resolveSandboxPathTokens([...spec.globs], cwd));
+		if (access === "write" && spec.includeGitMetadataPaths) {
+			paths.push(...getProtectedGitDenyWritePaths(cwd));
+		}
+	}
+
+	return {
+		paths: dedupeStrings(paths),
+		unmappedPatterns: dedupeStrings(unmappedPatterns),
+	};
 }
 
 function existingPathAliases(candidate: string): string[] {
@@ -241,16 +255,30 @@ function gitRevParse(cwd: string, arg: string): string | undefined {
 	}
 }
 
-export function getWorkspaceWritePaths(cwd: string): string[] {
+function getGitMetadataWritePaths(cwd: string): string[] {
 	// Starting pi from a repo subdirectory should still allow `git commit`.
 	// Git writes index/object/lock files under the repository metadata directory,
 	// which can live outside cwd (and outside the worktree for git worktrees).
 	const gitDir = gitRevParse(cwd, "--git-dir");
 	const gitCommonDir = gitRevParse(cwd, "--git-common-dir");
 	return dedupeStrings([
-		...existingPathAliases(cwd),
 		...(gitDir ? resolveGitPathAliases(gitDir, cwd) : []),
 		...(gitCommonDir ? resolveGitPathAliases(gitCommonDir, cwd) : []),
+	]);
+}
+
+function getProtectedGitDenyWritePaths(cwd: string): string[] {
+	return dedupeStrings(getGitMetadataWritePaths(cwd).flatMap((metadataPath) => [
+		path.join(metadataPath, "hooks"),
+		path.join(metadataPath, "hooks", "**"),
+		path.join(metadataPath, "config"),
+	]));
+}
+
+export function getWorkspaceWritePaths(cwd: string): string[] {
+	return dedupeStrings([
+		...existingPathAliases(cwd),
+		...getGitMetadataWritePaths(cwd),
 	]);
 }
 
@@ -297,23 +325,40 @@ function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): No
 	};
 }
 
-export function compileSandboxConfig(
-	policy: EffectivePolicy,
-	cwd: string,
-	overrides: SandboxSettings | undefined,
-	runtimeTmpDir?: string,
-): { enabled: boolean; config: SandboxRuntimeConfigLike; reason: string } {
+export interface CompiledSandboxConfig {
+	enabled: boolean;
+	config: SandboxRuntimeConfigLike;
+	reason: string;
+	warnings: string[];
+}
+
+interface SandboxModeDefault {
+	enabled: boolean;
+	network: boolean;
+	allowWrite: string[];
+}
+
+function formatUnmappedProtectedPatternWarning(access: ProtectedResourceAccess, pattern: string): string {
+	return `Protected ${access} pattern has no sandbox path mapping and is only enforced by Pi tools: ${pattern}`;
+}
+
+function getSandboxModeDefault(policy: EffectivePolicy, cwd: string): SandboxModeDefault {
 	const workspaceWritePaths = getWorkspaceWritePaths(cwd);
-	const modeDefaults: Record<PermissionMode, { enabled: boolean; network: boolean; allowWrite: string[] }> = {
+	const modeDefaults: Record<PermissionMode, SandboxModeDefault> = {
 		plan: { enabled: true, network: false, allowWrite: [] },
 		"workspace-write": { enabled: true, network: true, allowWrite: workspaceWritePaths },
 		"full-access": { enabled: false, network: true, allowWrite: workspaceWritePaths },
 	};
+	return modeDefaults[policy.mode];
+}
 
-	const modeDefault = modeDefaults[policy.mode];
-	const enabled = overrides?.enabled ?? modeDefault.enabled;
-	const networkEnabled = overrides?.network ?? modeDefault.network;
-	const effectiveTmpDir = runtimeTmpDir ?? getEffectiveSandboxTmpDir(cwd, overrides);
+function compileSandboxFilesystemConfig(
+	policy: EffectivePolicy,
+	cwd: string,
+	overrides: SandboxSettings | undefined,
+	effectiveTmpDir: string,
+	modeDefault: SandboxModeDefault,
+): { filesystem: NonNullable<SandboxRuntimeConfigLike["filesystem"]>; warnings: string[] } {
 	const compatWritePaths = (overrides?.compatWritePaths ?? true) ? getCompatWritePaths() : [];
 	const platformCachePaths = getPlatformCacheWritePaths();
 	const dockerBuildxWritePaths = policy.mode === "plan" ? [] : getDockerBuildxWritePaths(cwd, overrides);
@@ -334,14 +379,35 @@ export function compileSandboxConfig(
 		...dockerBuildxWritePaths,
 		effectiveTmpDir,
 	]);
+	const protectedDenyRead = getProtectedSandboxDenyPaths(policy.protectedResources.denyRead, "read", cwd);
+	const protectedDenyWrite = getProtectedSandboxDenyPaths(policy.protectedResources.denyWrite, "write", cwd);
 	const denyRead = dedupeStrings([
-		...getProtectedSandboxDenyPaths(policy.protectedResources.denyRead, PROTECTED_RESOURCE_SANDBOX_DENY_READ, cwd),
+		...protectedDenyRead.paths,
 		...resolveSandboxPathTokens(overrides?.denyRead ?? [], cwd),
 	]);
 	const denyWrite = dedupeStrings([
-		...getProtectedSandboxDenyPaths(policy.protectedResources.denyWrite, PROTECTED_RESOURCE_SANDBOX_DENY_WRITE, cwd),
+		...protectedDenyWrite.paths,
 		...resolveSandboxPathTokens(overrides?.denyWrite ?? [], cwd),
 	]);
+	const warnings = dedupeStrings([
+		...protectedDenyRead.unmappedPatterns.map((pattern) => formatUnmappedProtectedPatternWarning("read", pattern)),
+		...protectedDenyWrite.unmappedPatterns.map((pattern) => formatUnmappedProtectedPatternWarning("write", pattern)),
+	]);
+
+	return {
+		warnings,
+		filesystem: {
+			denyRead,
+			allowWrite,
+			denyWrite,
+		},
+	};
+}
+
+function compileSandboxNetworkConfig(
+	networkEnabled: boolean,
+	overrides: SandboxSettings | undefined,
+): SandboxRuntimeConfigLike["network"] {
 	const socketSet = new Set<string>(overrides?.allowUnixSockets ?? []);
 	if (overrides?.allowSshAuthSock && process.env.SSH_AUTH_SOCK) socketSet.add(process.env.SSH_AUTH_SOCK);
 	const allowUnixSockets = [...socketSet];
@@ -349,48 +415,55 @@ export function compileSandboxConfig(
 	const allowLocalBinding = overrides?.allowLocalBinding || undefined;
 	const defaultMachLookups = process.platform === "darwin" && networkEnabled ? DARWIN_DNS_CONFIG_MACH_LOOKUPS : [];
 	const allowMachLookup = dedupeStrings([...defaultMachLookups, ...(overrides?.allowMachLookup ?? [])]);
+	const commonNetworkConfig = {
+		allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
+		allowAllUnixSockets: allowAllUnixSockets || undefined,
+		allowLocalBinding,
+		allowMachLookup: allowMachLookup.length > 0 ? allowMachLookup : undefined,
+	};
+
+	if (!networkEnabled) {
+		return {
+			allowedDomains: [],
+			deniedDomains: [],
+			...commonNetworkConfig,
+		};
+	}
+
 	const explicitAllowedDomains = overrides?.allowedDomains;
 	const explicitDeniedDomains = overrides?.deniedDomains;
-	const hasExplicitDomainPolicy = explicitAllowedDomains !== undefined || explicitDeniedDomains !== undefined;
+	if (explicitAllowedDomains === undefined && explicitDeniedDomains === undefined) {
+		return commonNetworkConfig;
+	}
 
-	const enableWeakerNetworkIsolation = overrides?.enableWeakerNetworkIsolation || undefined;
-	const networkConfig = !networkEnabled
-		? {
-				allowedDomains: [],
-				deniedDomains: [],
-				allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
-				allowAllUnixSockets: allowAllUnixSockets || undefined,
-				allowLocalBinding,
-				allowMachLookup: allowMachLookup.length > 0 ? allowMachLookup : undefined,
-			}
-		: hasExplicitDomainPolicy
-			? {
-					allowedDomains: dedupeStrings(explicitAllowedDomains ?? []),
-					deniedDomains: dedupeStrings(explicitDeniedDomains ?? []),
-					allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
-					allowAllUnixSockets: allowAllUnixSockets || undefined,
-					allowLocalBinding,
-					allowMachLookup: allowMachLookup.length > 0 ? allowMachLookup : undefined,
-				}
-			: {
-					allowUnixSockets: allowUnixSockets.length > 0 ? allowUnixSockets : undefined,
-					allowAllUnixSockets: allowAllUnixSockets || undefined,
-					allowLocalBinding,
-					allowMachLookup: allowMachLookup.length > 0 ? allowMachLookup : undefined,
-				};
+	return {
+		allowedDomains: dedupeStrings(explicitAllowedDomains ?? []),
+		deniedDomains: dedupeStrings(explicitDeniedDomains ?? []),
+		...commonNetworkConfig,
+	};
+}
+
+export function compileSandboxConfig(
+	policy: EffectivePolicy,
+	cwd: string,
+	overrides: SandboxSettings | undefined,
+	runtimeTmpDir?: string,
+): CompiledSandboxConfig {
+	const modeDefault = getSandboxModeDefault(policy, cwd);
+	const enabled = overrides?.enabled ?? modeDefault.enabled;
+	const networkEnabled = overrides?.network ?? modeDefault.network;
+	const effectiveTmpDir = runtimeTmpDir ?? getEffectiveSandboxTmpDir(cwd, overrides);
+	const filesystem = compileSandboxFilesystemConfig(policy, cwd, overrides, effectiveTmpDir, modeDefault);
 
 	return {
 		enabled,
 		reason: enabled ? `mode=${policy.mode}, tmpDir=${effectiveTmpDir}` : `disabled by mode=${policy.mode}`,
+		warnings: filesystem.warnings,
 		config: {
-			enableWeakerNetworkIsolation,
+			enableWeakerNetworkIsolation: overrides?.enableWeakerNetworkIsolation || undefined,
 			allowPty: overrides?.allowPty ?? true,
-			network: networkConfig,
-			filesystem: {
-				denyRead,
-				allowWrite,
-				denyWrite,
-			},
+			network: compileSandboxNetworkConfig(networkEnabled, overrides),
+			filesystem: filesystem.filesystem,
 		},
 	};
 }
