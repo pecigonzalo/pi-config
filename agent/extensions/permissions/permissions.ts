@@ -418,11 +418,20 @@ export default function (pi: ExtensionAPI) {
 		return `'${value.replace(/'/g, "'\\''")}'`;
 	}
 
-	async function probeSandbox(ctx: ExtensionContext) {
+	type SandboxProbeResult = {
+		ok: boolean;
+		message: string;
+		level: "info" | "warning" | "error";
+	};
+
+	async function runSandboxProbe(ctx: ExtensionContext): Promise<SandboxProbeResult> {
 		if (!sandboxEnabled || !sandboxAvailable || !sandboxManager || !sandboxConfig) {
 			const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
-			ctx.ui.notify(`Bash sandbox probe skipped: sandbox is not active (${sandboxStatus})`, "warning");
-			return;
+			return {
+				ok: false,
+				message: `Bash sandbox probe skipped: sandbox is not active (${sandboxStatus})`,
+				level: "warning",
+			};
 		}
 
 		const probePath = path.join(ctx.cwd, `.pi-sandbox-write-probe-${process.pid}-${Date.now()}`);
@@ -443,16 +452,24 @@ export default function (pi: ExtensionAPI) {
 				sandboxConfig,
 			});
 			if (result.exitCode === 0) {
-				ctx.ui.notify(`Bash sandbox probe passed: workspace writes are allowed in ${ctx.cwd}`, "info");
-				return;
+				return {
+					ok: true,
+					message: `Bash sandbox probe passed: workspace writes are allowed in ${ctx.cwd}`,
+					level: "info",
+				};
 			}
 			const details = output.join("").trim();
-			ctx.ui.notify(
-				`Bash sandbox probe failed with exit code ${result.exitCode ?? "unknown"}${details ? `: ${details}` : ""}`,
-				"error",
-			);
+			return {
+				ok: false,
+				message: `Bash sandbox probe failed with exit code ${result.exitCode ?? "unknown"}${details ? `: ${details}` : ""}`,
+				level: "error",
+			};
 		} catch (err) {
-			ctx.ui.notify(`Bash sandbox probe failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+			return {
+				ok: false,
+				message: `Bash sandbox probe failed: ${err instanceof Error ? err.message : String(err)}`,
+				level: "error",
+			};
 		} finally {
 			try {
 				fs.rmSync(probePath, { force: true });
@@ -460,6 +477,24 @@ export default function (pi: ExtensionAPI) {
 				// ignore cleanup errors; the sandbox may have blocked creation
 			}
 		}
+	}
+
+	async function probeSandbox(ctx: ExtensionContext) {
+		const result = await runSandboxProbe(ctx);
+		ctx.ui.notify(result.message, result.level);
+	}
+
+	async function repairSandbox(ctx: ExtensionContext) {
+		reload(ctx);
+		await resetSandboxRuntime(ctx, "while repairing");
+		await initializeSandbox(ctx);
+
+		const result = await runSandboxProbe(ctx);
+		if (result.ok) {
+			ctx.ui.notify(`Bash sandbox repair completed. ${result.message}`, "info");
+			return;
+		}
+		ctx.ui.notify(`Bash sandbox repair did not restore a healthy sandbox. ${result.message}`, result.level);
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -1041,7 +1076,7 @@ export default function (pi: ExtensionAPI) {
 			const subcommandArgs = subcommandRest.join(" ");
 
 			if (subcommand === "help") {
-				ctx.ui.notify("Usage: /permissions [verbose|approvals|reset [session|saved|project|agent|all]|mode|sandbox [status|probe|enable|disable]]", "info");
+				ctx.ui.notify("Usage: /permissions [verbose|approvals|reset [session|saved|project|agent|all]|mode|sandbox [status|probe|repair|enable|disable]]", "info");
 				return;
 			}
 
@@ -1077,6 +1112,11 @@ export default function (pi: ExtensionAPI) {
 
 			if (normalizedArgs === "sandbox probe") {
 				await probeSandbox(ctx);
+				return;
+			}
+
+			if (normalizedArgs === "sandbox repair") {
+				await repairSandbox(ctx);
 				return;
 			}
 
@@ -1159,7 +1199,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					lines.push("");
 					lines.push(`  ${theme.fg("muted", "Protected:    ")}${theme.fg("warning", `read=${protectedResources.denyRead.length} write=${protectedResources.denyWrite.length}`)}`);
-					lines.push(`  ${theme.fg("muted", "More:         ")}${theme.fg("dim", "/permissions verbose  •  /permissions approvals  •  /permissions reset  •  /permissions sandbox probe|enable|disable")}`);
+					lines.push(`  ${theme.fg("muted", "More:         ")}${theme.fg("dim", "/permissions verbose  •  /permissions approvals  •  /permissions reset  •  /permissions sandbox probe|repair|enable|disable")}`);
 					lines.push("");
 					lines.push(`  ${theme.fg("dim", "Press Escape to close")}`);
 					lines.push("");
