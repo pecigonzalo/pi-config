@@ -127,6 +127,7 @@ import {
 	getEffectiveSandboxTmpDir,
 	getSandboxTmpDirMode,
 	SandboxRuntimeAdapter,
+	shouldProbeSandboxAfterIdle,
 } from "./sandbox";
 import {
 	dedupeStrings,
@@ -534,8 +535,9 @@ export default function (pi: ExtensionAPI) {
 
 	ensureSandboxHealthyAfterIdle = async (ctx: ExtensionContext) => {
 		if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) return;
-		const idleMs = Date.now() - lastSandboxCommandAt;
-		if (idleMs < SANDBOX_RESUME_IDLE_PROBE_MS) return;
+		const now = Date.now();
+		const idleMs = now - lastSandboxCommandAt;
+		if (!shouldProbeSandboxAfterIdle(lastSandboxCommandAt, now, SANDBOX_RESUME_IDLE_PROBE_MS)) return;
 
 		const probe = await runSandboxProbe(ctx);
 		if (probe.ok) return;

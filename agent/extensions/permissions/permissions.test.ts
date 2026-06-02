@@ -25,6 +25,7 @@ import {
 	getWorkspaceWritePaths,
 	runSandboxedCommand,
 	SandboxRuntimeAdapter,
+	shouldProbeSandboxAfterIdle,
 } from "./sandbox";
 import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-parse";
 import type { Rule, SandboxRuntimeConfigLike } from "./shared";
@@ -643,6 +644,39 @@ describe("sandboxed command runner", () => {
 		await adapter.initialize(sandboxConfig, "key-1");
 
 		expect(calls).toEqual(["reset", "initialize", "reset", "reset", "initialize"]);
+	});
+
+	it("reports reset errors while still initializing with the requested config", async () => {
+		const calls: string[] = [];
+		const resetErrors: unknown[] = [];
+		const adapter = new SandboxRuntimeAdapter({
+			initialize: async (_config) => {
+				calls.push("initialize");
+			},
+			reset: async () => {
+				calls.push("reset");
+				throw new Error("stale reset failed");
+			},
+			wrapWithSandbox: async (command) => command,
+		});
+		const sandboxConfig: SandboxRuntimeConfigLike = {
+			filesystem: { denyRead: [], allowWrite: ["/repo"], denyWrite: [] },
+			network: { allowLocalBinding: true },
+		};
+
+		await adapter.initialize(sandboxConfig, "key-1", {
+			onResetError: (err) => resetErrors.push(err),
+		});
+
+		expect(calls).toEqual(["reset", "initialize"]);
+		expect(resetErrors).toHaveLength(1);
+		expect(resetErrors[0]).toBeInstanceOf(Error);
+	});
+
+	it("detects when an idle gap should trigger a sandbox health probe", () => {
+		expect(shouldProbeSandboxAfterIdle(1_000, 1_999, 1_000)).toBe(false);
+		expect(shouldProbeSandboxAfterIdle(1_000, 2_000, 1_000)).toBe(true);
+		expect(shouldProbeSandboxAfterIdle(1_000, 2_001, 1_000)).toBe(true);
 	});
 
 	it("rejects with timeout errors", async () => {
