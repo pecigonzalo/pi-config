@@ -700,67 +700,154 @@ describe("sandboxed command runner", () => {
 });
 
 describe("permissions extension sandbox lifecycle", () => {
-	it("uses tmpdir rather than cwd writes for idle health probes in plan mode", async () => {
+	type RegisteredTool = { execute: (...args: unknown[]) => Promise<unknown> };
+	type RegisteredCommand = { handler: (args: string | undefined, ctx: ExtensionContext) => Promise<void> | void };
+
+	async function setupPermissionsHarness(options: {
+		mode: "plan" | "workspace-write";
+		sandboxManager: { initialize: () => Promise<void>; reset: () => Promise<void>; wrapWithSandbox: (command: string) => Promise<string> };
+		now: () => number;
+		notifications?: string[];
+	}) {
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-extension-probe-"));
 		const cwd = path.join(tmp, "repo");
 		const sandboxTmpDir = path.join(tmp, "sandbox-tmp");
 		await fs.mkdir(path.join(cwd, ".pi"), { recursive: true });
 		await fs.writeFile(
 			path.join(cwd, ".pi", "permissions.jsonc"),
-			JSON.stringify({ default: { mode: "plan" }, sandbox: { enabled: true, tmpDir: sandboxTmpDir } }),
+			JSON.stringify({ default: { mode: options.mode }, sandbox: { enabled: true, tmpDir: sandboxTmpDir } }),
 			"utf8",
 		);
+		mock.module("@anthropic-ai/sandbox-runtime", () => ({ SandboxManager: options.sandboxManager }));
 
-		const wrappedCommands: string[] = [];
-		const sandboxManager = {
-			initialize: async () => {},
-			reset: async () => {},
-			wrapWithSandbox: async (command: string) => {
-				wrappedCommands.push(command);
-				if (command.includes(`${cwd}${path.sep}.pi-sandbox-write-probe-`)) {
-					throw new Error("cwd write probe should be skipped in plan mode");
-				}
-				return command;
+		const originalDateNow = Date.now;
+		Date.now = options.now;
+		const tools = new Map<string, RegisteredTool>();
+		const commands = new Map<string, RegisteredCommand>();
+		const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => Promise<void> | void>>();
+		const pi = {
+			registerFlag: () => {},
+			getFlag: () => false,
+			registerTool: (tool: { name: string } & RegisteredTool) => {
+				tools.set(tool.name, tool);
+			},
+			registerCommand: (name: string, command: RegisteredCommand) => {
+				commands.set(name, command);
+			},
+			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void> | void) => {
+				handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+			},
+		} as unknown as ExtensionAPI;
+		const ctx = {
+			cwd,
+			hasUI: true,
+			ui: { notify: (message: string) => options.notifications?.push(message) },
+		} as unknown as ExtensionContext;
+
+		const { default: registerPermissions } = await import("./permissions");
+		registerPermissions(pi);
+		for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
+
+		return {
+			cwd,
+			sandboxTmpDir,
+			ctx,
+			tools,
+			commands,
+			restore: () => {
+				Date.now = originalDateNow;
 			},
 		};
-		mock.module("@anthropic-ai/sandbox-runtime", () => ({ SandboxManager: sandboxManager }));
+	}
 
+	it("uses tmpdir rather than cwd writes for idle health probes in plan mode", async () => {
 		let now = 0;
-		const originalDateNow = Date.now;
-		Date.now = () => now;
+		const wrappedCommands: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "plan",
+			now: () => now,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					wrappedCommands.push(command);
+					return command;
+				},
+			},
+		});
 		try {
-			const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
-			const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => Promise<void> | void>>();
-			const pi = {
-				registerFlag: () => {},
-				getFlag: () => false,
-				registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => {
-					tools.set(tool.name, tool);
-				},
-				registerCommand: () => {},
-				on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void> | void) => {
-					handlers.set(event, [...(handlers.get(event) ?? []), handler]);
-				},
-			} as unknown as ExtensionAPI;
-			const ctx = {
-				cwd,
-				hasUI: false,
-				ui: { notify: () => {} },
-			} as unknown as ExtensionContext;
-
-			const { default: registerPermissions } = await import("./permissions");
-			registerPermissions(pi);
-			for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
-
 			now = 5 * 60 * 1000;
-			const bashTool = tools.get("bash");
+			const bashTool = harness.tools.get("bash");
 			if (!bashTool) throw new Error("bash tool was not registered");
-			await bashTool.execute("probe-test", { command: "true" }, undefined, undefined, ctx);
+			await bashTool.execute("probe-test", { command: "true" }, undefined, undefined, harness.ctx);
 		} finally {
-			Date.now = originalDateNow;
+			harness.restore();
 		}
 
-		expect(wrappedCommands.some((command) => command.includes(`${sandboxTmpDir}${path.sep}.pi-sandbox-write-probe-`))).toBe(true);
+		expect(wrappedCommands.some((command) => command.includes(`${harness.sandboxTmpDir}${path.sep}.pi-sandbox-write-probe-`))).toBe(true);
+		expect(wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`))).toBe(false);
+	});
+
+	it("reports manual probe cwd checks as skipped when policy does not allow workspace writes", async () => {
+		let now = 0;
+		const notifications: string[] = [];
+		const wrappedCommands: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "plan",
+			now: () => now,
+			notifications,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					wrappedCommands.push(command);
+					return command;
+				},
+			},
+		});
+		try {
+			await harness.commands.get("permissions")?.handler("sandbox probe", harness.ctx);
+		} finally {
+			harness.restore();
+		}
+
+		expect(notifications.some((message) => message.includes("workspace write check skipped"))).toBe(true);
+		expect(wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`))).toBe(false);
+	});
+
+	it("retries idle health probes after failed pre-command repair attempts", async () => {
+		let now = 0;
+		let probeCount = 0;
+		let commandCount = 0;
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => now,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					if (command.includes(".pi-sandbox-write-probe-")) {
+						probeCount++;
+						throw new Error("stale sandbox runtime");
+					}
+					commandCount++;
+					return command;
+				},
+			},
+		});
+		try {
+			now = 5 * 60 * 1000;
+			const bashTool = harness.tools.get("bash");
+			if (!bashTool) throw new Error("bash tool was not registered");
+
+			await expect(bashTool.execute("probe-test-1", { command: "true" }, undefined, undefined, harness.ctx)).rejects.toThrow("automatic repair failed");
+			await expect(bashTool.execute("probe-test-2", { command: "true" }, undefined, undefined, harness.ctx)).rejects.toThrow("automatic repair failed");
+		} finally {
+			harness.restore();
+		}
+
+		expect(probeCount).toBe(4);
+		expect(commandCount).toBe(0);
 	});
 });
 
