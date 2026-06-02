@@ -1,5 +1,6 @@
 import { beforeAll, describe, it, expect, mock } from "bun:test";
 import * as piCodingAgent from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile as execFileCallback } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -695,6 +696,71 @@ describe("sandboxed command runner", () => {
 				},
 			),
 		).rejects.toThrow("timeout:0.01");
+	});
+});
+
+describe("permissions extension sandbox lifecycle", () => {
+	it("uses tmpdir rather than cwd writes for idle health probes in plan mode", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-extension-probe-"));
+		const cwd = path.join(tmp, "repo");
+		const sandboxTmpDir = path.join(tmp, "sandbox-tmp");
+		await fs.mkdir(path.join(cwd, ".pi"), { recursive: true });
+		await fs.writeFile(
+			path.join(cwd, ".pi", "permissions.jsonc"),
+			JSON.stringify({ default: { mode: "plan" }, sandbox: { enabled: true, tmpDir: sandboxTmpDir } }),
+			"utf8",
+		);
+
+		const wrappedCommands: string[] = [];
+		const sandboxManager = {
+			initialize: async () => {},
+			reset: async () => {},
+			wrapWithSandbox: async (command: string) => {
+				wrappedCommands.push(command);
+				if (command.includes(`${cwd}${path.sep}.pi-sandbox-write-probe-`)) {
+					throw new Error("cwd write probe should be skipped in plan mode");
+				}
+				return command;
+			},
+		};
+		mock.module("@anthropic-ai/sandbox-runtime", () => ({ SandboxManager: sandboxManager }));
+
+		let now = 0;
+		const originalDateNow = Date.now;
+		Date.now = () => now;
+		try {
+			const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
+			const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => Promise<void> | void>>();
+			const pi = {
+				registerFlag: () => {},
+				getFlag: () => false,
+				registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => {
+					tools.set(tool.name, tool);
+				},
+				registerCommand: () => {},
+				on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void> | void) => {
+					handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+				},
+			} as unknown as ExtensionAPI;
+			const ctx = {
+				cwd,
+				hasUI: false,
+				ui: { notify: () => {} },
+			} as unknown as ExtensionContext;
+
+			const { default: registerPermissions } = await import("./permissions");
+			registerPermissions(pi);
+			for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
+
+			now = 5 * 60 * 1000;
+			const bashTool = tools.get("bash");
+			if (!bashTool) throw new Error("bash tool was not registered");
+			await bashTool.execute("probe-test", { command: "true" }, undefined, undefined, ctx);
+		} finally {
+			Date.now = originalDateNow;
+		}
+
+		expect(wrappedCommands.some((command) => command.includes(`${sandboxTmpDir}${path.sep}.pi-sandbox-write-probe-`))).toBe(true);
 	});
 });
 
