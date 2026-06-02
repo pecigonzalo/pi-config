@@ -123,11 +123,10 @@ import {
 } from "./shell-parse";
 import {
 	compileSandboxConfig,
-	createSandboxedBashOps,
 	formatSandboxPromptHint,
 	getEffectiveSandboxTmpDir,
 	getSandboxTmpDirMode,
-	runSandboxedCommand,
+	SandboxRuntimeAdapter,
 } from "./sandbox";
 import {
 	dedupeStrings,
@@ -137,7 +136,6 @@ import {
 	type PermissionToolName,
 	type PermissionsConfig,
 	type Rule,
-	type SandboxManagerLike,
 	type SandboxRuntimeConfigLike,
 } from "./shared";
 export type { AgentProfile, ExternalPathPolicy, PermissionMode, PermissionsConfig, Rule } from "./shared";
@@ -173,14 +171,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const bashToolTemplate = createBashTool(process.cwd());
-	let sandboxManager: SandboxManagerLike | undefined;
+	let sandboxRuntime: SandboxRuntimeAdapter | undefined;
 	let sandboxAvailable = false;
 	let sandboxEnabled = false;
 	let treeSitterReady = false;
 	let sandboxReason = "inactive";
 	let sandboxMode: "normal" | "ask-all-bash" | "block-all-bash" = "normal";
 	let sandboxConfig: SandboxRuntimeConfigLike | undefined;
-	let sandboxInitializedKey: string | undefined;
 	let sandboxTmpDir: string | undefined;
 	let sandboxTmpDirEphemeral = false;
 
@@ -202,11 +199,11 @@ export default function (pi: ExtensionAPI) {
 		label: "bash",
 		async execute(id, params, signal, onUpdate, ctx) {
 			const localBash = createBashTool(ctx.cwd);
-			if (!sandboxEnabled || !sandboxAvailable || !sandboxManager) {
+			if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime) {
 				return localBash.execute(id, params, signal, onUpdate);
 			}
 			const sandboxedBash = createBashTool(ctx.cwd, {
-				operations: createSandboxedBashOps(sandboxManager, sandboxTmpDir, config.sandbox?.env, sandboxConfig),
+				operations: sandboxRuntime.createBashOperations(sandboxTmpDir, config.sandbox?.env, sandboxConfig),
 			});
 			return sandboxedBash.execute(id, params, signal, onUpdate);
 		},
@@ -280,19 +277,14 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	async function resetSandboxRuntime(ctx?: ExtensionContext, reason?: string) {
-		if (!sandboxManager) {
-			sandboxInitializedKey = undefined;
-			return;
-		}
+		if (!sandboxRuntime) return;
 		try {
-			await sandboxManager.reset();
+			await sandboxRuntime.reset();
 		} catch (err) {
 			if (ctx) {
 				const suffix = reason ? ` ${reason}` : "";
 				warnPermissionIssue(ctx, `Sandbox reset failed${suffix}: ${err instanceof Error ? err.message : String(err)}`);
 			}
-		} finally {
-			sandboxInitializedKey = undefined;
 		}
 	}
 
@@ -355,7 +347,9 @@ export default function (pi: ExtensionAPI) {
 
 		try {
 			const mod = await import("@anthropic-ai/sandbox-runtime");
-			sandboxManager = mod.SandboxManager;
+			if (!sandboxRuntime || sandboxRuntime.manager !== mod.SandboxManager) {
+				sandboxRuntime = new SandboxRuntimeAdapter(mod.SandboxManager);
+			}
 			sandboxAvailable = true;
 		} catch {
 			await resetSandboxRuntime(ctx, "after backend import failure");
@@ -369,11 +363,10 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		try {
-			if (sandboxInitializedKey !== nextSandboxInitializedKey) {
-				await resetSandboxRuntime(ctx, "before reinitializing");
-			}
-			await sandboxManager.initialize(compiled.config);
-			sandboxInitializedKey = nextSandboxInitializedKey;
+			if (!sandboxRuntime) throw new Error("Sandbox runtime unavailable after backend import");
+			await sandboxRuntime.initialize(compiled.config, nextSandboxInitializedKey, {
+				onResetError: (err) => warnPermissionIssue(ctx, `Sandbox reset failed before reinitializing: ${err instanceof Error ? err.message : String(err)}`),
+			});
 			sandboxEnabled = true;
 			sandboxMode = "normal";
 			sandboxReason = compiled.reason;
@@ -393,13 +386,12 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function disableSandboxForSession(ctx: ExtensionContext) {
-		if (sandboxEnabled && sandboxAvailable && sandboxManager) {
+		if (sandboxEnabled && sandboxAvailable && sandboxRuntime) {
 			await resetSandboxRuntime(ctx, "while disabling");
 		}
 
 		const policy = activePolicy(config, agentName, profileName);
 		sandboxEnabled = false;
-		sandboxInitializedKey = undefined;
 		sandboxConfig = undefined;
 		sandboxReason = "disabled by /permissions sandbox disable";
 		sandboxMode = sandboxFallbackModeForPolicy(policy.mode);
@@ -407,7 +399,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function enableSandboxForSession(ctx: ExtensionContext) {
-		if (sandboxEnabled && sandboxAvailable && sandboxManager) {
+		if (sandboxEnabled && sandboxAvailable && sandboxRuntime) {
 			await resetSandboxRuntime(ctx, "while re-enabling");
 		}
 
@@ -425,7 +417,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	async function runSandboxProbe(ctx: ExtensionContext): Promise<SandboxProbeResult> {
-		if (!sandboxEnabled || !sandboxAvailable || !sandboxManager || !sandboxConfig) {
+		if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxConfig) {
 			const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
 			return {
 				ok: false,
@@ -438,7 +430,7 @@ export default function (pi: ExtensionAPI) {
 		const quotedProbePath = shellQuote(probePath);
 		const output: string[] = [];
 		try {
-			const result = await runSandboxedCommand(sandboxManager, {
+			const result = await sandboxRuntime.runCommand({
 				command: `printf '%s\\n' probe > ${quotedProbePath} && test -f ${quotedProbePath} && rm -f ${quotedProbePath}`,
 				cwd: ctx.cwd,
 				env: sandboxTmpDir
@@ -519,7 +511,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
-		if (sandboxEnabled && sandboxAvailable && sandboxManager) {
+		if (sandboxEnabled && sandboxAvailable && sandboxRuntime) {
 			await resetSandboxRuntime();
 		}
 		if (sandboxTmpDirEphemeral && sandboxTmpDir) {
@@ -532,7 +524,6 @@ export default function (pi: ExtensionAPI) {
 		sandboxTmpDir = undefined;
 		sandboxTmpDirEphemeral = false;
 		sandboxEnabled = false;
-		sandboxInitializedKey = undefined;
 		sandboxConfig = undefined;
 		clearSandboxEnv();
 	});

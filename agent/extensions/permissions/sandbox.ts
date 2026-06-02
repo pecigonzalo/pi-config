@@ -486,6 +486,48 @@ export interface SandboxedCommandResult {
 	exitCode: number | null;
 }
 
+export class SandboxRuntimeAdapter {
+	private initializedKey: string | undefined;
+
+	constructor(readonly manager: SandboxManagerLike) {}
+
+	async reset(): Promise<void> {
+		try {
+			await this.manager.reset();
+		} finally {
+			this.initializedKey = undefined;
+		}
+	}
+
+	async initialize(
+		config: SandboxRuntimeConfigLike,
+		configKey: string,
+		options: { onResetError?: (error: unknown) => void } = {},
+	): Promise<void> {
+		if (this.initializedKey !== configKey) {
+			try {
+				await this.reset();
+			} catch (err) {
+				options.onResetError?.(err);
+			}
+		}
+		await this.manager.initialize(config);
+		this.initializedKey = configKey;
+	}
+
+	createBashOperations(
+		runtimeTmpDir?: string,
+		sandboxEnv?: Record<string, string>,
+		sandboxConfig?: SandboxRuntimeConfigLike,
+	): BashOperations {
+		return createSandboxedBashOps(this.manager, runtimeTmpDir, sandboxEnv, sandboxConfig);
+	}
+
+	runCommand(options: SandboxedCommandOptions): Promise<SandboxedCommandResult> {
+		return runSandboxedCommand(this.manager, options);
+	}
+}
+
 function killSandboxedChild(child: ReturnType<typeof spawn>) {
 	if (!child.pid) return;
 	try {

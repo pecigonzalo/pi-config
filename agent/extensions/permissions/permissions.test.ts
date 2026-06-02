@@ -24,6 +24,7 @@ import {
 	getSandboxTmpDirMode,
 	getWorkspaceWritePaths,
 	runSandboxedCommand,
+	SandboxRuntimeAdapter,
 } from "./sandbox";
 import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-parse";
 import type { Rule, SandboxRuntimeConfigLike } from "./shared";
@@ -596,6 +597,52 @@ describe("sandboxed command runner", () => {
 		await ops.exec("true", process.cwd(), { onData: () => {} });
 
 		expect(receivedConfig).toBe(sandboxConfig);
+	});
+
+	it("resets the sandbox runtime only when the config key changes", async () => {
+		const calls: string[] = [];
+		const adapter = new SandboxRuntimeAdapter({
+			initialize: async (_config) => {
+				calls.push("initialize");
+			},
+			reset: async () => {
+				calls.push("reset");
+			},
+			wrapWithSandbox: async (command) => command,
+		});
+		const sandboxConfig: SandboxRuntimeConfigLike = {
+			filesystem: { denyRead: [], allowWrite: ["/repo"], denyWrite: [] },
+			network: { allowLocalBinding: true },
+		};
+
+		await adapter.initialize(sandboxConfig, "key-1");
+		await adapter.initialize(sandboxConfig, "key-1");
+		await adapter.initialize(sandboxConfig, "key-2");
+
+		expect(calls).toEqual(["reset", "initialize", "initialize", "reset", "initialize"]);
+	});
+
+	it("clears the adapter config key when reset", async () => {
+		const calls: string[] = [];
+		const adapter = new SandboxRuntimeAdapter({
+			initialize: async (_config) => {
+				calls.push("initialize");
+			},
+			reset: async () => {
+				calls.push("reset");
+			},
+			wrapWithSandbox: async (command) => command,
+		});
+		const sandboxConfig: SandboxRuntimeConfigLike = {
+			filesystem: { denyRead: [], allowWrite: ["/repo"], denyWrite: [] },
+			network: { allowLocalBinding: true },
+		};
+
+		await adapter.initialize(sandboxConfig, "key-1");
+		await adapter.reset();
+		await adapter.initialize(sandboxConfig, "key-1");
+
+		expect(calls).toEqual(["reset", "initialize", "reset", "reset", "initialize"]);
 	});
 
 	it("rejects with timeout errors", async () => {
