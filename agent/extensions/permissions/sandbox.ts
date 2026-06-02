@@ -490,6 +490,49 @@ export function shouldProbeSandboxAfterIdle(lastCommandAt: number, now: number, 
 	return now - lastCommandAt >= idleProbeIntervalMs;
 }
 
+interface NormalizedWritePathPattern {
+	path: string;
+	wildcard: boolean;
+	recursiveWildcard: boolean;
+}
+
+function normalizeWritePathPattern(value: string): NormalizedWritePathPattern | undefined {
+	const trimmed = value.trim();
+	if (trimmed.length === 0) return undefined;
+
+	const recursiveWildcard = trimmed.endsWith(`${path.sep}**`);
+	const wildcardIndex = trimmed.indexOf("*");
+	const prefix = wildcardIndex >= 0 ? trimmed.slice(0, wildcardIndex) : trimmed;
+	const normalizedPrefix = prefix.endsWith(path.sep) ? prefix.slice(0, -1) : prefix;
+	const normalizedPath = normalizedPrefix.length === 0 ? path.resolve(path.sep) : path.resolve(normalizedPrefix);
+	return { path: normalizedPath, wildcard: wildcardIndex >= 0, recursiveWildcard };
+}
+
+function pathContainsTarget(containerPath: string, targetPath: string): boolean {
+	const relative = path.relative(containerPath, targetPath);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function allowedWritePathCoversTarget(writePath: string, targetPath: string): boolean {
+	const normalized = normalizeWritePathPattern(writePath);
+	if (!normalized) return false;
+	return pathContainsTarget(normalized.path, path.resolve(targetPath));
+}
+
+function deniedWritePathCoversTarget(writePath: string, targetPath: string): boolean {
+	const normalized = normalizeWritePathPattern(writePath);
+	if (!normalized) return false;
+	if (normalized.wildcard && !normalized.recursiveWildcard) return false;
+	return pathContainsTarget(normalized.path, path.resolve(targetPath));
+}
+
+export function isSandboxWriteAllowedForPath(config: SandboxRuntimeConfigLike, targetPath: string): boolean {
+	const allowWrite = config.filesystem?.allowWrite ?? [];
+	const denyWrite = config.filesystem?.denyWrite ?? [];
+	return allowWrite.some((writePath) => allowedWritePathCoversTarget(writePath, targetPath))
+		&& !denyWrite.some((writePath) => deniedWritePathCoversTarget(writePath, targetPath));
+}
+
 export class SandboxRuntimeAdapter {
 	private initializedKey: string | undefined;
 

@@ -126,6 +126,7 @@ import {
 	formatSandboxPromptHint,
 	getEffectiveSandboxTmpDir,
 	getSandboxTmpDirMode,
+	isSandboxWriteAllowedForPath,
 	SandboxRuntimeAdapter,
 	shouldProbeSandboxAfterIdle,
 } from "./sandbox";
@@ -215,19 +216,19 @@ export default function (pi: ExtensionAPI) {
 		...bashToolTemplate,
 		label: "bash",
 		async execute(id, params, signal, onUpdate, ctx) {
+			const localBash = createBashTool(ctx.cwd);
+			if (!sandboxExecution || sandboxExecution.cwd !== ctx.cwd) {
+				await initializeSandbox(ctx);
+			}
+			if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) {
+				return localBash.execute(id, params, signal, onUpdate);
+			}
+			await ensureSandboxHealthyAfterIdle(ctx);
+			const sandboxedBash = createBashTool(ctx.cwd, {
+				operations: sandboxRuntime.createBashOperations(sandboxExecution.tmpDir, sandboxExecution.env, sandboxExecution.config),
+			});
 			try {
-				const localBash = createBashTool(ctx.cwd);
-				if (!sandboxExecution || sandboxExecution.cwd !== ctx.cwd) {
-					await initializeSandbox(ctx);
-				}
-				if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) {
-					return localBash.execute(id, params, signal, onUpdate);
-				}
-				await ensureSandboxHealthyAfterIdle(ctx);
-				const sandboxedBash = createBashTool(ctx.cwd, {
-					operations: sandboxRuntime.createBashOperations(sandboxExecution.tmpDir, sandboxExecution.env, sandboxExecution.config),
-				});
-				return sandboxedBash.execute(id, params, signal, onUpdate);
+				return await sandboxedBash.execute(id, params, signal, onUpdate);
 			} finally {
 				lastSandboxCommandAt = Date.now();
 			}
@@ -455,19 +456,22 @@ export default function (pi: ExtensionAPI) {
 		ok: boolean;
 		message: string;
 		level: "info" | "warning" | "error";
+		tmpDirOk?: boolean;
+		cwdWriteExpected?: boolean;
+		cwdWriteOk?: boolean;
 	};
 
-	async function runSandboxProbe(ctx: ExtensionContext): Promise<SandboxProbeResult> {
-		if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) {
-			const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
-			return {
-				ok: false,
-				message: `Bash sandbox probe skipped: sandbox is not active (${sandboxStatus})`,
-				level: "warning",
-			};
+	type SandboxWriteProbeResult = {
+		ok: boolean;
+		message: string;
+	};
+
+	async function runSandboxWriteProbe(targetPath: string, ctx: ExtensionContext): Promise<SandboxWriteProbeResult> {
+		if (!sandboxRuntime || !sandboxExecution) {
+			return { ok: false, message: "sandbox runtime is unavailable" };
 		}
 
-		const probePath = path.join(ctx.cwd, `.pi-sandbox-write-probe-${process.pid}-${Date.now()}`);
+		const probePath = path.join(targetPath, `.pi-sandbox-write-probe-${process.pid}-${Date.now()}`);
 		const quotedProbePath = shellQuote(probePath);
 		const output: string[] = [];
 		try {
@@ -484,24 +488,17 @@ export default function (pi: ExtensionAPI) {
 				onData: (chunk) => output.push(chunk.toString("utf8")),
 				sandboxConfig: sandboxExecution.config,
 			});
-			if (result.exitCode === 0) {
-				return {
-					ok: true,
-					message: `Bash sandbox probe passed: workspace writes are allowed in ${ctx.cwd}`,
-					level: "info",
-				};
-			}
+			if (result.exitCode === 0) return { ok: true, message: "passed" };
+
 			const details = output.join("").trim();
 			return {
 				ok: false,
-				message: `Bash sandbox probe failed with exit code ${result.exitCode ?? "unknown"}${details ? `: ${details}` : ""}`,
-				level: "error",
+				message: `failed with exit code ${result.exitCode ?? "unknown"}${details ? `: ${details}` : ""}`,
 			};
 		} catch (err) {
 			return {
 				ok: false,
-				message: `Bash sandbox probe failed: ${err instanceof Error ? err.message : String(err)}`,
-				level: "error",
+				message: `failed: ${err instanceof Error ? err.message : String(err)}`,
 			};
 		} finally {
 			try {
@@ -512,8 +509,72 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	async function runSandboxProbe(ctx: ExtensionContext, options: { includeCwdWrite?: boolean } = {}): Promise<SandboxProbeResult> {
+		if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) {
+			const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
+			return {
+				ok: false,
+				message: `Bash sandbox probe skipped: sandbox is not active (${sandboxStatus})`,
+				level: "warning",
+			};
+		}
+
+		try {
+			fs.mkdirSync(sandboxExecution.tmpDir, { recursive: true });
+		} catch (err) {
+			return {
+				ok: false,
+				message: `Bash sandbox probe failed: cannot prepare TMPDIR ${sandboxExecution.tmpDir}: ${err instanceof Error ? err.message : String(err)}`,
+				level: "error",
+				tmpDirOk: false,
+			};
+		}
+
+		const tmpDirProbe = await runSandboxWriteProbe(sandboxExecution.tmpDir, ctx);
+		if (!tmpDirProbe.ok) {
+			return {
+				ok: false,
+				message: `Bash sandbox probe failed: TMPDIR write check ${tmpDirProbe.message}`,
+				level: "error",
+				tmpDirOk: false,
+			};
+		}
+
+		if (!options.includeCwdWrite) {
+			return {
+				ok: true,
+				message: `Bash sandbox probe passed: TMPDIR writes are allowed in ${sandboxExecution.tmpDir}`,
+				level: "info",
+				tmpDirOk: true,
+			};
+		}
+
+		const cwdWriteExpected = isSandboxWriteAllowedForPath(sandboxExecution.config, ctx.cwd);
+		if (!cwdWriteExpected) {
+			return {
+				ok: true,
+				message: `Bash sandbox probe passed: TMPDIR writes are allowed in ${sandboxExecution.tmpDir}; workspace write check skipped because active policy does not allow writes in ${ctx.cwd}`,
+				level: "info",
+				tmpDirOk: true,
+				cwdWriteExpected,
+			};
+		}
+
+		const cwdProbe = await runSandboxWriteProbe(ctx.cwd, ctx);
+		return {
+			ok: cwdProbe.ok,
+			message: cwdProbe.ok
+				? `Bash sandbox probe passed: TMPDIR writes are allowed in ${sandboxExecution.tmpDir}; workspace writes are allowed in ${ctx.cwd}`
+				: `Bash sandbox probe failed: TMPDIR write check passed, but workspace write check ${cwdProbe.message}`,
+			level: cwdProbe.ok ? "info" : "error",
+			tmpDirOk: true,
+			cwdWriteExpected,
+			cwdWriteOk: cwdProbe.ok,
+		};
+	}
+
 	async function probeSandbox(ctx: ExtensionContext) {
-		const result = await runSandboxProbe(ctx);
+		const result = await runSandboxProbe(ctx, { includeCwdWrite: true });
 		ctx.ui.notify(result.message, result.level);
 	}
 

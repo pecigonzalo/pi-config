@@ -23,6 +23,7 @@ import {
 	formatSandboxPromptHint,
 	getSandboxTmpDirMode,
 	getWorkspaceWritePaths,
+	isSandboxWriteAllowedForPath,
 	runSandboxedCommand,
 	SandboxRuntimeAdapter,
 	shouldProbeSandboxAfterIdle,
@@ -839,6 +840,36 @@ describe("sandbox network config", () => {
 	it("includes configured tmpDir in allowWrite", () => {
 		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
 		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/custom-pi");
+	});
+
+	it("treats plan mode tmpdir writes as healthy without expecting cwd writes", () => {
+		const compiled = compileSandboxConfig({ ...policy, mode: "plan" }, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
+		expect(isSandboxWriteAllowedForPath(compiled.config, "/tmp/custom-pi")).toBe(true);
+		expect(isSandboxWriteAllowedForPath(compiled.config, "/repo")).toBe(false);
+	});
+
+	it("does not expect cwd writes when custom allowWrite excludes the workspace", () => {
+		const compiled = compileSandboxConfig(policy, "/repo", {
+			enabled: true,
+			tmpDir: "/tmp/custom-pi",
+			allowWrite: ["/tmp/custom-output"],
+		});
+
+		expect(isSandboxWriteAllowedForPath(compiled.config, "/tmp/custom-pi")).toBe(true);
+		expect(isSandboxWriteAllowedForPath(compiled.config, "/repo")).toBe(false);
+	});
+
+	it("keeps protected-resource globs from masking workspace write expectations", () => {
+		expect(isSandboxWriteAllowedForPath(
+			{
+				filesystem: {
+					allowWrite: ["/repo"],
+					denyRead: [],
+					denyWrite: ["/repo/**/.env"],
+				},
+			},
+			"/repo",
+		)).toBe(true);
 	});
 
 	it("allows Docker Buildx activity writes by default", () => {
