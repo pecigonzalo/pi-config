@@ -128,8 +128,11 @@ import {
 	getSandboxTmpDirMode,
 	isSandboxWriteAllowedForPath,
 	SandboxRuntimeAdapter,
-	shouldProbeSandboxAfterIdle,
 } from "./sandbox";
+import {
+	runSandboxedCommandAfterHealthCheck,
+	SandboxHealthMonitor,
+} from "./sandbox-lifecycle";
 import {
 	dedupeStrings,
 	isFilesystemToolName,
@@ -194,8 +197,8 @@ export default function (pi: ExtensionAPI) {
 	let sandboxExecution: SandboxExecution | undefined;
 	let sandboxConfig: SandboxRuntimeConfigLike | undefined;
 	let sandboxTmpDir: string | undefined;
-	let lastSandboxCommandAt = Date.now();
 	let sandboxTmpDirEphemeral = false;
+	const sandboxHealthMonitor = new SandboxHealthMonitor(SANDBOX_RESUME_IDLE_PROBE_MS);
 
 	const clearSandboxEnv = () => {
 		delete process.env.PI_SANDBOX_ACTIVE;
@@ -223,15 +226,18 @@ export default function (pi: ExtensionAPI) {
 			if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) {
 				return localBash.execute(id, params, signal, onUpdate);
 			}
-			await ensureSandboxHealthyAfterIdle(ctx);
-			const sandboxedBash = createBashTool(ctx.cwd, {
-				operations: sandboxRuntime.createBashOperations(sandboxExecution.tmpDir, sandboxExecution.env, sandboxExecution.config),
+			const runtime = sandboxRuntime;
+			const execution = sandboxExecution;
+			return runSandboxedCommandAfterHealthCheck({
+				healthMonitor: sandboxHealthMonitor,
+				ensureHealthy: () => ensureSandboxHealthyAfterIdle(ctx),
+				execute: () => {
+					const sandboxedBash = createBashTool(ctx.cwd, {
+						operations: runtime.createBashOperations(execution.tmpDir, execution.env, execution.config),
+					});
+					return sandboxedBash.execute(id, params, signal, onUpdate);
+				},
 			});
-			try {
-				return await sandboxedBash.execute(id, params, signal, onUpdate);
-			} finally {
-				lastSandboxCommandAt = Date.now();
-			}
 		},
 	});
 
@@ -597,8 +603,8 @@ export default function (pi: ExtensionAPI) {
 	ensureSandboxHealthyAfterIdle = async (ctx: ExtensionContext) => {
 		if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) return;
 		const now = Date.now();
-		const idleMs = now - lastSandboxCommandAt;
-		if (!shouldProbeSandboxAfterIdle(lastSandboxCommandAt, now, SANDBOX_RESUME_IDLE_PROBE_MS)) return;
+		const idleMs = sandboxHealthMonitor.idleMs(now);
+		if (!sandboxHealthMonitor.shouldProbe(now)) return;
 
 		const probe = await runSandboxProbe(ctx);
 		if (probe.ok) return;

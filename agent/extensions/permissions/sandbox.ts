@@ -486,10 +486,6 @@ export interface SandboxedCommandResult {
 	exitCode: number | null;
 }
 
-export function shouldProbeSandboxAfterIdle(lastCommandAt: number, now: number, idleProbeIntervalMs: number): boolean {
-	return now - lastCommandAt >= idleProbeIntervalMs;
-}
-
 interface NormalizedWritePathPattern {
 	path: string;
 	wildcard: boolean;

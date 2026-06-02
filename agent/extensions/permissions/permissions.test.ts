@@ -27,8 +27,12 @@ import {
 	isSandboxWriteAllowedForPath,
 	runSandboxedCommand,
 	SandboxRuntimeAdapter,
-	shouldProbeSandboxAfterIdle,
 } from "./sandbox";
+import {
+	runSandboxedCommandAfterHealthCheck,
+	SandboxHealthMonitor,
+	shouldProbeSandboxAfterIdle,
+} from "./sandbox-lifecycle";
 import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-parse";
 import type { Rule, SandboxRuntimeConfigLike } from "./shared";
 
@@ -679,6 +683,50 @@ describe("sandboxed command runner", () => {
 		expect(shouldProbeSandboxAfterIdle(1_000, 1_999, 1_000)).toBe(false);
 		expect(shouldProbeSandboxAfterIdle(1_000, 2_000, 1_000)).toBe(true);
 		expect(shouldProbeSandboxAfterIdle(1_000, 2_001, 1_000)).toBe(true);
+	});
+
+	it("keeps sandbox health timestamps unchanged when pre-command checks fail", async () => {
+		const healthMonitor = new SandboxHealthMonitor(1_000, 1_000);
+
+		await expect(runSandboxedCommandAfterHealthCheck({
+			healthMonitor,
+			ensureHealthy: async () => {
+				throw new Error("health check failed");
+			},
+			execute: async () => "unreachable",
+			now: () => 3_000,
+		})).rejects.toThrow("health check failed");
+
+		expect(healthMonitor.getLastCommandAt()).toBe(1_000);
+	});
+
+	it("records sandbox command completion after successful health checks", async () => {
+		const healthMonitor = new SandboxHealthMonitor(1_000, 1_000);
+
+		const result = await runSandboxedCommandAfterHealthCheck({
+			healthMonitor,
+			ensureHealthy: async () => {},
+			execute: async () => "done",
+			now: () => 3_000,
+		});
+
+		expect(result).toBe("done");
+		expect(healthMonitor.getLastCommandAt()).toBe(3_000);
+	});
+
+	it("records sandbox command completion after failed command execution", async () => {
+		const healthMonitor = new SandboxHealthMonitor(1_000, 1_000);
+
+		await expect(runSandboxedCommandAfterHealthCheck({
+			healthMonitor,
+			ensureHealthy: async () => {},
+			execute: async () => {
+				throw new Error("command failed");
+			},
+			now: () => 3_000,
+		})).rejects.toThrow("command failed");
+
+		expect(healthMonitor.getLastCommandAt()).toBe(3_000);
 	});
 
 	it("rejects with timeout errors", async () => {
