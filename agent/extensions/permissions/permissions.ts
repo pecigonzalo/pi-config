@@ -177,6 +177,18 @@ export default function (pi: ExtensionAPI) {
 	let treeSitterReady = false;
 	let sandboxReason = "inactive";
 	let sandboxMode: "normal" | "ask-all-bash" | "block-all-bash" = "normal";
+	type SandboxExecution = {
+		cwd: string;
+		enabled: boolean;
+		config: SandboxRuntimeConfigLike;
+		configKey: string;
+		reason: string;
+		tmpDir: string;
+		env?: Record<string, string>;
+		warnings: string[];
+		fallbackMode: "normal" | "ask-all-bash" | "block-all-bash";
+	};
+	let sandboxExecution: SandboxExecution | undefined;
 	let sandboxConfig: SandboxRuntimeConfigLike | undefined;
 	let sandboxTmpDir: string | undefined;
 	let sandboxTmpDirEphemeral = false;
@@ -199,11 +211,14 @@ export default function (pi: ExtensionAPI) {
 		label: "bash",
 		async execute(id, params, signal, onUpdate, ctx) {
 			const localBash = createBashTool(ctx.cwd);
-			if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime) {
+			if (!sandboxExecution || sandboxExecution.cwd !== ctx.cwd) {
+				await initializeSandbox(ctx);
+			}
+			if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) {
 				return localBash.execute(id, params, signal, onUpdate);
 			}
 			const sandboxedBash = createBashTool(ctx.cwd, {
-				operations: sandboxRuntime.createBashOperations(sandboxTmpDir, config.sandbox?.env, sandboxConfig),
+				operations: sandboxRuntime.createBashOperations(sandboxExecution.tmpDir, sandboxExecution.env, sandboxExecution.config),
 			});
 			return sandboxedBash.execute(id, params, signal, onUpdate);
 		},
@@ -288,13 +303,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	async function initializeSandbox(ctx: ExtensionContext) {
-		sandboxEnabled = false;
-		sandboxMode = "normal";
-		sandboxReason = "inactive";
-		sandboxConfig = undefined;
-		clearSandboxEnv();
-
+	function buildSandboxExecution(ctx: ExtensionContext): SandboxExecution {
 		const policy = activePolicy(config, agentName, profileName);
 		const tmpDirBase = getEffectiveSandboxTmpDir(ctx.cwd, config.sandbox);
 		const tmpDirMode = getSandboxTmpDirMode(config.sandbox);
@@ -319,29 +328,50 @@ export default function (pi: ExtensionAPI) {
 			sandboxTmpDirEphemeral = false;
 		}
 		const compiled = compileSandboxConfig(policy, ctx.cwd, config.sandbox, effectiveTmpDir);
-		const nextSandboxInitializedKey = JSON.stringify(compiled.config);
-		sandboxConfig = compiled.config;
-		if (ctx.hasUI && compiled.warnings.length > 0) {
-			ctx.ui.notify(compiled.warnings.join("\n"), "warning");
+		return {
+			cwd: ctx.cwd,
+			enabled: compiled.enabled,
+			config: compiled.config,
+			configKey: JSON.stringify(compiled.config),
+			reason: compiled.reason,
+			tmpDir: effectiveTmpDir,
+			env: config.sandbox?.env,
+			warnings: compiled.warnings,
+			fallbackMode: sandboxFallbackModeForPolicy(policy.mode),
+		};
+	}
+
+	async function initializeSandbox(ctx: ExtensionContext) {
+		sandboxEnabled = false;
+		sandboxMode = "normal";
+		sandboxReason = "inactive";
+		sandboxConfig = undefined;
+		clearSandboxEnv();
+
+		const execution = buildSandboxExecution(ctx);
+		sandboxExecution = execution;
+		sandboxConfig = execution.config;
+		if (ctx.hasUI && execution.warnings.length > 0) {
+			ctx.ui.notify(execution.warnings.join("\n"), "warning");
 		}
 
 		if ((pi.getFlag("no-sandbox") as boolean) === true) {
 			await resetSandboxRuntime(ctx, "after --no-sandbox");
 			sandboxReason = "disabled by --no-sandbox";
-			sandboxMode = sandboxFallbackModeForPolicy(policy.mode);
+			sandboxMode = execution.fallbackMode;
 			return;
 		}
 
-		if (!compiled.enabled) {
+		if (!execution.enabled) {
 			await resetSandboxRuntime(ctx, "after sandbox disabled by config");
-			sandboxReason = compiled.reason;
+			sandboxReason = execution.reason;
 			return;
 		}
 
 		if (process.platform !== "darwin" && process.platform !== "linux") {
 			await resetSandboxRuntime(ctx, "after unsupported platform detection");
 			sandboxReason = `unsupported platform: ${process.platform}`;
-			sandboxMode = sandboxFallbackModeForPolicy(policy.mode);
+			sandboxMode = execution.fallbackMode;
 			return;
 		}
 
@@ -355,7 +385,7 @@ export default function (pi: ExtensionAPI) {
 			await resetSandboxRuntime(ctx, "after backend import failure");
 			sandboxAvailable = false;
 			sandboxReason = "backend not installed";
-			sandboxMode = sandboxFallbackModeForPolicy(policy.mode);
+			sandboxMode = execution.fallbackMode;
 			if (ctx.hasUI) {
 				ctx.ui.notify("Bash sandbox unavailable: install dependencies in ~/.pi/agent/extensions/permissions/", "warning");
 			}
@@ -364,20 +394,20 @@ export default function (pi: ExtensionAPI) {
 
 		try {
 			if (!sandboxRuntime) throw new Error("Sandbox runtime unavailable after backend import");
-			await sandboxRuntime.initialize(compiled.config, nextSandboxInitializedKey, {
+			await sandboxRuntime.initialize(execution.config, execution.configKey, {
 				onResetError: (err) => warnPermissionIssue(ctx, `Sandbox reset failed before reinitializing: ${err instanceof Error ? err.message : String(err)}`),
 			});
 			sandboxEnabled = true;
 			sandboxMode = "normal";
-			sandboxReason = compiled.reason;
-			setSandboxEnv(compiled.reason, effectiveTmpDir);
+			sandboxReason = execution.reason;
+			setSandboxEnv(execution.reason, execution.tmpDir);
 			if (ctx.hasUI) {
-				ctx.ui.notify(`Bash sandbox active (${compiled.reason})`, "info");
+				ctx.ui.notify(`Bash sandbox active (${execution.reason})`, "info");
 			}
 		} catch (err) {
 			sandboxEnabled = false;
 			await resetSandboxRuntime(ctx, "after failed initialization");
-			sandboxMode = sandboxFallbackModeForPolicy(policy.mode);
+			sandboxMode = execution.fallbackMode;
 			sandboxReason = `init failed: ${err instanceof Error ? err.message : String(err)}`;
 			if (ctx.hasUI) {
 				ctx.ui.notify(`Bash sandbox failed: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -392,6 +422,7 @@ export default function (pi: ExtensionAPI) {
 
 		const policy = activePolicy(config, agentName, profileName);
 		sandboxEnabled = false;
+		sandboxExecution = undefined;
 		sandboxConfig = undefined;
 		sandboxReason = "disabled by /permissions sandbox disable";
 		sandboxMode = sandboxFallbackModeForPolicy(policy.mode);
@@ -417,7 +448,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	async function runSandboxProbe(ctx: ExtensionContext): Promise<SandboxProbeResult> {
-		if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxConfig) {
+		if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) {
 			const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
 			return {
 				ok: false,
@@ -433,15 +464,15 @@ export default function (pi: ExtensionAPI) {
 			const result = await sandboxRuntime.runCommand({
 				command: `printf '%s\\n' probe > ${quotedProbePath} && test -f ${quotedProbePath} && rm -f ${quotedProbePath}`,
 				cwd: ctx.cwd,
-				env: sandboxTmpDir
+				env: sandboxExecution.tmpDir
 					? {
-						...(config.sandbox?.env ?? {}),
-						TMPDIR: sandboxTmpDir,
+						...(sandboxExecution.env ?? {}),
+						TMPDIR: sandboxExecution.tmpDir,
 					}
-					: config.sandbox?.env,
+					: sandboxExecution.env,
 				timeout: 10,
 				onData: (chunk) => output.push(chunk.toString("utf8")),
-				sandboxConfig,
+				sandboxConfig: sandboxExecution.config,
 			});
 			if (result.exitCode === 0) {
 				return {
@@ -524,16 +555,17 @@ export default function (pi: ExtensionAPI) {
 		sandboxTmpDir = undefined;
 		sandboxTmpDirEphemeral = false;
 		sandboxEnabled = false;
+		sandboxExecution = undefined;
 		sandboxConfig = undefined;
 		clearSandboxEnv();
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
-		if (!sandboxEnabled || sandboxMode !== "normal" || !sandboxConfig) return;
+		if (!sandboxEnabled || sandboxMode !== "normal" || !sandboxExecution) return;
 
-		const hint = formatSandboxPromptHint(sandboxConfig, {
+		const hint = formatSandboxPromptHint(sandboxExecution.config, {
 			reason: sandboxReason,
-			tmpDir: sandboxTmpDir,
+			tmpDir: sandboxExecution.tmpDir,
 			cwd: ctx.cwd,
 		});
 
