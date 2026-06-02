@@ -188,9 +188,11 @@ export default function (pi: ExtensionAPI) {
 		warnings: string[];
 		fallbackMode: "normal" | "ask-all-bash" | "block-all-bash";
 	};
+	const SANDBOX_RESUME_IDLE_PROBE_MS = 5 * 60 * 1000;
 	let sandboxExecution: SandboxExecution | undefined;
 	let sandboxConfig: SandboxRuntimeConfigLike | undefined;
 	let sandboxTmpDir: string | undefined;
+	let lastSandboxCommandAt = Date.now();
 	let sandboxTmpDirEphemeral = false;
 
 	const clearSandboxEnv = () => {
@@ -206,21 +208,28 @@ export default function (pi: ExtensionAPI) {
 		else delete process.env.PI_SANDBOX_TMPDIR;
 	};
 
+	let ensureSandboxHealthyAfterIdle: (ctx: ExtensionContext) => Promise<void> = async () => {};
+
 	pi.registerTool({
 		...bashToolTemplate,
 		label: "bash",
 		async execute(id, params, signal, onUpdate, ctx) {
-			const localBash = createBashTool(ctx.cwd);
-			if (!sandboxExecution || sandboxExecution.cwd !== ctx.cwd) {
-				await initializeSandbox(ctx);
+			try {
+				const localBash = createBashTool(ctx.cwd);
+				if (!sandboxExecution || sandboxExecution.cwd !== ctx.cwd) {
+					await initializeSandbox(ctx);
+				}
+				if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) {
+					return localBash.execute(id, params, signal, onUpdate);
+				}
+				await ensureSandboxHealthyAfterIdle(ctx);
+				const sandboxedBash = createBashTool(ctx.cwd, {
+					operations: sandboxRuntime.createBashOperations(sandboxExecution.tmpDir, sandboxExecution.env, sandboxExecution.config),
+				});
+				return sandboxedBash.execute(id, params, signal, onUpdate);
+			} finally {
+				lastSandboxCommandAt = Date.now();
 			}
-			if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) {
-				return localBash.execute(id, params, signal, onUpdate);
-			}
-			const sandboxedBash = createBashTool(ctx.cwd, {
-				operations: sandboxRuntime.createBashOperations(sandboxExecution.tmpDir, sandboxExecution.env, sandboxExecution.config),
-			});
-			return sandboxedBash.execute(id, params, signal, onUpdate);
 		},
 	});
 
@@ -507,18 +516,39 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify(result.message, result.level);
 	}
 
-	async function repairSandbox(ctx: ExtensionContext) {
-		reload(ctx);
+	async function repairSandboxRuntime(ctx: ExtensionContext, options: { reloadConfig?: boolean } = {}): Promise<SandboxProbeResult> {
+		if (options.reloadConfig) reload(ctx);
 		await resetSandboxRuntime(ctx, "while repairing");
 		await initializeSandbox(ctx);
+		return runSandboxProbe(ctx);
+	}
 
-		const result = await runSandboxProbe(ctx);
+	async function repairSandbox(ctx: ExtensionContext) {
+		const result = await repairSandboxRuntime(ctx, { reloadConfig: true });
 		if (result.ok) {
 			ctx.ui.notify(`Bash sandbox repair completed. ${result.message}`, "info");
 			return;
 		}
 		ctx.ui.notify(`Bash sandbox repair did not restore a healthy sandbox. ${result.message}`, result.level);
 	}
+
+	ensureSandboxHealthyAfterIdle = async (ctx: ExtensionContext) => {
+		if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) return;
+		const idleMs = Date.now() - lastSandboxCommandAt;
+		if (idleMs < SANDBOX_RESUME_IDLE_PROBE_MS) return;
+
+		const probe = await runSandboxProbe(ctx);
+		if (probe.ok) return;
+
+		ctx.ui.notify(`Bash sandbox health probe failed after ${Math.round(idleMs / 1000)}s idle; repairing sandbox runtime. ${probe.message}`, "warning");
+		const repair = await repairSandboxRuntime(ctx);
+		if (repair.ok) {
+			ctx.ui.notify(`Bash sandbox automatic repair completed. ${repair.message}`, "info");
+			return;
+		}
+
+		throw new Error(`Bash sandbox automatic repair failed. ${repair.message}`);
+	};
 
 	pi.on("session_start", async (_event, ctx) => {
 		sessionAllows.clear();
