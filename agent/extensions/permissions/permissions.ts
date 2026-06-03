@@ -657,6 +657,7 @@ export default function (pi: ExtensionAPI) {
 		sessionAllows.clear();
 		sessionPathApprovals.length = 0;
 		sessionBashApprovals.length = 0;
+		sandboxHealthMonitor.reset();
 		sandboxTmpDir = undefined;
 		sandboxTmpDirEphemeral = false;
 		reload(ctx);
@@ -669,6 +670,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
+		sandboxHealthMonitor.reset();
 		reload(ctx);
 		treeSitterReady = await isTreeSitterAvailable();
 		await initializeSandbox(ctx);
@@ -688,6 +690,7 @@ export default function (pi: ExtensionAPI) {
 		sandboxTmpDir = undefined;
 		sandboxTmpDirEphemeral = false;
 		sandboxState = { kind: "inactive", reason: "inactive", fallbackMode: "normal" };
+		sandboxHealthMonitor.reset();
 		clearSandboxEnv();
 	});
 

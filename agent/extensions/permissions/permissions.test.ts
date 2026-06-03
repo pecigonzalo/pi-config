@@ -734,6 +734,17 @@ describe("sandboxed command runner", () => {
 		expect(healthMonitor.getLastCommandAt()).toBe(1_000);
 	});
 
+	it("resets sandbox health timestamps at lifecycle boundaries", () => {
+		const healthMonitor = new SandboxHealthMonitor(1_000, 1_000);
+		healthMonitor.recordCommandFinished(3_000);
+
+		healthMonitor.reset(4_000);
+
+		expect(healthMonitor.getLastCommandAt()).toBe(4_000);
+		expect(healthMonitor.shouldProbe(4_999)).toBe(false);
+		expect(healthMonitor.shouldProbe(5_000)).toBe(true);
+	});
+
 	it("records sandbox command completion after successful health checks", async () => {
 		const healthMonitor = new SandboxHealthMonitor(1_000, 1_000);
 

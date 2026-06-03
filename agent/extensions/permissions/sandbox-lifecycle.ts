@@ -9,6 +9,10 @@ export class SandboxHealthMonitor {
 		this.lastCommandAt = initialCommandAt;
 	}
 
+	reset(now = Date.now()): void {
+		this.lastCommandAt = now;
+	}
+
 	getLastCommandAt(): number {
 		return this.lastCommandAt;
 	}
