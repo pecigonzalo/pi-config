@@ -213,7 +213,7 @@ export default function (pi: ExtensionAPI) {
 		else delete process.env.PI_SANDBOX_TMPDIR;
 	};
 
-	let ensureSandboxHealthyAfterIdle: (ctx: ExtensionContext) => Promise<void> = async () => {};
+	let ensureSandboxHealthyAfterIdle: (ctx: ExtensionContext, execution: SandboxExecution, runtime: SandboxRuntimeAdapter) => Promise<void> = async () => {};
 
 	pi.registerTool({
 		...bashToolTemplate,
@@ -230,7 +230,7 @@ export default function (pi: ExtensionAPI) {
 			const execution = sandboxExecution;
 			return runSandboxedCommandAfterHealthCheck({
 				healthMonitor: sandboxHealthMonitor,
-				ensureHealthy: () => ensureSandboxHealthyAfterIdle(ctx),
+				ensureHealthy: () => ensureSandboxHealthyAfterIdle(ctx, execution, runtime),
 				execute: () => {
 					const sandboxedBash = createBashTool(ctx.cwd, {
 						operations: runtime.createBashOperations(execution.tmpDir, execution.env, execution.config),
@@ -472,27 +472,28 @@ export default function (pi: ExtensionAPI) {
 		message: string;
 	};
 
-	async function runSandboxWriteProbe(targetPath: string, ctx: ExtensionContext): Promise<SandboxWriteProbeResult> {
-		if (!sandboxRuntime || !sandboxExecution) {
-			return { ok: false, message: "sandbox runtime is unavailable" };
-		}
-
+	async function runSandboxWriteProbe(
+		runtime: SandboxRuntimeAdapter,
+		execution: SandboxExecution,
+		targetPath: string,
+		ctx: ExtensionContext,
+	): Promise<SandboxWriteProbeResult> {
 		const probePath = path.join(targetPath, `.pi-sandbox-write-probe-${process.pid}-${Date.now()}`);
 		const quotedProbePath = shellQuote(probePath);
 		const output: string[] = [];
 		try {
-			const result = await sandboxRuntime.runCommand({
+			const result = await runtime.runCommand({
 				command: `printf '%s\\n' probe > ${quotedProbePath} && test -f ${quotedProbePath} && rm -f ${quotedProbePath}`,
 				cwd: ctx.cwd,
-				env: sandboxExecution.tmpDir
+				env: execution.tmpDir
 					? {
-						...(sandboxExecution.env ?? {}),
-						TMPDIR: sandboxExecution.tmpDir,
+						...(execution.env ?? {}),
+						TMPDIR: execution.tmpDir,
 					}
-					: sandboxExecution.env,
+					: execution.env,
 				timeout: 10,
 				onData: (chunk) => output.push(chunk.toString("utf8")),
-				sandboxConfig: sandboxExecution.config,
+				sandboxConfig: execution.config,
 			});
 			if (result.exitCode === 0) return { ok: true, message: "passed" };
 
@@ -515,8 +516,13 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	async function runSandboxProbe(ctx: ExtensionContext, options: { includeCwdWrite?: boolean } = {}): Promise<SandboxProbeResult> {
-		if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) {
+	async function runSandboxProbe(
+		ctx: ExtensionContext,
+		execution: SandboxExecution | undefined = sandboxExecution,
+		runtime: SandboxRuntimeAdapter | undefined = sandboxRuntime,
+		options: { includeCwdWrite?: boolean } = {},
+	): Promise<SandboxProbeResult> {
+		if (!sandboxEnabled || !sandboxAvailable || !runtime || !execution) {
 			const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
 			return {
 				ok: false,
@@ -526,17 +532,17 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		try {
-			fs.mkdirSync(sandboxExecution.tmpDir, { recursive: true });
+			fs.mkdirSync(execution.tmpDir, { recursive: true });
 		} catch (err) {
 			return {
 				ok: false,
-				message: `Bash sandbox probe failed: cannot prepare TMPDIR ${sandboxExecution.tmpDir}: ${err instanceof Error ? err.message : String(err)}`,
+				message: `Bash sandbox probe failed: cannot prepare TMPDIR ${execution.tmpDir}: ${err instanceof Error ? err.message : String(err)}`,
 				level: "error",
 				tmpDirOk: false,
 			};
 		}
 
-		const tmpDirProbe = await runSandboxWriteProbe(sandboxExecution.tmpDir, ctx);
+		const tmpDirProbe = await runSandboxWriteProbe(runtime, execution, execution.tmpDir, ctx);
 		if (!tmpDirProbe.ok) {
 			return {
 				ok: false,
@@ -549,28 +555,28 @@ export default function (pi: ExtensionAPI) {
 		if (!options.includeCwdWrite) {
 			return {
 				ok: true,
-				message: `Bash sandbox probe passed: TMPDIR writes are allowed in ${sandboxExecution.tmpDir}`,
+				message: `Bash sandbox probe passed: TMPDIR writes are allowed in ${execution.tmpDir}`,
 				level: "info",
 				tmpDirOk: true,
 			};
 		}
 
-		const cwdWriteExpected = isSandboxWriteAllowedForPath(sandboxExecution.config, ctx.cwd);
+		const cwdWriteExpected = isSandboxWriteAllowedForPath(execution.config, ctx.cwd);
 		if (!cwdWriteExpected) {
 			return {
 				ok: true,
-				message: `Bash sandbox probe passed: TMPDIR writes are allowed in ${sandboxExecution.tmpDir}; workspace write check skipped because active policy does not allow writes in ${ctx.cwd}`,
+				message: `Bash sandbox probe passed: TMPDIR writes are allowed in ${execution.tmpDir}; workspace write check skipped because active policy does not allow writes in ${ctx.cwd}`,
 				level: "info",
 				tmpDirOk: true,
 				cwdWriteExpected,
 			};
 		}
 
-		const cwdProbe = await runSandboxWriteProbe(ctx.cwd, ctx);
+		const cwdProbe = await runSandboxWriteProbe(runtime, execution, ctx.cwd, ctx);
 		return {
 			ok: cwdProbe.ok,
 			message: cwdProbe.ok
-				? `Bash sandbox probe passed: TMPDIR writes are allowed in ${sandboxExecution.tmpDir}; workspace writes are allowed in ${ctx.cwd}`
+				? `Bash sandbox probe passed: TMPDIR writes are allowed in ${execution.tmpDir}; workspace writes are allowed in ${ctx.cwd}`
 				: `Bash sandbox probe failed: TMPDIR write check passed, but workspace write check ${cwdProbe.message}`,
 			level: cwdProbe.ok ? "info" : "error",
 			tmpDirOk: true,
@@ -580,7 +586,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function probeSandbox(ctx: ExtensionContext) {
-		const result = await runSandboxProbe(ctx, { includeCwdWrite: true });
+		const result = await runSandboxProbe(ctx, undefined, undefined, { includeCwdWrite: true });
 		ctx.ui.notify(result.message, result.level);
 	}
 
@@ -600,13 +606,13 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify(`Bash sandbox repair did not restore a healthy sandbox. ${result.message}`, result.level);
 	}
 
-	ensureSandboxHealthyAfterIdle = async (ctx: ExtensionContext) => {
-		if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) return;
+	ensureSandboxHealthyAfterIdle = async (ctx: ExtensionContext, execution: SandboxExecution, runtime: SandboxRuntimeAdapter) => {
+		if (!sandboxEnabled || !sandboxAvailable) return;
 		const now = Date.now();
 		const idleMs = sandboxHealthMonitor.idleMs(now);
 		if (!sandboxHealthMonitor.shouldProbe(now)) return;
 
-		const probe = await runSandboxProbe(ctx);
+		const probe = await runSandboxProbe(ctx, execution, runtime);
 		if (probe.ok) return;
 
 		ctx.ui.notify(`Bash sandbox health probe failed after ${Math.round(idleMs / 1000)}s idle; repairing sandbox runtime. ${probe.message}`, "warning");
