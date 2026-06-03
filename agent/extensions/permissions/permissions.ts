@@ -251,14 +251,19 @@ export default function (pi: ExtensionAPI) {
 			if (!active || !sandboxRuntime) {
 				return localBash.execute(id, params, signal, onUpdate);
 			}
-			const runtime = sandboxRuntime;
-			const execution = active.execution;
+			const healthRuntime = sandboxRuntime;
+			const healthExecution = active.execution;
 			return runSandboxedCommandAfterHealthCheck({
 				healthMonitor: sandboxHealthMonitor,
-				ensureHealthy: () => ensureSandboxHealthyAfterIdle(ctx, execution, runtime),
+				ensureHealthy: () => ensureSandboxHealthyAfterIdle(ctx, healthExecution, healthRuntime),
 				execute: () => {
+					const currentActive = activeSandboxState();
+					const currentRuntime = sandboxRuntime;
+					if (!currentActive || !currentRuntime) {
+						return localBash.execute(id, params, signal, onUpdate);
+					}
 					const sandboxedBash = createBashTool(ctx.cwd, {
-						operations: runtime.createBashOperations(execution),
+						operations: currentRuntime.createBashOperations(currentActive.execution),
 					});
 					return sandboxedBash.execute(id, params, signal, onUpdate);
 				},

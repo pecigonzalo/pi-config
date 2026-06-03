@@ -1017,6 +1017,41 @@ describe("permissions extension sandbox lifecycle", () => {
 		expect(probeCount).toBe(4);
 		expect(commandCount).toBe(0);
 	});
+
+	it("executes the command after a successful automatic repair", async () => {
+		let now = 0;
+		let probeCount = 0;
+		let commandCount = 0;
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => now,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					if (command.includes(".pi-sandbox-write-probe-")) {
+						probeCount++;
+						if (probeCount === 1) throw new Error("stale sandbox runtime");
+						return command;
+					}
+					commandCount++;
+					return command;
+				},
+			},
+		});
+		try {
+			now = 5 * 60 * 1000;
+			const bashTool = harness.tools.get("bash");
+			if (!bashTool) throw new Error("bash tool was not registered");
+
+			await bashTool.execute("probe-test", { command: "true" }, undefined, undefined, harness.ctx);
+		} finally {
+			harness.restore();
+		}
+
+		expect(probeCount).toBe(2);
+		expect(commandCount).toBe(1);
+	});
 });
 
 describe("sandbox tmpDir mode", () => {
