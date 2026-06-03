@@ -1,4 +1,4 @@
-import { beforeAll, describe, it, expect, mock } from "bun:test";
+import { afterAll, beforeAll, describe, it, expect, mock } from "bun:test";
 import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile as execFileCallback } from "node:child_process";
@@ -38,6 +38,7 @@ import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-pa
 import type { Rule, SandboxRuntimeConfigLike } from "./shared";
 
 const execFile = promisify(execFileCallback);
+const TEST_SCRATCH_DIR = path.join(process.cwd(), ".tmp", "permissions-tests");
 
 const GIT_REPOSITORY_ENV_KEYS = [
 	"GIT_DIR",
@@ -74,11 +75,17 @@ let configModule: typeof import("./config");
 beforeAll(async () => {
 	const td = process.env.TMPDIR || os.tmpdir();
 	await fs.mkdir(td, { recursive: true });
+	await fs.rm(TEST_SCRATCH_DIR, { recursive: true, force: true });
+	await fs.mkdir(TEST_SCRATCH_DIR, { recursive: true });
 	mock.module("@earendil-works/pi-coding-agent", () => ({
 		...piCodingAgent,
 		getAgentDir: () => "/tmp",
 	}));
 	configModule = await import("./config");
+});
+
+afterAll(async () => {
+	await fs.rm(TEST_SCRATCH_DIR, { recursive: true, force: true });
 });
 
 describe("permissions config merge", () => {
@@ -802,7 +809,8 @@ describe("permissions extension sandbox lifecycle", () => {
 		now: () => number;
 		notifications?: string[];
 	}) {
-		const tmp = await fs.mkdtemp(path.join(process.cwd(), ".perm-extension-probe-"));
+		await fs.mkdir(TEST_SCRATCH_DIR, { recursive: true });
+		const tmp = await fs.mkdtemp(path.join(TEST_SCRATCH_DIR, "perm-extension-probe-"));
 		const cwd = path.join(tmp, "repo");
 		const sandboxTmpDir = path.join(tmp, "sandbox-tmp");
 		await fs.mkdir(path.join(cwd, ".pi"), { recursive: true });
@@ -957,7 +965,62 @@ describe("permissions extension sandbox lifecycle", () => {
 		expect(wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`))).toBe(false);
 	});
 
-	it("reports manual probe cwd checks as skipped when policy does not allow workspace writes", async () => {
+	it("runs manual sandbox probes against tmpdir by default", async () => {
+		let now = 0;
+		const notifications: string[] = [];
+		const wrappedCommands: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => now,
+			notifications,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					wrappedCommands.push(command);
+					return command;
+				},
+			},
+		});
+		try {
+			await harness.commands.get("permissions")?.handler("sandbox probe", harness.ctx);
+		} finally {
+			await harness.restore();
+		}
+
+		expect(notifications.some((message) => message.includes("TMPDIR writes are allowed"))).toBe(true);
+		expect(wrappedCommands.some((command) => command.includes(`${harness.sandboxTmpDir}${path.sep}.pi-sandbox-write-probe-`))).toBe(true);
+		expect(wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`))).toBe(false);
+	});
+
+	it("runs manual workspace probes only when explicitly requested", async () => {
+		let now = 0;
+		const notifications: string[] = [];
+		const wrappedCommands: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => now,
+			notifications,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					wrappedCommands.push(command);
+					return command;
+				},
+			},
+		});
+		try {
+			await harness.commands.get("permissions")?.handler("sandbox probe workspace", harness.ctx);
+		} finally {
+			await harness.restore();
+		}
+
+		expect(notifications.some((message) => message.includes("workspace writes are allowed"))).toBe(true);
+		expect(wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`))).toBe(true);
+	});
+
+	it("reports explicit manual workspace probes as skipped when policy does not allow workspace writes", async () => {
 		let now = 0;
 		const notifications: string[] = [];
 		const wrappedCommands: string[] = [];
@@ -975,7 +1038,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			},
 		});
 		try {
-			await harness.commands.get("permissions")?.handler("sandbox probe", harness.ctx);
+			await harness.commands.get("permissions")?.handler("sandbox probe workspace", harness.ctx);
 		} finally {
 			await harness.restore();
 		}

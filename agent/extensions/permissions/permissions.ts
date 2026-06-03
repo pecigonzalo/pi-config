@@ -618,8 +618,8 @@ export default function (pi: ExtensionAPI) {
 		};
 	}
 
-	async function probeSandbox(ctx: ExtensionContext) {
-		const result = await runSandboxProbe(ctx, undefined, undefined, { includeCwdWrite: true });
+	async function probeSandbox(ctx: ExtensionContext, options: { includeCwdWrite?: boolean } = {}) {
+		const result = await runSandboxProbe(ctx, undefined, undefined, options);
 		ctx.ui.notify(result.message, result.level);
 	}
 
@@ -1240,7 +1240,7 @@ export default function (pi: ExtensionAPI) {
 			const subcommandArgs = subcommandRest.join(" ");
 
 			if (subcommand === "help") {
-				ctx.ui.notify("Usage: /permissions [verbose|approvals|reset [session|saved|project|agent|all]|mode|sandbox [status|probe|repair|enable|disable]]", "info");
+				ctx.ui.notify("Usage: /permissions [verbose|approvals|reset [session|saved|project|agent|all]|mode|sandbox [status|probe [workspace]|repair|enable|disable]]", "info");
 				return;
 			}
 
@@ -1272,8 +1272,17 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			if (normalizedArgs === "sandbox probe") {
-				await probeSandbox(ctx);
+			if (subcommand === "sandbox" && subcommandRest[0] === "probe") {
+				const probeScope = subcommandRest[1] ?? "";
+				if (probeScope === "") {
+					await probeSandbox(ctx);
+					return;
+				}
+				if (["workspace", "cwd", "write", "all"].includes(probeScope)) {
+					await probeSandbox(ctx, { includeCwdWrite: true });
+					return;
+				}
+				ctx.ui.notify("Usage: /permissions sandbox probe [workspace]", "warning");
 				return;
 			}
 
