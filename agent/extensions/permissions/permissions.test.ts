@@ -847,11 +847,86 @@ describe("permissions extension sandbox lifecycle", () => {
 			ctx,
 			tools,
 			commands,
+			handlers,
 			restore: () => {
 				Date.now = originalDateNow;
 			},
 		};
 	}
+
+	it("reports active sandbox status through the permissions command", async () => {
+		let now = 0;
+		const notifications: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => now,
+			notifications,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			await harness.commands.get("permissions")?.handler("sandbox status", harness.ctx);
+		} finally {
+			harness.restore();
+		}
+
+		expect(notifications).toContain("Bash sandbox: active; bash exec mode: sandboxed");
+	});
+
+	it("reports fallback execution mode after the sandbox is disabled", async () => {
+		let now = 0;
+		const notifications: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "plan",
+			now: () => now,
+			notifications,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			await harness.commands.get("permissions")?.handler("sandbox disable", harness.ctx);
+		} finally {
+			harness.restore();
+		}
+
+		expect(notifications).toContain("Bash sandbox disabled for this session; bash exec mode: local (block-all-bash)");
+	});
+
+	it("runs sandbox repair through reset, initialize, and probe", async () => {
+		let now = 0;
+		let resetCount = 0;
+		let initializeCount = 0;
+		const notifications: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => now,
+			notifications,
+			sandboxManager: {
+				initialize: async () => {
+					initializeCount++;
+				},
+				reset: async () => {
+					resetCount++;
+				},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			await harness.commands.get("permissions")?.handler("sandbox repair", harness.ctx);
+		} finally {
+			harness.restore();
+		}
+
+		expect(resetCount).toBeGreaterThanOrEqual(2);
+		expect(initializeCount).toBeGreaterThanOrEqual(2);
+		expect(notifications.some((message) => message.startsWith("Bash sandbox repair completed."))).toBe(true);
+	});
 
 	it("uses tmpdir rather than cwd writes for idle health probes in plan mode", async () => {
 		let now = 0;
