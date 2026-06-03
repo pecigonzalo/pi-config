@@ -297,6 +297,29 @@ function getDockerBuildxWritePaths(cwd: string, overrides: SandboxSettings | und
 	]);
 }
 
+function configuredGoWritePaths(cwd: string, overrides: SandboxSettings | undefined): string[] {
+	const env = overrides?.env;
+	if (!env) return [];
+
+	const paths: string[] = [];
+	const addConfiguredPath = (value: string | undefined) => {
+		const trimmed = value?.trim();
+		if (!trimmed || trimmed === "off") return;
+		paths.push(resolveToken(trimmed, cwd));
+	};
+
+	addConfiguredPath(env.GOCACHE);
+	addConfiguredPath(env.GOTMPDIR);
+	addConfiguredPath(env.GOPATH);
+	addConfiguredPath(env.GOMODCACHE);
+
+	if (env.GOPATH && !env.GOMODCACHE) {
+		paths.push(path.join(resolveToken(env.GOPATH, cwd), "pkg", "mod"));
+	}
+
+	return dedupeStrings(paths.flatMap(existingPathAliases));
+}
+
 function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
 	const overrides = env ?? {};
 	const mergedEnv: NodeJS.ProcessEnv = { ...DEFAULT_SANDBOX_ENV, ...process.env, ...overrides };
@@ -365,12 +388,14 @@ function compileSandboxFilesystemConfig(
 ): { filesystem: NonNullable<SandboxRuntimeConfigLike["filesystem"]>; warnings: string[] } {
 	const compatWritePaths = (overrides?.compatWritePaths ?? true) ? getCompatWritePaths() : [];
 	const platformCachePaths = getPlatformCacheWritePaths();
+	const goWritePaths = configuredGoWritePaths(cwd, overrides);
 	const dockerBuildxWritePaths = policy.mode === "plan" ? [] : getDockerBuildxWritePaths(cwd, overrides);
 	const effectiveTmpDirWritePaths = existingPathAliases(effectiveTmpDir);
 	const defaultAllowWrite = dedupeStrings([
 		...modeDefault.allowWrite,
 		...compatWritePaths,
 		...platformCachePaths,
+		...goWritePaths,
 		...dockerBuildxWritePaths,
 		...effectiveTmpDirWritePaths,
 	]);
@@ -381,6 +406,7 @@ function compileSandboxFilesystemConfig(
 		...configuredAllowWrite,
 		...compatWritePaths,
 		...platformCachePaths,
+		...goWritePaths,
 		...dockerBuildxWritePaths,
 		...effectiveTmpDirWritePaths,
 	]);

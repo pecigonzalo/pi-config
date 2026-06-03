@@ -1369,6 +1369,38 @@ describe("sandbox network config", () => {
 		}
 	});
 
+	it("allows configured Go cache and temp paths", () => {
+		const compiled = compileSandboxConfig(policy, "/repo", {
+			enabled: true,
+			tmpDir: "/tmp/custom-pi",
+			env: {
+				GOCACHE: "/tmp/config-go-cache",
+				GOTMPDIR: "/tmp/config-go-tmp",
+				GOPATH: "/tmp/config-go-path",
+			},
+		});
+
+		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/config-go-cache");
+		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/config-go-tmp");
+		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/config-go-path");
+		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/config-go-path/pkg/mod");
+	});
+
+	it("allows configured GOMODCACHE independently of GOPATH", () => {
+		const compiled = compileSandboxConfig(policy, "/repo", {
+			enabled: true,
+			tmpDir: "/tmp/custom-pi",
+			env: {
+				GOPATH: "/tmp/config-go-path",
+				GOMODCACHE: "/tmp/config-go-mod-cache",
+			},
+		});
+
+		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/config-go-path");
+		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/config-go-mod-cache");
+		expect(compiled.config.filesystem?.allowWrite).not.toContain("/tmp/config-go-path/pkg/mod");
+	});
+
 	it("allows macOS Library caches by default", () => {
 		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
 		if (process.platform === "darwin") {
