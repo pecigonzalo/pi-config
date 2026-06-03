@@ -504,19 +504,17 @@ function sandboxCommandEnv(execution: SandboxCommandExecution): NodeJS.ProcessEn
 interface NormalizedWritePathPattern {
 	path: string;
 	wildcard: boolean;
-	recursiveWildcard: boolean;
 }
 
 function normalizeWritePathPattern(value: string): NormalizedWritePathPattern | undefined {
 	const trimmed = value.trim();
 	if (trimmed.length === 0) return undefined;
 
-	const recursiveWildcard = trimmed.endsWith(`${path.sep}**`);
 	const wildcardIndex = trimmed.indexOf("*");
 	const prefix = wildcardIndex >= 0 ? trimmed.slice(0, wildcardIndex) : trimmed;
 	const normalizedPrefix = prefix.endsWith(path.sep) ? prefix.slice(0, -1) : prefix;
 	const normalizedPath = normalizedPrefix.length === 0 ? path.resolve(path.sep) : path.resolve(normalizedPrefix);
-	return { path: normalizedPath, wildcard: wildcardIndex >= 0, recursiveWildcard };
+	return { path: normalizedPath, wildcard: wildcardIndex >= 0 };
 }
 
 function pathContainsTarget(containerPath: string, targetPath: string): boolean {
@@ -524,17 +522,44 @@ function pathContainsTarget(containerPath: string, targetPath: string): boolean 
 	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function escapeRegex(value: string): string {
+	return value.replace(/[\\^$+?.()|[\]{}]/g, "\\$&");
+}
+
+function globPathMatchesPath(pattern: string, targetPath: string): boolean {
+	const normalizedPattern = path.resolve(pattern);
+	const normalizedTarget = path.resolve(targetPath);
+	let source = "";
+	for (let i = 0; i < normalizedPattern.length; i++) {
+		const char = normalizedPattern.charAt(i);
+		if (char === "*") {
+			if (normalizedPattern[i + 1] === "*") {
+				source += ".*";
+				i++;
+			} else {
+				source += `[^${escapeRegex(path.sep)}]*`;
+			}
+		} else {
+			source += escapeRegex(char);
+		}
+	}
+	return new RegExp(`^${source}$`).test(normalizedTarget);
+}
+
 function allowedWritePathCoversTarget(writePath: string, targetPath: string): boolean {
 	const normalized = normalizeWritePathPattern(writePath);
 	if (!normalized) return false;
+	const probePath = path.join(targetPath, ".pi-sandbox-write-probe");
+	if (normalized.wildcard) return globPathMatchesPath(writePath, probePath);
 	return pathContainsTarget(normalized.path, path.resolve(targetPath));
 }
 
 function deniedWritePathCoversTarget(writePath: string, targetPath: string): boolean {
 	const normalized = normalizeWritePathPattern(writePath);
 	if (!normalized) return false;
-	if (normalized.wildcard && !normalized.recursiveWildcard) return false;
-	return pathContainsTarget(normalized.path, path.resolve(targetPath));
+	const probePath = path.join(targetPath, ".pi-sandbox-write-probe");
+	if (normalized.wildcard) return globPathMatchesPath(writePath, probePath);
+	return pathContainsTarget(normalized.path, path.resolve(probePath));
 }
 
 export function isSandboxWriteAllowedForPath(config: SandboxRuntimeConfigLike, targetPath: string): boolean {

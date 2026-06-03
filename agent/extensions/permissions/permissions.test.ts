@@ -802,7 +802,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		now: () => number;
 		notifications?: string[];
 	}) {
-		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-extension-probe-"));
+		const tmp = await fs.mkdtemp(path.join(process.cwd(), ".perm-extension-probe-"));
 		const cwd = path.join(tmp, "repo");
 		const sandboxTmpDir = path.join(tmp, "sandbox-tmp");
 		await fs.mkdir(path.join(cwd, ".pi"), { recursive: true });
@@ -848,8 +848,9 @@ describe("permissions extension sandbox lifecycle", () => {
 			tools,
 			commands,
 			handlers,
-			restore: () => {
+			restore: async () => {
 				Date.now = originalDateNow;
+				await fs.rm(tmp, { recursive: true, force: true });
 			},
 		};
 	}
@@ -870,7 +871,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		try {
 			await harness.commands.get("permissions")?.handler("sandbox status", harness.ctx);
 		} finally {
-			harness.restore();
+			await harness.restore();
 		}
 
 		expect(notifications).toContain("Bash sandbox: active; bash exec mode: sandboxed");
@@ -892,7 +893,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		try {
 			await harness.commands.get("permissions")?.handler("sandbox disable", harness.ctx);
 		} finally {
-			harness.restore();
+			await harness.restore();
 		}
 
 		expect(notifications).toContain("Bash sandbox disabled for this session; bash exec mode: local (block-all-bash)");
@@ -920,7 +921,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		try {
 			await harness.commands.get("permissions")?.handler("sandbox repair", harness.ctx);
 		} finally {
-			harness.restore();
+			await harness.restore();
 		}
 
 		expect(resetCount).toBeGreaterThanOrEqual(2);
@@ -949,7 +950,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			if (!bashTool) throw new Error("bash tool was not registered");
 			await bashTool.execute("probe-test", { command: "true" }, undefined, undefined, harness.ctx);
 		} finally {
-			harness.restore();
+			await harness.restore();
 		}
 
 		expect(wrappedCommands.some((command) => command.includes(`${harness.sandboxTmpDir}${path.sep}.pi-sandbox-write-probe-`))).toBe(true);
@@ -976,7 +977,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		try {
 			await harness.commands.get("permissions")?.handler("sandbox probe", harness.ctx);
 		} finally {
-			harness.restore();
+			await harness.restore();
 		}
 
 		expect(notifications.some((message) => message.includes("workspace write check skipped"))).toBe(true);
@@ -1011,7 +1012,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			await expect(bashTool.execute("probe-test-1", { command: "true" }, undefined, undefined, harness.ctx)).rejects.toThrow("automatic repair failed");
 			await expect(bashTool.execute("probe-test-2", { command: "true" }, undefined, undefined, harness.ctx)).rejects.toThrow("automatic repair failed");
 		} finally {
-			harness.restore();
+			await harness.restore();
 		}
 
 		expect(probeCount).toBe(4);
@@ -1046,7 +1047,7 @@ describe("permissions extension sandbox lifecycle", () => {
 
 			await bashTool.execute("probe-test", { command: "true" }, undefined, undefined, harness.ctx);
 		} finally {
-			harness.restore();
+			await harness.restore();
 		}
 
 		expect(probeCount).toBe(2);
@@ -1221,11 +1222,29 @@ describe("sandbox network config", () => {
 				filesystem: {
 					allowWrite: ["/repo"],
 					denyRead: [],
-					denyWrite: ["/repo/**/.env"],
+					denyWrite: ["/repo/**/.env", "/repo/**/.git/hooks/**"],
 				},
 			},
 			"/repo",
 		)).toBe(true);
+	});
+
+	it("recognizes broad deny globs that block direct workspace writes", () => {
+		expect(isSandboxWriteAllowedForPath(
+			{
+				filesystem: {
+					allowWrite: ["/repo"],
+					denyRead: [],
+					denyWrite: ["/repo/**"],
+				},
+			},
+			"/repo",
+		)).toBe(false);
+	});
+
+	it("expects workspace writes for the default protected-resource sandbox policy", () => {
+		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
+		expect(isSandboxWriteAllowedForPath(compiled.config, "/repo")).toBe(true);
 	});
 
 	it("allows Docker Buildx activity writes by default", () => {
@@ -1321,7 +1340,7 @@ func TestGoCache(t *testing.T) {}
 			else process.env.GOCACHE = originalGoCache;
 			await fs.rm(tmp, { recursive: true, force: true });
 		}
-	});
+	}, 15_000);
 
 	it("uses sandbox path globs rather than permission regexes for protected resources", () => {
 		const protectedPolicy = {
