@@ -31,7 +31,7 @@ export function getSandboxTmpDirMode(overrides: SandboxSettings | undefined): "s
 }
 
 function getCompatWritePaths(): string[] {
-	return dedupeStrings([REAL_SYSTEM_TMPDIR, os.tmpdir(), "/tmp", "/private/tmp"]);
+	return dedupeStrings([REAL_SYSTEM_TMPDIR, os.tmpdir(), "/tmp", "/private/tmp"].flatMap(existingPathAliases));
 }
 
 let darwinUserCacheDir: string | undefined;
@@ -89,7 +89,9 @@ function getPlatformCacheWritePaths(): string[] {
 	const darwinCacheDir = getDarwinUserCacheDir();
 	const darwinLibraryCacheDir = process.platform === "darwin" ? path.join(os.homedir(), "Library", "Caches") : undefined;
 	const goCacheDir = getGoBuildCacheDir();
-	return dedupeStrings([darwinCacheDir, darwinLibraryCacheDir, goCacheDir].filter((value): value is string => value !== undefined));
+	return dedupeStrings([darwinCacheDir, darwinLibraryCacheDir, goCacheDir]
+		.filter((value): value is string => value !== undefined)
+		.flatMap(existingPathAliases));
 }
 
 // c-ares-based tools on macOS (for example Nix curl) read DNS settings via
@@ -307,6 +309,7 @@ function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): No
 	const npmCache = overrides.NPM_CONFIG_CACHE ?? overrides.npm_config_cache ?? path.join(effectiveTmpDir, "npm-cache");
 	const goPath = overrides.GOPATH ?? path.join(effectiveTmpDir, "go");
 	const goModCache = overrides.GOMODCACHE ?? path.join(goPath, "pkg", "mod");
+	const goBuildCache = overrides.GOCACHE ?? getGoBuildCacheDir() ?? path.join(effectiveTmpDir, "go-build-cache");
 
 	return {
 		...mergedEnv,
@@ -319,7 +322,8 @@ function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): No
 		YARN_CACHE_FOLDER: overrides.YARN_CACHE_FOLDER ?? path.join(effectiveTmpDir, "yarn-cache"),
 		PIP_CACHE_DIR: overrides.PIP_CACHE_DIR ?? path.join(effectiveTmpDir, "pip-cache"),
 		UV_CACHE_DIR: overrides.UV_CACHE_DIR ?? path.join(effectiveTmpDir, "uv-cache"),
-		GOCACHE: overrides.GOCACHE ?? path.join(effectiveTmpDir, "go-build-cache"),
+		GOCACHE: goBuildCache,
+		GOTMPDIR: overrides.GOTMPDIR ?? effectiveTmpDir,
 		GOPATH: goPath,
 		GOMODCACHE: goModCache,
 	};
@@ -362,12 +366,13 @@ function compileSandboxFilesystemConfig(
 	const compatWritePaths = (overrides?.compatWritePaths ?? true) ? getCompatWritePaths() : [];
 	const platformCachePaths = getPlatformCacheWritePaths();
 	const dockerBuildxWritePaths = policy.mode === "plan" ? [] : getDockerBuildxWritePaths(cwd, overrides);
+	const effectiveTmpDirWritePaths = existingPathAliases(effectiveTmpDir);
 	const defaultAllowWrite = dedupeStrings([
 		...modeDefault.allowWrite,
 		...compatWritePaths,
 		...platformCachePaths,
 		...dockerBuildxWritePaths,
-		effectiveTmpDir,
+		...effectiveTmpDirWritePaths,
 	]);
 	const configuredAllowWrite = overrides?.allowWrite
 		? resolveSandboxPathTokens(overrides.allowWrite, cwd)
@@ -377,7 +382,7 @@ function compileSandboxFilesystemConfig(
 		...compatWritePaths,
 		...platformCachePaths,
 		...dockerBuildxWritePaths,
-		effectiveTmpDir,
+		...effectiveTmpDirWritePaths,
 	]);
 	const protectedDenyRead = getProtectedSandboxDenyPaths(policy.protectedResources.denyRead, "read", cwd);
 	const protectedDenyWrite = getProtectedSandboxDenyPaths(policy.protectedResources.denyWrite, "write", cwd);
