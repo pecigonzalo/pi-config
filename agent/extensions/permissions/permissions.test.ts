@@ -28,6 +28,7 @@ import {
 	runSandboxedCommand,
 	SandboxRuntimeAdapter,
 } from "./sandbox";
+import type { SandboxCommandExecution } from "./sandbox";
 import {
 	runSandboxedCommandAfterHealthCheck,
 	SandboxHealthMonitor,
@@ -677,6 +678,39 @@ describe("sandboxed command runner", () => {
 		expect(calls).toEqual(["reset", "initialize"]);
 		expect(resetErrors).toHaveLength(1);
 		expect(resetErrors[0]).toBeInstanceOf(Error);
+	});
+
+	it("passes explicit execution policy through adapter command execution", async () => {
+		const runtimeTmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "perm-adapter-exec-"));
+		const sandboxConfig: SandboxRuntimeConfigLike = {
+			filesystem: { denyRead: [], allowWrite: [runtimeTmpDir], denyWrite: [] },
+			network: { allowLocalBinding: true },
+		};
+		const execution: SandboxCommandExecution = {
+			config: sandboxConfig,
+			tmpDir: runtimeTmpDir,
+			env: { PI_TEST_ADAPTER_ENV: "adapter-env" },
+		};
+		let receivedConfig: Partial<SandboxRuntimeConfigLike> | undefined;
+		const chunks: string[] = [];
+		const adapter = new SandboxRuntimeAdapter({
+			initialize: async () => {},
+			reset: async () => {},
+			wrapWithSandbox: async (command, _binShell, customConfig) => {
+				receivedConfig = customConfig;
+				return command;
+			},
+		});
+
+		const result = await adapter.runCommand(execution, {
+			command: "printf '%s\\n%s\\n' \"$TMPDIR\" \"$PI_TEST_ADAPTER_ENV\"",
+			cwd: process.cwd(),
+			onData: (chunk) => chunks.push(chunk.toString("utf8")),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(receivedConfig).toBe(sandboxConfig);
+		expect(chunks.join("")).toBe(`${runtimeTmpDir}\nadapter-env\n`);
 	});
 
 	it("detects when an idle gap should trigger a sandbox health probe", () => {

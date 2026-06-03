@@ -233,7 +233,7 @@ export default function (pi: ExtensionAPI) {
 				ensureHealthy: () => ensureSandboxHealthyAfterIdle(ctx, execution, runtime),
 				execute: () => {
 					const sandboxedBash = createBashTool(ctx.cwd, {
-						operations: runtime.createBashOperations(execution.tmpDir, execution.env, execution.config),
+						operations: runtime.createBashOperations(execution),
 					});
 					return sandboxedBash.execute(id, params, signal, onUpdate);
 				},
@@ -482,18 +482,11 @@ export default function (pi: ExtensionAPI) {
 		const quotedProbePath = shellQuote(probePath);
 		const output: string[] = [];
 		try {
-			const result = await runtime.runCommand({
+			const result = await runtime.runCommand(execution, {
 				command: `printf '%s\\n' probe > ${quotedProbePath} && test -f ${quotedProbePath} && rm -f ${quotedProbePath}`,
 				cwd: ctx.cwd,
-				env: execution.tmpDir
-					? {
-						...(execution.env ?? {}),
-						TMPDIR: execution.tmpDir,
-					}
-					: execution.env,
 				timeout: 10,
 				onData: (chunk) => output.push(chunk.toString("utf8")),
-				sandboxConfig: execution.config,
 			});
 			if (result.exitCode === 0) return { ok: true, message: "passed" };
 

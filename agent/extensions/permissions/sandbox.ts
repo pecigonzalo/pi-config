@@ -486,6 +486,21 @@ export interface SandboxedCommandResult {
 	exitCode: number | null;
 }
 
+export interface SandboxCommandExecution {
+	config: SandboxRuntimeConfigLike;
+	tmpDir: string;
+	env?: Record<string, string>;
+}
+
+function sandboxCommandEnv(execution: SandboxCommandExecution): NodeJS.ProcessEnv | undefined {
+	return execution.tmpDir
+		? {
+			...(execution.env ?? {}),
+			TMPDIR: execution.tmpDir,
+		}
+		: execution.env;
+}
+
 interface NormalizedWritePathPattern {
 	path: string;
 	wildcard: boolean;
@@ -558,16 +573,19 @@ export class SandboxRuntimeAdapter {
 		this.initializedKey = configKey;
 	}
 
-	createBashOperations(
-		runtimeTmpDir?: string,
-		sandboxEnv?: Record<string, string>,
-		sandboxConfig?: SandboxRuntimeConfigLike,
-	): BashOperations {
-		return createSandboxedBashOps(this.manager, runtimeTmpDir, sandboxEnv, sandboxConfig);
+	createBashOperations(execution: SandboxCommandExecution): BashOperations {
+		return createSandboxedBashOps(this.manager, execution.tmpDir, execution.env, execution.config);
 	}
 
-	runCommand(options: SandboxedCommandOptions): Promise<SandboxedCommandResult> {
-		return runSandboxedCommand(this.manager, options);
+	runCommand(
+		execution: SandboxCommandExecution,
+		options: Omit<SandboxedCommandOptions, "env" | "sandboxConfig">,
+	): Promise<SandboxedCommandResult> {
+		return runSandboxedCommand(this.manager, {
+			...options,
+			env: sandboxCommandEnv(execution),
+			sandboxConfig: execution.config,
+		});
 	}
 }
 
