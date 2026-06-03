@@ -177,11 +177,8 @@ export default function (pi: ExtensionAPI) {
 
 	const bashToolTemplate = createBashTool(process.cwd());
 	let sandboxRuntime: SandboxRuntimeAdapter | undefined;
-	let sandboxAvailable = false;
-	let sandboxEnabled = false;
 	let treeSitterReady = false;
-	let sandboxReason = "inactive";
-	let sandboxMode: "normal" | "ask-all-bash" | "block-all-bash" = "normal";
+	type SandboxBashFallbackMode = "normal" | "ask-all-bash" | "block-all-bash";
 	type SandboxExecution = {
 		cwd: string;
 		enabled: boolean;
@@ -191,11 +188,16 @@ export default function (pi: ExtensionAPI) {
 		tmpDir: string;
 		env?: Record<string, string>;
 		warnings: string[];
-		fallbackMode: "normal" | "ask-all-bash" | "block-all-bash";
+		fallbackMode: SandboxBashFallbackMode;
 	};
+	type SandboxState =
+		| { kind: "inactive"; reason: string; fallbackMode: SandboxBashFallbackMode; execution?: SandboxExecution }
+		| { kind: "active"; reason: string; execution: SandboxExecution }
+		| { kind: "disabled"; reason: string; fallbackMode: SandboxBashFallbackMode; execution?: SandboxExecution }
+		| { kind: "unavailable"; reason: string; fallbackMode: SandboxBashFallbackMode; execution: SandboxExecution }
+		| { kind: "failed"; reason: string; fallbackMode: SandboxBashFallbackMode; execution: SandboxExecution };
 	const SANDBOX_RESUME_IDLE_PROBE_MS = 5 * 60 * 1000;
-	let sandboxExecution: SandboxExecution | undefined;
-	let sandboxConfig: SandboxRuntimeConfigLike | undefined;
+	let sandboxState: SandboxState = { kind: "inactive", reason: "inactive", fallbackMode: "normal" };
 	let sandboxTmpDir: string | undefined;
 	let sandboxTmpDirEphemeral = false;
 	const sandboxHealthMonitor = new SandboxHealthMonitor(SANDBOX_RESUME_IDLE_PROBE_MS);
@@ -213,6 +215,27 @@ export default function (pi: ExtensionAPI) {
 		else delete process.env.PI_SANDBOX_TMPDIR;
 	};
 
+	function activeSandboxState(): Extract<SandboxState, { kind: "active" }> | undefined {
+		return sandboxState.kind === "active" ? sandboxState : undefined;
+	}
+
+	function sandboxStatusText(): string {
+		return sandboxState.kind === "active" ? "active" : sandboxState.reason;
+	}
+
+	function sandboxFallbackMode(): SandboxBashFallbackMode {
+		return sandboxState.kind === "active" ? "normal" : sandboxState.fallbackMode;
+	}
+
+	function sandboxBashExecutionMode(): string {
+		if (sandboxState.kind === "active") return "sandboxed";
+		return sandboxState.fallbackMode === "normal" ? "local" : `local (${sandboxState.fallbackMode})`;
+	}
+
+	function sandboxPromptConfig(): SandboxRuntimeConfigLike | undefined {
+		return sandboxState.execution?.config;
+	}
+
 	let ensureSandboxHealthyAfterIdle: (ctx: ExtensionContext, execution: SandboxExecution, runtime: SandboxRuntimeAdapter) => Promise<void> = async () => {};
 
 	pi.registerTool({
@@ -220,14 +243,16 @@ export default function (pi: ExtensionAPI) {
 		label: "bash",
 		async execute(id, params, signal, onUpdate, ctx) {
 			const localBash = createBashTool(ctx.cwd);
-			if (!sandboxExecution || sandboxExecution.cwd !== ctx.cwd) {
+			let active = activeSandboxState();
+			if (!active || active.execution.cwd !== ctx.cwd) {
 				await initializeSandbox(ctx);
+				active = activeSandboxState();
 			}
-			if (!sandboxEnabled || !sandboxAvailable || !sandboxRuntime || !sandboxExecution) {
+			if (!active || !sandboxRuntime) {
 				return localBash.execute(id, params, signal, onUpdate);
 			}
 			const runtime = sandboxRuntime;
-			const execution = sandboxExecution;
+			const execution = active.execution;
 			return runSandboxedCommandAfterHealthCheck({
 				healthMonitor: sandboxHealthMonitor,
 				ensureHealthy: () => ensureSandboxHealthyAfterIdle(ctx, execution, runtime),
@@ -359,36 +384,44 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function initializeSandbox(ctx: ExtensionContext) {
-		sandboxEnabled = false;
-		sandboxMode = "normal";
-		sandboxReason = "inactive";
-		sandboxConfig = undefined;
+		sandboxState = { kind: "inactive", reason: "inactive", fallbackMode: "normal" };
 		clearSandboxEnv();
 
 		const execution = buildSandboxExecution(ctx);
-		sandboxExecution = execution;
-		sandboxConfig = execution.config;
 		if (ctx.hasUI && execution.warnings.length > 0) {
 			ctx.ui.notify(execution.warnings.join("\n"), "warning");
 		}
 
 		if ((pi.getFlag("no-sandbox") as boolean) === true) {
 			await resetSandboxRuntime(ctx, "after --no-sandbox");
-			sandboxReason = "disabled by --no-sandbox";
-			sandboxMode = execution.fallbackMode;
+			sandboxState = {
+				kind: "disabled",
+				reason: "disabled by --no-sandbox",
+				fallbackMode: execution.fallbackMode,
+				execution,
+			};
 			return;
 		}
 
 		if (!execution.enabled) {
 			await resetSandboxRuntime(ctx, "after sandbox disabled by config");
-			sandboxReason = execution.reason;
+			sandboxState = {
+				kind: "disabled",
+				reason: execution.reason,
+				fallbackMode: execution.fallbackMode,
+				execution,
+			};
 			return;
 		}
 
 		if (process.platform !== "darwin" && process.platform !== "linux") {
 			await resetSandboxRuntime(ctx, "after unsupported platform detection");
-			sandboxReason = `unsupported platform: ${process.platform}`;
-			sandboxMode = execution.fallbackMode;
+			sandboxState = {
+				kind: "unavailable",
+				reason: `unsupported platform: ${process.platform}`,
+				fallbackMode: execution.fallbackMode,
+				execution,
+			};
 			return;
 		}
 
@@ -397,12 +430,14 @@ export default function (pi: ExtensionAPI) {
 			if (!sandboxRuntime || sandboxRuntime.manager !== mod.SandboxManager) {
 				sandboxRuntime = new SandboxRuntimeAdapter(mod.SandboxManager);
 			}
-			sandboxAvailable = true;
 		} catch {
 			await resetSandboxRuntime(ctx, "after backend import failure");
-			sandboxAvailable = false;
-			sandboxReason = "backend not installed";
-			sandboxMode = execution.fallbackMode;
+			sandboxState = {
+				kind: "unavailable",
+				reason: "backend not installed",
+				fallbackMode: execution.fallbackMode,
+				execution,
+			};
 			if (ctx.hasUI) {
 				ctx.ui.notify("Bash sandbox unavailable: install dependencies in ~/.pi/agent/extensions/permissions/", "warning");
 			}
@@ -414,18 +449,19 @@ export default function (pi: ExtensionAPI) {
 			await sandboxRuntime.initialize(execution.config, execution.configKey, {
 				onResetError: (err) => warnPermissionIssue(ctx, `Sandbox reset failed before reinitializing: ${err instanceof Error ? err.message : String(err)}`),
 			});
-			sandboxEnabled = true;
-			sandboxMode = "normal";
-			sandboxReason = execution.reason;
+			sandboxState = { kind: "active", reason: execution.reason, execution };
 			setSandboxEnv(execution.reason, execution.tmpDir);
 			if (ctx.hasUI) {
 				ctx.ui.notify(`Bash sandbox active (${execution.reason})`, "info");
 			}
 		} catch (err) {
-			sandboxEnabled = false;
 			await resetSandboxRuntime(ctx, "after failed initialization");
-			sandboxMode = execution.fallbackMode;
-			sandboxReason = `init failed: ${err instanceof Error ? err.message : String(err)}`;
+			sandboxState = {
+				kind: "failed",
+				reason: `init failed: ${err instanceof Error ? err.message : String(err)}`,
+				fallbackMode: execution.fallbackMode,
+				execution,
+			};
 			if (ctx.hasUI) {
 				ctx.ui.notify(`Bash sandbox failed: ${err instanceof Error ? err.message : String(err)}`, "error");
 			}
@@ -433,21 +469,21 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function disableSandboxForSession(ctx: ExtensionContext) {
-		if (sandboxEnabled && sandboxAvailable && sandboxRuntime) {
+		if (sandboxState.kind === "active" && sandboxRuntime) {
 			await resetSandboxRuntime(ctx, "while disabling");
 		}
 
 		const policy = activePolicy(config, agentName, profileName);
-		sandboxEnabled = false;
-		sandboxExecution = undefined;
-		sandboxConfig = undefined;
-		sandboxReason = "disabled by /permissions sandbox disable";
-		sandboxMode = sandboxFallbackModeForPolicy(policy.mode);
+		sandboxState = {
+			kind: "disabled",
+			reason: "disabled by /permissions sandbox disable",
+			fallbackMode: sandboxFallbackModeForPolicy(policy.mode),
+		};
 		clearSandboxEnv();
 	}
 
 	async function enableSandboxForSession(ctx: ExtensionContext) {
-		if (sandboxEnabled && sandboxAvailable && sandboxRuntime) {
+		if (sandboxState.kind === "active" && sandboxRuntime) {
 			await resetSandboxRuntime(ctx, "while re-enabling");
 		}
 
@@ -511,15 +547,14 @@ export default function (pi: ExtensionAPI) {
 
 	async function runSandboxProbe(
 		ctx: ExtensionContext,
-		execution: SandboxExecution | undefined = sandboxExecution,
+		execution: SandboxExecution | undefined = activeSandboxState()?.execution,
 		runtime: SandboxRuntimeAdapter | undefined = sandboxRuntime,
 		options: { includeCwdWrite?: boolean } = {},
 	): Promise<SandboxProbeResult> {
-		if (!sandboxEnabled || !sandboxAvailable || !runtime || !execution) {
-			const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
+		if (sandboxState.kind !== "active" || !runtime || !execution) {
 			return {
 				ok: false,
-				message: `Bash sandbox probe skipped: sandbox is not active (${sandboxStatus})`,
+				message: `Bash sandbox probe skipped: sandbox is not active (${sandboxStatusText()})`,
 				level: "warning",
 			};
 		}
@@ -600,7 +635,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	ensureSandboxHealthyAfterIdle = async (ctx: ExtensionContext, execution: SandboxExecution, runtime: SandboxRuntimeAdapter) => {
-		if (!sandboxEnabled || !sandboxAvailable) return;
+		if (sandboxState.kind !== "active") return;
 		const now = Date.now();
 		const idleMs = sandboxHealthMonitor.idleMs(now);
 		if (!sandboxHealthMonitor.shouldProbe(now)) return;
@@ -640,7 +675,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
-		if (sandboxEnabled && sandboxAvailable && sandboxRuntime) {
+		if (sandboxState.kind === "active" && sandboxRuntime) {
 			await resetSandboxRuntime();
 		}
 		if (sandboxTmpDirEphemeral && sandboxTmpDir) {
@@ -652,18 +687,17 @@ export default function (pi: ExtensionAPI) {
 		}
 		sandboxTmpDir = undefined;
 		sandboxTmpDirEphemeral = false;
-		sandboxEnabled = false;
-		sandboxExecution = undefined;
-		sandboxConfig = undefined;
+		sandboxState = { kind: "inactive", reason: "inactive", fallbackMode: "normal" };
 		clearSandboxEnv();
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
-		if (!sandboxEnabled || sandboxMode !== "normal" || !sandboxExecution) return;
+		const active = activeSandboxState();
+		if (!active) return;
 
-		const hint = formatSandboxPromptHint(sandboxExecution.config, {
-			reason: sandboxReason,
-			tmpDir: sandboxExecution.tmpDir,
+		const hint = formatSandboxPromptHint(active.execution.config, {
+			reason: active.reason,
+			tmpDir: active.execution.tmpDir,
 			cwd: ctx.cwd,
 		});
 
@@ -1074,10 +1108,11 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
-			if (sandboxMode === "block-all-bash") {
+			const fallbackMode = sandboxFallbackMode();
+			if (fallbackMode === "block-all-bash") {
 				return { block: true, reason: `Bash blocked: sandbox unavailable in ${policy.mode} mode` };
 			}
-			if (sandboxMode === "ask-all-bash") {
+			if (fallbackMode === "ask-all-bash") {
 				return askPermission(toolName, input, "Sandbox unavailable: confirmation required for all bash commands", projectRoot, ctx);
 			}
 			const dangerousReason = detectDangerousBashPattern(command);
@@ -1218,16 +1253,14 @@ export default function (pi: ExtensionAPI) {
 
 			if (normalizedArgs === "sandbox disable" || normalizedArgs === "sandbox off") {
 				await disableSandboxForSession(ctx);
-				const bashExecutionMode = sandboxMode === "normal" ? "local" : `local (${sandboxMode})`;
-				ctx.ui.notify(`Bash sandbox disabled for this session; bash exec mode: ${bashExecutionMode}`, "warning");
+				ctx.ui.notify(`Bash sandbox disabled for this session; bash exec mode: ${sandboxBashExecutionMode()}`, "warning");
 				return;
 			}
 
 			if (normalizedArgs === "sandbox enable" || normalizedArgs === "sandbox on") {
 				await enableSandboxForSession(ctx);
-				const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
-				const bashExecutionMode = sandboxEnabled ? "sandboxed" : sandboxMode === "normal" ? "local" : `local (${sandboxMode})`;
-				ctx.ui.notify(`Bash sandbox: ${sandboxStatus}; bash exec mode: ${bashExecutionMode}`, sandboxEnabled ? "info" : "warning");
+				const sandboxActive = sandboxState.kind === "active";
+				ctx.ui.notify(`Bash sandbox: ${sandboxStatusText()}; bash exec mode: ${sandboxBashExecutionMode()}`, sandboxActive ? "info" : "warning");
 				return;
 			}
 
@@ -1242,9 +1275,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (normalizedArgs === "sandbox" || normalizedArgs === "sandbox status") {
-				const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
-				const bashExecutionMode = sandboxEnabled ? "sandboxed" : sandboxMode === "normal" ? "local" : `local (${sandboxMode})`;
-				ctx.ui.notify(`Bash sandbox: ${sandboxStatus}; bash exec mode: ${bashExecutionMode}`, "info");
+				ctx.ui.notify(`Bash sandbox: ${sandboxStatusText()}; bash exec mode: ${sandboxBashExecutionMode()}`, "info");
 				return;
 			}
 
@@ -1257,8 +1288,10 @@ export default function (pi: ExtensionAPI) {
 			const agentOverride = agentName !== "default" ? config.agents?.[agentName] : undefined;
 			const hasAgentOverride = agentOverride !== undefined;
 			const isFullOverride = agentOverride?.inherit === false;
-			const sandboxStatus = sandboxEnabled ? "active" : sandboxReason;
-			const bashExecutionMode = sandboxEnabled ? "sandboxed" : sandboxMode === "normal" ? "local" : `local (${sandboxMode})`;
+			const sandboxActive = sandboxState.kind === "active";
+			const sandboxStatus = sandboxStatusText();
+			const bashExecutionMode = sandboxBashExecutionMode();
+			const sandboxConfig = sandboxPromptConfig();
 			const shellParserStatus = treeSitterReady ? "tree-sitter (active)" : "simple fallback";
 			const verbose = /^(verbose|full|debug|all)$/i.test((args || "").trim());
 			const sessionApprovalCount = sessionPathApprovals.length + sessionBashApprovals.length;
@@ -1301,8 +1334,8 @@ export default function (pi: ExtensionAPI) {
 					lines.push("");
 					lines.push(`  ${theme.fg("muted", "Mode:         ")}${theme.fg("accent", mode)}`);
 					lines.push(`  ${theme.fg("muted", "External path:")}${theme.fg(epColor, ` ${externalPath}`)}${theme.fg("dim", " (structured tools)")}`);
-					lines.push(`  ${theme.fg("muted", "Bash sandbox: ")}${theme.fg(sandboxEnabled ? "success" : "dim", sandboxStatus)}`);
-					lines.push(`  ${theme.fg("muted", "Bash exec:    ")}${theme.fg(sandboxEnabled ? "success" : "warning", bashExecutionMode)}`);
+					lines.push(`  ${theme.fg("muted", "Bash sandbox: ")}${theme.fg(sandboxActive ? "success" : "dim", sandboxStatus)}`);
+					lines.push(`  ${theme.fg("muted", "Bash exec:    ")}${theme.fg(sandboxActive ? "success" : "warning", bashExecutionMode)}`);
 					lines.push(`  ${theme.fg("muted", "Shell parser: ")}${theme.fg(treeSitterReady ? "success" : "warning", shellParserStatus)}${!treeSitterReady ? theme.fg("dim", " — whole-command approvals only") : ""}`);
 					lines.push(`  ${theme.fg("muted", "Approvals:    ")}${theme.fg("warning", `${sessionApprovalCount} session`)}${theme.fg("dim", ", ")}${theme.fg("accent", `${persistentApprovals.length} saved`)}`);
 					if (sessionAllows.size > 0) {
@@ -1362,8 +1395,8 @@ export default function (pi: ExtensionAPI) {
 					lines.push(`  ${theme.fg("muted", "Mode:           ")}${theme.fg("accent", mode)}`);
 					const epColor = externalPath === "block" ? "error" : externalPath === "ask" ? "warning" : "dim";
 					lines.push(`  ${theme.fg("muted", "External path:  ")}${theme.fg(epColor, externalPath)}${theme.fg("dim", " (structured tools)")}`);
-					lines.push(`  ${theme.fg("muted", "Bash sandbox:   ")}${theme.fg(sandboxEnabled ? "success" : "dim", sandboxStatus)}`);
-					lines.push(`  ${theme.fg("muted", "Bash exec mode: ")}${theme.fg(sandboxEnabled ? "success" : "warning", bashExecutionMode)}`);
+					lines.push(`  ${theme.fg("muted", "Bash sandbox:   ")}${theme.fg(sandboxActive ? "success" : "dim", sandboxStatus)}`);
+					lines.push(`  ${theme.fg("muted", "Bash exec mode: ")}${theme.fg(sandboxActive ? "success" : "warning", bashExecutionMode)}`);
 					lines.push(`  ${theme.fg("muted", "Shell parser:   ")}${theme.fg(treeSitterReady ? "success" : "warning", shellParserStatus)}${!treeSitterReady ? theme.fg("dim", " — whole-command approvals only") : ""}`);
 					lines.push(`  ${theme.fg("muted", "Sandbox TMPDIR: ")}${theme.fg("dim", sandboxTmpDir ?? getEffectiveSandboxTmpDir(ctx.cwd, config.sandbox))}${theme.fg("dim", sandboxTmpDirEphemeral ? " (session)" : " (shared)")}`);
 					lines.push(`  ${theme.fg("muted", "Protected read: ")}${theme.fg("warning", `${protectedResources.denyRead.length}`)}`);
