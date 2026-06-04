@@ -39,6 +39,7 @@ export interface AgentConfig {
 	defaultEffort?: string;
 	defaultSkills?: string[];
 	tools?: string[];
+	excludeTools?: string[];
 	model?: string;
 	systemPromptMode: SystemPromptMode;
 	context?: ContextDefaults;
@@ -56,6 +57,7 @@ export interface ProfileConfig {
 	displayName?: string;
 	enabled: boolean;
 	tools?: string[];
+	excludeTools?: string[];
 	context?: ContextDefaults;
 	persist?: boolean;
 	inheritProjectContext?: boolean;
@@ -377,6 +379,7 @@ function parseAgentConfig(
 		defaultEffort: parseString(frontmatter.defaultEffort ?? frontmatter.effort),
 		defaultSkills: parseCsvList(frontmatter.defaultSkills ?? frontmatter.skills),
 		tools: parseCsvList(frontmatter.tools),
+		excludeTools: parseCsvList(frontmatter.excludeTools ?? frontmatter.exclude_tools),
 		model: parseString(frontmatter.model),
 		systemPromptMode: parseSystemPromptMode(frontmatter.systemPromptMode),
 		context: parseContextDefaults(frontmatter.context, Object.prototype.hasOwnProperty.call(frontmatter, "context")),
@@ -405,6 +408,7 @@ function parseProfileConfig(
 		displayName: parseString(frontmatter.displayName ?? frontmatter.display_name),
 		enabled: parseBoolean(frontmatter.enabled, true),
 		tools: parseCsvList(frontmatter.tools),
+		excludeTools: parseCsvList(frontmatter.excludeTools ?? frontmatter.exclude_tools),
 		context: parseContextDefaults(frontmatter.context, Object.prototype.hasOwnProperty.call(frontmatter, "context")),
 		persist: parseOptionalBoolean(frontmatter.persist),
 		inheritProjectContext:

@@ -632,6 +632,7 @@ interface ResolvedWorkerConfig {
 	model?: string;
 	skills?: string[];
 	tools?: string[];
+	excludeTools?: string[];
 	context: {
 		mode: ContextMode;
 		project: boolean;
@@ -785,6 +786,7 @@ function resolveWorkerConfig(
 	const skills = step.skills ?? agent?.defaultSkills;
 	const prompt = composePromptLayers(profile?.systemPrompt ?? "", agent?.systemPrompt ?? "", step.prompt ?? "");
 	const tools = agent?.tools ?? profile?.tools;
+	const excludeTools = agent?.excludeTools ?? profile?.excludeTools;
 	const systemPromptMode = agent?.systemPromptMode ?? profile?.systemPromptMode ?? "append";
 	const displayAgentName = agent?.name ?? "generic";
 
@@ -901,6 +903,7 @@ function resolveWorkerConfig(
 			model: resolvedModel.model,
 			skills,
 			tools,
+			excludeTools,
 			context: {
 				mode: effectiveContextMode,
 				project: effectiveContextProject,
@@ -982,6 +985,16 @@ function parseAgentModelSpec(
 	}
 	if (!currentModel?.provider) return undefined;
 	return { provider: currentModel.provider, modelId: normalized };
+}
+
+function appendWorkerToolFlags(args: string[], worker: Pick<ResolvedWorkerConfig, "tools" | "excludeTools">): void {
+	if (worker.tools !== undefined) {
+		if (worker.tools.length > 0) args.push("--tools", worker.tools.join(","));
+		else args.push("--no-tools");
+	}
+	if (worker.excludeTools && worker.excludeTools.length > 0) {
+		args.push("--exclude-tools", worker.excludeTools.join(","));
+	}
 }
 
 function getPersistedMainAgentState(entries: SessionEntry[]): PersistedMainAgentState {
@@ -1115,11 +1128,10 @@ async function applyMainSessionAgentSelection(
 	const worker = resolved.config;
 
 	const allToolNames = new Set(piApi.getAllTools().map((tool) => tool.name));
-	if (worker.tools !== undefined) {
-		const invalidTools = worker.tools.filter((tool) => !allToolNames.has(tool));
-		if (invalidTools.length > 0) {
-			return { ok: false, error: `Unknown tools in main-session composition: ${invalidTools.join(", ")}.` };
-		}
+	const configuredTools = [...(worker.tools ?? []), ...(worker.excludeTools ?? [])];
+	const invalidTools = configuredTools.filter((tool) => !allToolNames.has(tool));
+	if (invalidTools.length > 0) {
+		return { ok: false, error: `Unknown tools in main-session composition: ${invalidTools.join(", ")}.` };
 	}
 
 	if (worker.model) {
@@ -1139,8 +1151,15 @@ async function applyMainSessionAgentSelection(
 	if (worker.effort?.thinkingLevel) {
 		piApi.setThinkingLevel(worker.effort.thinkingLevel);
 	}
-	if (worker.tools !== undefined) piApi.setActiveTools([...worker.tools]);
-	else if (mainSessionBaseline) piApi.setActiveTools([...mainSessionBaseline.tools]);
+	let activeTools: string[] | undefined;
+	if (worker.tools !== undefined) activeTools = [...worker.tools];
+	else if (worker.excludeTools !== undefined) activeTools = [...allToolNames];
+	else if (mainSessionBaseline) activeTools = [...mainSessionBaseline.tools];
+	if (activeTools && worker.excludeTools) {
+		const excluded = new Set(worker.excludeTools);
+		activeTools = activeTools.filter((tool) => !excluded.has(tool));
+	}
+	if (activeTools) piApi.setActiveTools(activeTools);
 
 	activeMainWorker = worker;
 	syncRuntimeEnv(piApi, { agent: worker.agent?.name, profile: worker.profile?.permissionsProfile ?? worker.profile?.name });
@@ -1725,10 +1744,7 @@ async function runSingleAgentViaJson(
 	const agentModel = worker.model;
 	if (agentModel) args.push("--model", agentModel);
 	if (worker.effort?.thinkingLevel) args.push("--thinking", worker.effort.thinkingLevel);
-	if (worker.tools !== undefined) {
-		if (worker.tools.length > 0) args.push("--tools", worker.tools.join(","));
-		else args.push("--no-tools");
-	}
+	appendWorkerToolFlags(args, worker);
 	if (!worker.inheritProjectContext) args.push("--no-context-files");
 
 	if (worker.skills && worker.skills.length > 0) {
@@ -1952,10 +1968,7 @@ async function runSingleAgentViaRpc(
 	const agentModel = worker.model;
 	if (agentModel) args.push("--model", agentModel);
 	if (worker.effort?.thinkingLevel) args.push("--thinking", worker.effort.thinkingLevel);
-	if (worker.tools !== undefined) {
-		if (worker.tools.length > 0) args.push("--tools", worker.tools.join(","));
-		else args.push("--no-tools");
-	}
+	appendWorkerToolFlags(args, worker);
 	if (!worker.inheritProjectContext) args.push("--no-context-files");
 	if (worker.skills && worker.skills.length > 0) {
 		const { paths, missing } = resolveSkillPaths(worker.skills, preparedStep.launchCwd);
@@ -4596,6 +4609,7 @@ export const __test__ = {
 	shouldDisplayTaskInlineNotice,
 	buildTaskWidgetLines,
 	normalizeChildSessionSnapshot: (data: unknown) => normalizeChildSessionSnapshot(data, TASK_CHILD_SESSION_METADATA_VERSION),
+	appendWorkerToolFlags,
 	parseTaskTerminalBackendPreference,
 	parseTasksCommand,
 	preflightTaskRun,
@@ -4605,6 +4619,7 @@ export const __test__ = {
 	resolvePersistedTaskSessionRoot,
 	resolveTaskOriginForBranch: (entries: readonly SessionEntry[], leafId?: string | null) =>
 		resolveTaskOriginForBranch(entries, createTaskPreview, leafId),
+	resolveWorkerConfig,
 	resolveTaskSelector,
 	setTaskWidgetEnabled,
 	terminateProcessWithEscalation,

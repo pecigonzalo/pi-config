@@ -410,6 +410,39 @@ describe("tasks extension compact schema", () => {
 	});
 });
 
+describe("tasks worker tool configuration", () => {
+	it("resolves excluded tools from agent and profile configs", () => {
+		const resources = createResources({
+			agents: [
+				{
+					name: "reviewer",
+					description: "Review code",
+					enabled: true,
+					availability: "task",
+					excludeTools: ["bash", "write"],
+					systemPromptMode: "append",
+					systemPrompt: "Review carefully.",
+					source: "user",
+					filePath: "/tmp/reviewer.md",
+				},
+			],
+		});
+
+		const resolved = __test__.resolveWorkerConfig({ agent: "reviewer", task: "Review" }, resources);
+
+		expect(resolved.error).toBeUndefined();
+		expect(resolved.config.excludeTools).toEqual(["bash", "write"]);
+	});
+
+	it("appends exclude-tools flags for child pi processes", () => {
+		const args: string[] = [];
+
+		__test__.appendWorkerToolFlags(args, { tools: ["read", "edit"], excludeTools: ["bash"] });
+
+		expect(args).toEqual(["--tools", "read,edit", "--exclude-tools", "bash"]);
+	});
+});
+
 describe("tasks extension persisted-session guardrails", () => {
 	beforeEach(() => {
 		mockResources = undefined;
