@@ -4,13 +4,17 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "^0.0.49",
-    "@earendil-works/pi-ai": "0.75.1",
-    "@earendil-works/pi-coding-agent": "0.75.1",
-    "@earendil-works/pi-tui": "0.75.1",
-    "typebox": "^1.1.24"
+    "@anthropic-ai/sandbox-runtime": "^0.0.49"
   },
   "pi": {
-    "extensions": ["./typescript.ts"]
+    "extensions": [
+      "./typescript.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   }
 }

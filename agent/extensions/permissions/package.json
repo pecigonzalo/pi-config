@@ -5,12 +5,16 @@
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "^0.0.49",
-    "@earendil-works/pi-coding-agent": "0.75.1",
-    "@earendil-works/pi-tui": "0.75.1",
     "tree-sitter-bash": "^0.25.1",
     "web-tree-sitter": "^0.26.8"
   },
   "pi": {
-    "extensions": ["./permissions.ts"]
+    "extensions": [
+      "./permissions.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   }
 }

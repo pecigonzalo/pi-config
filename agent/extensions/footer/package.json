@@ -4,12 +4,16 @@
     "generate:footer-schema": "bun run ./generate-schema.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.75.1",
-    "@earendil-works/pi-coding-agent": "0.75.1",
-    "@earendil-works/pi-tui": "0.75.1",
     "zod": "^4.4.3"
   },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   }
 }
