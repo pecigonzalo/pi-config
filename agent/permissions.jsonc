@@ -173,6 +173,24 @@
         "match": "^(gofmt|golangci-lint|govulncheck)\\b",
         "action": "allow",
       },
+      // ── Bash: Docker Compose read-only inspection → allow ───────────────────
+      // Mutating or code-running subcommands such as up, down, run, exec, build,
+      // pull, push, restart, and rm continue to fall through to approval.
+      {
+        "tool": "bash",
+        "match": "^(docker\\s+compose|docker-compose)\\s+(version|ls|ps|images|top|port)(?:\\s+[^;&|<>$`\\n]*)?\\s*$",
+        "action": "allow",
+      },
+      {
+        "tool": "bash",
+        "match": "^(docker\\s+compose|docker-compose)\\s+logs(?:\\s+[^;&|<>$`\\n]*)?\\s*$",
+        "action": "allow",
+      },
+      {
+        "tool": "bash",
+        "match": "^(docker\\s+compose|docker-compose)\\s+config\\s+(-q|--quiet)\\s*$",
+        "action": "allow",
+      },
       // ── Bash: ask for direct code execution / ephemeral executors ────────────
       {
         "tool": "bash",
