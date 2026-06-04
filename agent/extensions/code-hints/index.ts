@@ -423,7 +423,7 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
       if (!active || generation !== currentGeneration || dirtyGeneration !== currentDirtyGeneration) return;
 
       const baselineSnapshot = new Map(baselineByFile);
-      const results = await service.diagnostics(files, { severity: "error", timeoutMs: DEFAULT_TIMEOUT_MS }).catch(() => []);
+      const results = await service.diagnostics(files, { severity: "error", timeoutMs: DEFAULT_TIMEOUT_MS, signal: ctx.signal }).catch(() => []);
       if (!active || generation !== currentGeneration || dirtyGeneration !== currentDirtyGeneration) return;
 
       const report = formatReport(cwd, results, baselineSnapshot, {
@@ -477,7 +477,7 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
     resetState();
   });
 
-  pi.on("tool_call", async (event) => {
+  pi.on("tool_call", async (event, ctx) => {
     if (event.toolName !== "write" && event.toolName !== "edit") return;
     const input = event.input as { path?: unknown };
     if (typeof input.path !== "string") return;
@@ -488,7 +488,7 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
     if (baselinePromises.has(input.path)) return;
 
     const baselineGeneration = generation;
-    const promise = service.diagnostics([input.path], { severity: "error", timeoutMs: DEFAULT_TIMEOUT_MS })
+    const promise = service.diagnostics([input.path], { severity: "error", timeoutMs: DEFAULT_TIMEOUT_MS, signal: ctx.signal })
       .then((results) => {
         if (!active || generation !== baselineGeneration) return;
         const baseline = collectErrorFingerprints(results);
@@ -513,7 +513,7 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
     dirtyGeneration++;
 
     // Keep the LSP document cache warm without returning per-edit diagnostics.
-    service.touchFile(input.path, { waitForDiagnostics: false }).catch(() => undefined);
+    service.touchFile(input.path, { waitForDiagnostics: false, signal: ctx.signal }).catch(() => undefined);
     if (ctx.hasUI) ctx.ui.setStatus("code-hints", ctx.ui.theme.fg("dim", `hints: ${touchedFiles.size} touched`));
   });
 

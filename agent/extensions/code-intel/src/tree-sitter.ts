@@ -118,7 +118,7 @@ export async function extractDefinitionsForLoadedSource(
 	const treeSitterDefinitions = hydrateTreeSitterDefinitions(file, text, treeSitterTags?.byFile.get(file.relPath)?.definitions ?? []);
 	const lspService = getLspService(pi);
 	const lspSymbols = lspService?.documentSymbols && (!lspService.supportsFile || lspService.supportsFile(file.absPath))
-		? await lspService.documentSymbols(file.absPath).catch(() => [])
+		? await lspService.documentSymbols(file.absPath, { signal }).catch(() => [])
 		: [];
 	return mergeDefinitions(hydrateLspDocumentSymbols(file, text, lspSymbols), mergeDefinitions(treeSitterDefinitions, syntaxDefinitions));
 }

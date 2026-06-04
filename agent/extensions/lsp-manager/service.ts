@@ -96,23 +96,29 @@ export interface LspStatusItem {
 export interface LspDiagnosticsOptions {
   timeoutMs?: number;
   severity?: "error" | "warning" | "info" | "hint" | "all";
+  signal?: AbortSignal;
 }
 
 export interface LspTouchOptions {
   waitForDiagnostics?: boolean;
   timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export interface LspRequestOptions {
+  signal?: AbortSignal;
 }
 
 /** Reusable service exposed by the lsp-manager extension. */
 export interface LspManagerService {
   supportsFile(filePath: string): boolean;
-  warmup(filePath: string): Promise<boolean>;
+  warmup(filePath: string, options?: LspRequestOptions): Promise<boolean>;
   touchFile(filePath: string, options?: LspTouchOptions): Promise<LspFileDiagnostics>;
   diagnostics(filePaths: string[], options?: LspDiagnosticsOptions): Promise<LspFileDiagnostics[]>;
-  definition(filePath: string, position: LspPosition): Promise<LspLocation[]>;
-  references(filePath: string, position: LspPosition): Promise<LspLocation[]>;
-  hover(filePath: string, position: LspPosition): Promise<LspHoverInfo | undefined>;
-  documentSymbols(filePath: string): Promise<LspDocumentSymbol[]>;
+  definition(filePath: string, position: LspPosition, options?: LspRequestOptions): Promise<LspLocation[]>;
+  references(filePath: string, position: LspPosition, options?: LspRequestOptions): Promise<LspLocation[]>;
+  hover(filePath: string, position: LspPosition, options?: LspRequestOptions): Promise<LspHoverInfo | undefined>;
+  documentSymbols(filePath: string, options?: LspRequestOptions): Promise<LspDocumentSymbol[]>;
   status(): LspStatusItem[];
   shutdown(): Promise<void>;
 }
@@ -393,8 +399,39 @@ function hoverContentsToText(contents: Hover["contents"]): string {
   return contents.value;
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+function abortError(): Error {
+  return new Error("aborted");
+}
+
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (isAborted(signal)) throw abortError();
+}
+
+function withAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return promise;
+  throwIfAborted(signal);
   return new Promise<T>((resolvePromise, rejectPromise) => {
+    const onAbort = () => rejectPromise(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolvePromise(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        rejectPromise(error);
+      },
+    );
+  });
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string, signal?: AbortSignal): Promise<T> {
+  return withAbort(new Promise<T>((resolvePromise, rejectPromise) => {
     const timer = setTimeout(() => rejectPromise(new Error(`${label} timed out`)), timeoutMs);
     promise.then(
       (value) => {
@@ -406,7 +443,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
         rejectPromise(error);
       },
     );
-  });
+  }), signal);
 }
 
 function collectUniqueClients(clients: Iterable<LspClientState>, pendingClients: Iterable<LspClientState>): LspClientState[] {
@@ -429,15 +466,15 @@ export class DefaultLspManagerService implements LspManagerService {
     return !!server && commandExists(server.command);
   }
 
-  async warmup(filePath: string): Promise<boolean> {
-    if (this.shuttingDown) return false;
-    const client = await this.getClientForFile(filePath);
-    return !!client;
+  async warmup(filePath: string, options: LspRequestOptions = {}): Promise<boolean> {
+    if (this.shuttingDown || isAborted(options.signal)) return false;
+    const client = await this.getClientForFile(filePath, options.signal).catch(() => undefined);
+    return !!client && !isAborted(options.signal);
   }
 
   async touchFile(filePath: string, options: LspTouchOptions = {}): Promise<LspFileDiagnostics> {
     const absolutePath = this.resolvePath(filePath);
-    if (this.shuttingDown) {
+    if (this.shuttingDown || isAborted(options.signal)) {
       return { file: absolutePath, status: "error", diagnostics: [], error: "LSP manager is shutting down." };
     }
     const server = serverForFile(absolutePath);
@@ -448,7 +485,7 @@ export class DefaultLspManagerService implements LspManagerService {
       return { file: absolutePath, status: "error", diagnostics: [], error: "File does not exist." };
     }
 
-    const client = await this.getClientForFile(absolutePath);
+    const client = await this.getClientForFile(absolutePath, options.signal).catch(() => undefined);
     if (!client) {
       return { file: absolutePath, status: "unsupported", diagnostics: [], error: `${server.command} is not available or failed to initialize.` };
     }
@@ -458,7 +495,7 @@ export class DefaultLspManagerService implements LspManagerService {
       return { file: absolutePath, status: "ok", diagnostics: [] };
     }
 
-    const responded = await this.openOrUpdateAndWait(client, server, absolutePath, options.timeoutMs ?? DEFAULT_DIAGNOSTIC_TIMEOUT_MS);
+    const responded = await this.openOrUpdateAndWait(client, server, absolutePath, options.timeoutMs ?? DEFAULT_DIAGNOSTIC_TIMEOUT_MS, options.signal);
     const diagnostics = (client.diagnostics.get(absolutePath) ?? []).map((diagnostic) => diagnosticToItem(absolutePath, diagnostic));
     return {
       file: absolutePath,
@@ -469,7 +506,7 @@ export class DefaultLspManagerService implements LspManagerService {
   }
 
   async diagnostics(filePaths: string[], options: LspDiagnosticsOptions = {}): Promise<LspFileDiagnostics[]> {
-    if (this.shuttingDown) {
+    if (this.shuttingDown || isAborted(options.signal)) {
       return filePaths.map((filePath) => ({
         file: this.resolvePath(filePath),
         status: "error",
@@ -481,6 +518,7 @@ export class DefaultLspManagerService implements LspManagerService {
     const results: LspFileDiagnostics[] = [];
 
     for (const filePath of [...new Set(filePaths)]) {
+      if (isAborted(options.signal)) break;
       const absolutePath = this.resolvePath(filePath);
       const server = serverForFile(absolutePath);
       if (!server) {
@@ -492,13 +530,13 @@ export class DefaultLspManagerService implements LspManagerService {
         continue;
       }
 
-      const client = await this.getClientForFile(absolutePath);
+      const client = await this.getClientForFile(absolutePath, options.signal).catch(() => undefined);
       if (!client) {
         results.push({ file: absolutePath, status: "unsupported", diagnostics: [], error: `${server.command} is not available or failed to initialize.` });
         continue;
       }
 
-      const responded = await this.openOrUpdateAndWait(client, server, absolutePath, timeoutMs);
+      const responded = await this.openOrUpdateAndWait(client, server, absolutePath, timeoutMs, options.signal);
       const rawDiagnostics = client.diagnostics.get(absolutePath) ?? [];
       const diagnostics = filterBySeverity(rawDiagnostics.map((diagnostic) => diagnosticToItem(absolutePath, diagnostic)), options.severity);
       results.push({
@@ -512,50 +550,50 @@ export class DefaultLspManagerService implements LspManagerService {
     return results;
   }
 
-  async definition(filePath: string, position: LspPosition): Promise<LspLocation[]> {
-    if (this.shuttingDown) return [];
-    const loaded = await this.loadSyncedFile(filePath);
-    if (!loaded || this.shuttingDown || loaded.client.closed) return [];
-    const result = await loaded.client.connection.sendRequest(DefinitionRequest.type, {
+  async definition(filePath: string, position: LspPosition, options: LspRequestOptions = {}): Promise<LspLocation[]> {
+    if (this.shuttingDown || isAborted(options.signal)) return [];
+    const loaded = await this.loadSyncedFile(filePath, options.signal);
+    if (!loaded || this.shuttingDown || loaded.client.closed || isAborted(options.signal)) return [];
+    const result = await withAbort(loaded.client.connection.sendRequest(DefinitionRequest.type, {
       textDocument: { uri: loaded.uri },
       position: positionToLsp(position),
-    }).catch(() => undefined);
+    }), options.signal).catch(() => undefined);
     return normalizeLocations(result);
   }
 
-  async references(filePath: string, position: LspPosition): Promise<LspLocation[]> {
-    if (this.shuttingDown) return [];
-    const loaded = await this.loadSyncedFile(filePath);
-    if (!loaded || this.shuttingDown || loaded.client.closed) return [];
-    const result = await loaded.client.connection.sendRequest(ReferencesRequest.type, {
+  async references(filePath: string, position: LspPosition, options: LspRequestOptions = {}): Promise<LspLocation[]> {
+    if (this.shuttingDown || isAborted(options.signal)) return [];
+    const loaded = await this.loadSyncedFile(filePath, options.signal);
+    if (!loaded || this.shuttingDown || loaded.client.closed || isAborted(options.signal)) return [];
+    const result = await withAbort(loaded.client.connection.sendRequest(ReferencesRequest.type, {
       textDocument: { uri: loaded.uri },
       position: positionToLsp(position),
       context: { includeDeclaration: true },
-    }).catch(() => undefined);
+    }), options.signal).catch(() => undefined);
     return normalizeLocations(result);
   }
 
-  async hover(filePath: string, position: LspPosition): Promise<LspHoverInfo | undefined> {
-    if (this.shuttingDown) return undefined;
-    const loaded = await this.loadSyncedFile(filePath);
-    if (!loaded || this.shuttingDown || loaded.client.closed) return undefined;
-    const result = await loaded.client.connection.sendRequest(HoverRequest.type, {
+  async hover(filePath: string, position: LspPosition, options: LspRequestOptions = {}): Promise<LspHoverInfo | undefined> {
+    if (this.shuttingDown || isAborted(options.signal)) return undefined;
+    const loaded = await this.loadSyncedFile(filePath, options.signal);
+    if (!loaded || this.shuttingDown || loaded.client.closed || isAborted(options.signal)) return undefined;
+    const result = await withAbort(loaded.client.connection.sendRequest(HoverRequest.type, {
       textDocument: { uri: loaded.uri },
       position: positionToLsp(position),
-    }).catch(() => undefined);
+    }), options.signal).catch(() => undefined);
     if (!result?.contents) return undefined;
     const contents = hoverContentsToText(result.contents).trim();
     if (!contents) return undefined;
     return { file: loaded.absolutePath, line: position.line, column: position.column, contents };
   }
 
-  async documentSymbols(filePath: string): Promise<LspDocumentSymbol[]> {
-    if (this.shuttingDown) return [];
-    const loaded = await this.loadSyncedFile(filePath);
-    if (!loaded || this.shuttingDown || loaded.client.closed) return [];
-    const result = await loaded.client.connection.sendRequest(DocumentSymbolRequest.type, {
+  async documentSymbols(filePath: string, options: LspRequestOptions = {}): Promise<LspDocumentSymbol[]> {
+    if (this.shuttingDown || isAborted(options.signal)) return [];
+    const loaded = await this.loadSyncedFile(filePath, options.signal);
+    if (!loaded || this.shuttingDown || loaded.client.closed || isAborted(options.signal)) return [];
+    const result = await withAbort(loaded.client.connection.sendRequest(DocumentSymbolRequest.type, {
       textDocument: { uri: loaded.uri },
-    }).catch(() => undefined);
+    }), options.signal).catch(() => undefined);
     return normalizeDocumentSymbols(result, loaded.absolutePath);
   }
 
@@ -626,8 +664,8 @@ export class DefaultLspManagerService implements LspManagerService {
     return `${server.id}:${root}`;
   }
 
-  private async getClientForFile(filePath: string): Promise<LspClientState | undefined> {
-    if (this.shuttingDown) return undefined;
+  private async getClientForFile(filePath: string, signal?: AbortSignal): Promise<LspClientState | undefined> {
+    if (this.shuttingDown || isAborted(signal)) return undefined;
     const absolutePath = this.resolvePath(filePath);
     const server = serverForFile(absolutePath);
     if (!server) return undefined;
@@ -642,13 +680,13 @@ export class DefaultLspManagerService implements LspManagerService {
 
     let spawning = this.spawning.get(key);
     if (!spawning) {
-      spawning = this.startClient(server, root);
+      spawning = this.startClient(server, root, signal);
       this.spawning.set(key, spawning);
       spawning.finally(() => this.spawning.delete(key));
     }
 
-    const client = await spawning;
-    if (this.shuttingDown) {
+    const client = await withAbort(spawning, signal).catch(() => undefined);
+    if (this.shuttingDown || isAborted(signal)) {
       if (client) await this.shutdownClient(client);
       return undefined;
     }
@@ -656,8 +694,8 @@ export class DefaultLspManagerService implements LspManagerService {
     return client;
   }
 
-  private async startClient(server: ServerDefinition, root: string): Promise<LspClientState | undefined> {
-    if (this.shuttingDown) return undefined;
+  private async startClient(server: ServerDefinition, root: string, signal?: AbortSignal): Promise<LspClientState | undefined> {
+    if (this.shuttingDown || isAborted(signal)) return undefined;
     let child: ChildProcessWithoutNullStreams | undefined;
     try {
       child = spawn(server.command, server.args, {
@@ -730,9 +768,10 @@ export class DefaultLspManagerService implements LspManagerService {
         }),
         INIT_TIMEOUT_MS,
         `${server.id} initialize`,
+        signal,
       );
       this.pendingClients.delete(client);
-      if (this.shuttingDown) {
+      if (this.shuttingDown || isAborted(signal)) {
         await this.shutdownClient(client);
         return undefined;
       }
@@ -776,14 +815,14 @@ export class DefaultLspManagerService implements LspManagerService {
     });
   }
 
-  private async loadSyncedFile(filePath: string): Promise<{ client: LspClientState; server: ServerDefinition; absolutePath: string; uri: string } | undefined> {
-    if (this.shuttingDown) return undefined;
+  private async loadSyncedFile(filePath: string, signal?: AbortSignal): Promise<{ client: LspClientState; server: ServerDefinition; absolutePath: string; uri: string } | undefined> {
+    if (this.shuttingDown || isAborted(signal)) return undefined;
     const absolutePath = this.resolvePath(filePath);
     if (!existsSync(absolutePath)) return undefined;
     const server = serverForFile(absolutePath);
     if (!server) return undefined;
-    const client = await this.getClientForFile(absolutePath);
-    if (!client) return undefined;
+    const client = await this.getClientForFile(absolutePath, signal).catch(() => undefined);
+    if (!client || isAborted(signal)) return undefined;
     this.openOrUpdate(client, server, absolutePath);
     return { client, server, absolutePath, uri: pathToFileURL(absolutePath).href };
   }
@@ -793,32 +832,38 @@ export class DefaultLspManagerService implements LspManagerService {
     server: ServerDefinition,
     absolutePath: string,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<boolean> {
-    if (this.shuttingDown || client.closed) return false;
-    const wait = this.waitForDiagnostics(client, absolutePath, timeoutMs);
+    if (this.shuttingDown || client.closed || isAborted(signal)) return false;
+    const wait = this.waitForDiagnostics(client, absolutePath, timeoutMs, signal);
     this.openOrUpdate(client, server, absolutePath);
     return wait;
   }
 
-  private waitForDiagnostics(client: LspClientState, absolutePath: string, timeoutMs: number): Promise<boolean> {
+  private waitForDiagnostics(client: LspClientState, absolutePath: string, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
+    if (isAborted(signal)) return Promise.resolve(false);
     return new Promise((resolvePromise) => {
-      if (this.shuttingDown || client.closed) {
+      if (this.shuttingDown || client.closed || isAborted(signal)) {
         resolvePromise(false);
         return;
       }
       let settled = false;
       const listeners = client.listeners.get(absolutePath) ?? new Set<() => void>();
+      let timer: ReturnType<typeof setTimeout>;
       const finish = (value: boolean) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", abortListener);
         listeners.delete(listener);
         if (listeners.size === 0) client.listeners.delete(absolutePath);
         resolvePromise(value);
       };
       const listener = () => finish(true);
-      const timer = setTimeout(() => finish(false), timeoutMs);
+      const abortListener = () => finish(false);
+      timer = setTimeout(() => finish(false), timeoutMs);
       timer.unref?.();
+      signal?.addEventListener("abort", abortListener, { once: true });
       listeners.add(listener);
       client.listeners.set(absolutePath, listeners);
     });
@@ -872,7 +917,9 @@ export const __test__ = {
   filterBySeverity,
   findNearestRoot,
   collectUniqueClients,
+  isAborted,
   normalizePath,
   serverForFile,
   severityName,
+  withAbort,
 };

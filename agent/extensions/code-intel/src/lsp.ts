@@ -35,12 +35,16 @@ export interface LspDocumentSymbol {
 	container?: string;
 }
 
+export interface LspRequestOptions {
+	signal?: AbortSignal;
+}
+
 export interface LspManagerService {
 	supportsFile?(filePath: string): boolean;
-	definition(filePath: string, position: LspPosition): Promise<LspLocation[]>;
-	references(filePath: string, position: LspPosition): Promise<LspLocation[]>;
-	hover(filePath: string, position: LspPosition): Promise<LspHoverInfo | undefined>;
-	documentSymbols?(filePath: string): Promise<LspDocumentSymbol[]>;
+	definition(filePath: string, position: LspPosition, options?: LspRequestOptions): Promise<LspLocation[]>;
+	references(filePath: string, position: LspPosition, options?: LspRequestOptions): Promise<LspLocation[]>;
+	hover(filePath: string, position: LspPosition, options?: LspRequestOptions): Promise<LspHoverInfo | undefined>;
+	documentSymbols?(filePath: string, options?: LspRequestOptions): Promise<LspDocumentSymbol[]>;
 }
 
 export function getLspService(pi: { events: unknown }): LspManagerService | undefined {

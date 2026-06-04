@@ -135,7 +135,7 @@ async function extractLspDocumentSymbols(
 	for (const file of candidates.slice(0, MAX_LSP_DOCUMENT_SYMBOL_FILES)) {
 		if (signal?.aborted) throw new Error("code_intel analysis cancelled");
 		try {
-			const symbols = await service.documentSymbols(file.absPath);
+			const symbols = await service.documentSymbols(file.absPath, { signal });
 			const mappableSymbols = symbols.filter(isMappableLspDocumentSymbol);
 			if (mappableSymbols.length === 0) continue;
 			byFile.set(file.relPath, mappableSymbols);

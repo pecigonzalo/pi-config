@@ -74,6 +74,17 @@ describe("lsp-manager helpers", () => {
 
     expect(serviceTest.collectUniqueClients(clients.values(), pendingClients.values())).toEqual([running, pending]);
   });
+
+  it("rejects abortable LSP waits when cancelled", async () => {
+    const controller = new AbortController();
+    const pending = new Promise(() => undefined) as Promise<string>;
+
+    const result = serviceTest.withAbort(pending, controller.signal).catch((error: Error) => error.message);
+    controller.abort();
+
+    await expect(result).resolves.toBe("aborted");
+    expect(serviceTest.isAborted(controller.signal)).toBe(true);
+  });
 });
 
 describe("lsp-manager status command", () => {

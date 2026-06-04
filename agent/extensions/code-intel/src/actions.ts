@@ -304,21 +304,21 @@ export async function findEnclosingSymbol(
 export async function findDefinitionWithLsp(pi: ExtensionAPI, ctx: ExtensionContext, params: RepoMapOptions, signal?: AbortSignal): Promise<string> {
 	const request = await getLspLookupRequest(pi, ctx, params, "definition", signal);
 	if (typeof request === "string") return request;
-	const locations = await request.service.definition(request.path, request.position);
+	const locations = await request.service.definition(request.path, request.position, { signal });
 	return formatLspLocations(ctx.cwd, `LSP definition for ${formatLspLookupTarget(ctx.cwd, request)}`, locations);
 }
 
 export async function findReferencesWithLsp(pi: ExtensionAPI, ctx: ExtensionContext, params: RepoMapOptions, signal?: AbortSignal): Promise<string> {
 	const request = await getLspLookupRequest(pi, ctx, params, "references", signal);
 	if (typeof request === "string") return request;
-	const locations = await request.service.references(request.path, request.position);
+	const locations = await request.service.references(request.path, request.position, { signal });
 	return formatLspLocations(ctx.cwd, `LSP references for ${formatLspLookupTarget(ctx.cwd, request)}`, locations);
 }
 
 export async function findHoverWithLsp(pi: ExtensionAPI, ctx: ExtensionContext, params: RepoMapOptions, signal?: AbortSignal): Promise<string> {
 	const request = await getLspLookupRequest(pi, ctx, params, "hover", signal);
 	if (typeof request === "string") return request;
-	const hover = await request.service.hover(request.path, request.position);
+	const hover = await request.service.hover(request.path, request.position, { signal });
 	if (!hover) return `No LSP hover found for ${formatLspLookupTarget(ctx.cwd, request)}.`;
 	return [
 		`LSP hover for ${request.symbol ? `${request.symbol} at ` : ""}${formatRelativeLocation(ctx.cwd, hover.file, hover.line, hover.column)}`,
