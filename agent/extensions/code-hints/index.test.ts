@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { __test__ } from "./index";
-import { LSP_MANAGER_SERVICE_KEY } from "../lsp-manager/service";
+import { LSP_MANAGER_REQUEST_EVENT } from "../lsp-manager/service";
 import type { LspFileDiagnostics, LspManagerService } from "../lsp-manager/service";
 
 describe("code-hints formatting", () => {
@@ -301,14 +301,17 @@ describe("code-hints remediation prompts", () => {
 });
 
 describe("code-hints service discovery", () => {
-  it("finds an lsp-manager service from the event registry", () => {
+  it("finds an lsp-manager service through the event bus", () => {
     const service = {
       diagnostics: async () => [],
       status: () => [],
     } as unknown as LspManagerService;
     const pi = {
       events: {
-        [LSP_MANAGER_SERVICE_KEY]: service,
+        emit(name: string, payload: unknown) {
+          expect(name).toBe(LSP_MANAGER_REQUEST_EVENT);
+          (payload as { respond(value: LspManagerService): void }).respond(service);
+        },
       },
     } as never;
 

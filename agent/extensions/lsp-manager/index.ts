@@ -3,28 +3,38 @@ import { Text } from "@earendil-works/pi-tui";
 import {
   DefaultLspManagerService,
   LSP_MANAGER_READY_EVENT,
-  LSP_MANAGER_SERVICE_KEY,
+  LSP_MANAGER_REQUEST_EVENT,
+  LSP_MANAGER_SHUTDOWN_EVENT,
   type LspManagerService,
+  type LspManagerServiceRequest,
 } from "./service";
 
 function publishService(pi: ExtensionAPI, service: LspManagerService): void {
-  (pi.events as unknown as Record<string, unknown>)[LSP_MANAGER_SERVICE_KEY] = service;
   pi.events.emit(LSP_MANAGER_READY_EVENT, service);
 }
 
 function clearService(pi: ExtensionAPI, service: LspManagerService | undefined): void {
-  const registry = pi.events as unknown as Record<string, unknown>;
-  if (registry[LSP_MANAGER_SERVICE_KEY] === service) {
-    delete registry[LSP_MANAGER_SERVICE_KEY];
-  }
+  pi.events.emit(LSP_MANAGER_SHUTDOWN_EVENT, service);
 }
 
-function getPublishedService(pi: ExtensionAPI): LspManagerService | undefined {
-  const registry = pi.events as unknown as Record<string, unknown>;
-  const service = registry[LSP_MANAGER_SERVICE_KEY];
-  return service && typeof service === "object" && typeof (service as LspManagerService).status === "function"
-    ? service as LspManagerService
-    : undefined;
+function isServiceRequest(value: unknown): value is LspManagerServiceRequest {
+  return !!value && typeof value === "object" && typeof (value as LspManagerServiceRequest).respond === "function";
+}
+
+function registerServiceResponder(pi: ExtensionAPI, getService: () => LspManagerService | undefined): () => void {
+  return pi.events.on(LSP_MANAGER_REQUEST_EVENT, (request) => {
+    if (isServiceRequest(request)) request.respond(getService());
+  });
+}
+
+function requestService(pi: ExtensionAPI): LspManagerService | undefined {
+  let service: LspManagerService | undefined;
+  pi.events.emit(LSP_MANAGER_REQUEST_EVENT, {
+    respond(value: LspManagerService | undefined) {
+      service = value;
+    },
+  } satisfies LspManagerServiceRequest);
+  return service;
 }
 
 function formatStatus(service: LspManagerService | undefined): string {
@@ -47,6 +57,7 @@ function formatStatus(service: LspManagerService | undefined): string {
 
 export default function lspManagerExtension(pi: ExtensionAPI) {
   let service: LspManagerService | undefined;
+  const unsubscribeServiceRequests = registerServiceResponder(pi, () => service);
 
   pi.registerMessageRenderer("lsp-manager-status", (message, _options, theme) => {
     const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content);
@@ -64,13 +75,14 @@ export default function lspManagerExtension(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     clearService(pi, service);
+    unsubscribeServiceRequests();
     if (ctx.hasUI) ctx.ui.setStatus("lsp-manager", undefined);
     if (service) await service.shutdown();
     service = undefined;
   });
 
   const showStatus = async (_args: string, ctx: ExtensionCommandContext) => {
-    const status = formatStatus(getPublishedService(pi) ?? service);
+    const status = formatStatus(requestService(pi) ?? service);
     if (ctx.hasUI) {
       ctx.ui.notify(status, "info");
     } else {
@@ -96,6 +108,7 @@ export default function lspManagerExtension(pi: ExtensionAPI) {
 export const __test__ = {
   clearService,
   formatStatus,
-  getPublishedService,
+  registerServiceResponder,
+  requestService,
   publishService,
 };

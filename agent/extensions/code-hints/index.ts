@@ -4,10 +4,12 @@ import { isEditToolResult, isWriteToolResult } from "@earendil-works/pi-coding-a
 import { Box, Text } from "@earendil-works/pi-tui";
 import {
   LSP_MANAGER_READY_EVENT,
-  LSP_MANAGER_SERVICE_KEY,
+  LSP_MANAGER_REQUEST_EVENT,
+  LSP_MANAGER_SHUTDOWN_EVENT,
   type LspDiagnosticItem,
   type LspFileDiagnostics,
   type LspManagerService,
+  type LspManagerServiceRequest,
 } from "../lsp-manager/service";
 
 const CODE_HINTS_MESSAGE_TYPE = "code-hints";
@@ -44,8 +46,12 @@ interface CodeHintsInputEvent {
 }
 
 function getLspService(pi: ExtensionAPI): LspManagerService | undefined {
-  const registry = pi.events as unknown as Record<string, unknown>;
-  const service = registry[LSP_MANAGER_SERVICE_KEY];
+  let service: unknown;
+  pi.events.emit(LSP_MANAGER_REQUEST_EVENT, {
+    respond(value: LspManagerService | undefined) {
+      service = value;
+    },
+  } satisfies LspManagerServiceRequest);
   return isLspManagerService(service) ? service : undefined;
 }
 
@@ -308,6 +314,9 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
 
   pi.events.on(LSP_MANAGER_READY_EVENT, (service) => {
     if (isLspManagerService(service)) lspService = service;
+  });
+  pi.events.on(LSP_MANAGER_SHUTDOWN_EVENT, (service) => {
+    if (!service || lspService === service) lspService = undefined;
   });
 
   const resetState = () => {

@@ -21,11 +21,18 @@ import {
 } from "vscode-languageserver-protocol/node.js";
 import type { Diagnostic, DocumentSymbol, Hover, Location, LocationLink, SymbolInformation } from "vscode-languageserver-protocol";
 
-/** Event bus key storing the current LSP manager service. */
-export const LSP_MANAGER_SERVICE_KEY = "lsp-manager:service";
-
 /** Event emitted when an LSP manager service is available. */
 export const LSP_MANAGER_READY_EVENT = "lsp-manager:ready";
+
+/** Event emitted when an LSP manager service is shutting down. */
+export const LSP_MANAGER_SHUTDOWN_EVENT = "lsp-manager:shutdown";
+
+/** Event emitted by consumers to request the current LSP manager service. */
+export const LSP_MANAGER_REQUEST_EVENT = "lsp-manager:request";
+
+export interface LspManagerServiceRequest {
+  respond(service: LspManagerService | undefined): void;
+}
 
 const INIT_TIMEOUT_MS = 30_000;
 const DEFAULT_DIAGNOSTIC_TIMEOUT_MS = 3_000;

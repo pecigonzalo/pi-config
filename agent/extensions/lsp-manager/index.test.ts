@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { __test__ as serviceTest, type LspStatusItem } from "./service";
+import { __test__ as serviceTest, type LspManagerService, type LspStatusItem } from "./service";
 import { __test__ as indexTest } from "./index";
 
 function makeTempProject(): string {
@@ -122,21 +122,34 @@ describe("lsp-manager status command", () => {
 });
 
 describe("lsp-manager extension registry", () => {
-  it("publishes and clears the service registry entry", () => {
+  it("publishes and responds to service requests through the event bus", () => {
+    const handlers = new Map<string, Set<(payload: unknown) => void>>();
     const events = {
       emitted: [] as Array<[string, unknown]>,
       emit(name: string, payload: unknown) {
         this.emitted.push([name, payload]);
+        for (const handler of handlers.get(name) ?? []) handler(payload);
+      },
+      on(name: string, handler: (payload: unknown) => void) {
+        const listeners = handlers.get(name) ?? new Set<(payload: unknown) => void>();
+        listeners.add(handler);
+        handlers.set(name, listeners);
+        return () => listeners.delete(handler);
       },
     };
     const pi = { events } as never;
-    const service = { status: () => [] } as never;
+    let service: LspManagerService | undefined = { status: () => [] } as unknown as LspManagerService;
 
+    const unsubscribe = indexTest.registerServiceResponder(pi, () => service);
     indexTest.publishService(pi, service);
-    expect((events as Record<string, unknown>)["lsp-manager:service"]).toBe(service);
     expect(events.emitted[0]?.[0]).toBe("lsp-manager:ready");
+    expect(indexTest.requestService(pi)).toBe(service);
 
     indexTest.clearService(pi, service);
-    expect((events as Record<string, unknown>)["lsp-manager:service"]).toBeUndefined();
+    service = undefined;
+    expect(events.emitted.some(([name]) => name === "lsp-manager:shutdown")).toBe(true);
+    expect(indexTest.requestService(pi)).toBeUndefined();
+
+    unsubscribe();
   });
 });

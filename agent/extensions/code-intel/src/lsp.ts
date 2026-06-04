@@ -2,7 +2,7 @@ import { relative } from "node:path";
 import { captureSignature } from "./extractors";
 import type { Definition, SourceFile } from "./types";
 
-export const LSP_MANAGER_SERVICE_KEY = "lsp-manager:service";
+export const LSP_MANAGER_REQUEST_EVENT = "lsp-manager:request";
 
 export interface LspPosition {
 	line: number;
@@ -47,9 +47,19 @@ export interface LspManagerService {
 	documentSymbols?(filePath: string, options?: LspRequestOptions): Promise<LspDocumentSymbol[]>;
 }
 
+interface LspManagerServiceRequest {
+	respond(service: LspManagerService | undefined): void;
+}
+
 export function getLspService(pi: { events: unknown }): LspManagerService | undefined {
-	const registry = pi.events as Record<string, unknown>;
-	const service = registry[LSP_MANAGER_SERVICE_KEY];
+	const eventBus = pi.events as { emit?: (channel: string, data: unknown) => void };
+	if (typeof eventBus.emit !== "function") return undefined;
+	let service: unknown;
+	eventBus.emit(LSP_MANAGER_REQUEST_EVENT, {
+		respond(value: LspManagerService | undefined) {
+			service = value;
+		},
+	} satisfies LspManagerServiceRequest);
 	if (!service || typeof service !== "object") return undefined;
 	const candidate = service as Partial<LspManagerService>;
 	if (
