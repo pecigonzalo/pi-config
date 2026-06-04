@@ -1336,6 +1336,25 @@ describe("sandbox network config", () => {
 		expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/custom-docker-config/buildx/activity");
 	});
 
+	it("allows common Docker Unix sockets by default", () => {
+		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
+		expect(compiled.config.network?.allowUnixSockets).toContain(path.join(os.homedir(), ".docker", "run", "docker.sock"));
+		expect(compiled.config.network?.allowUnixSockets).toContain("/var/run/docker.sock");
+		expect(compiled.config.network?.allowUnixSockets).toContain("/private/var/run/docker.sock");
+	});
+
+	it("allows Docker Unix socket from DOCKER_HOST", () => {
+		const originalDockerHost = process.env.DOCKER_HOST;
+		process.env.DOCKER_HOST = "unix:///tmp/custom-docker.sock";
+		try {
+			const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
+			expect(compiled.config.network?.allowUnixSockets).toContain("/tmp/custom-docker.sock");
+		} finally {
+			if (originalDockerHost === undefined) delete process.env.DOCKER_HOST;
+			else process.env.DOCKER_HOST = originalDockerHost;
+		}
+	});
+
 	it("includes current GOCACHE in default allowWrite", () => {
 		const originalGoCache = process.env.GOCACHE;
 		process.env.GOCACHE = "/tmp/custom-go-cache";

@@ -320,6 +320,22 @@ function configuredGoWritePaths(cwd: string, overrides: SandboxSettings | undefi
 	return dedupeStrings(paths.flatMap(existingPathAliases));
 }
 
+function dockerHostUnixSocketPath(): string | undefined {
+	const dockerHost = process.env.DOCKER_HOST?.trim();
+	if (!dockerHost?.startsWith("unix://")) return undefined;
+	const socketPath = dockerHost.slice("unix://".length);
+	return socketPath.length > 0 ? socketPath : undefined;
+}
+
+function getDefaultDockerUnixSockets(): string[] {
+	return dedupeStrings([
+		dockerHostUnixSocketPath(),
+		path.join(os.homedir(), ".docker", "run", "docker.sock"),
+		"/var/run/docker.sock",
+		"/private/var/run/docker.sock",
+	].filter((value): value is string => value !== undefined));
+}
+
 function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
 	const overrides = env ?? {};
 	const mergedEnv: NodeJS.ProcessEnv = { ...DEFAULT_SANDBOX_ENV, ...process.env, ...overrides };
@@ -439,7 +455,10 @@ function compileSandboxNetworkConfig(
 	networkEnabled: boolean,
 	overrides: SandboxSettings | undefined,
 ): SandboxRuntimeConfigLike["network"] {
-	const socketSet = new Set<string>(overrides?.allowUnixSockets ?? []);
+	const socketSet = new Set<string>([
+		...getDefaultDockerUnixSockets(),
+		...(overrides?.allowUnixSockets ?? []),
+	]);
 	if (overrides?.allowSshAuthSock && process.env.SSH_AUTH_SOCK) socketSet.add(process.env.SSH_AUTH_SOCK);
 	const allowUnixSockets = [...socketSet];
 	const allowAllUnixSockets = overrides?.allowAllUnixSockets ?? false;
