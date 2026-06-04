@@ -73,8 +73,8 @@
  *                  (structured filesystem tools only)
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createBashTool, getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { BashOperations, ExtensionAPI, ExtensionContext, UserBashEventResult } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createLocalBashOperations, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Key, Text } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -1084,7 +1084,141 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	}
 
+	async function checkBashPermission(
+		command: string,
+		input: PermissionToolInput,
+		projectRoot: string,
+		ctx: ExtensionContext,
+	): Promise<{ block: true; reason: string } | undefined> {
+		const policy = activePolicy(config, agentName, profileName);
+		const bashApprovals = [...persistentApprovals, ...sessionBashApprovals];
+		if (approvalsCoverBash(bashApprovals, command, projectRoot, agentName, approvalsSettings)) {
+			return undefined;
+		}
+		const isApprovedBashSegment = (candidate: string) =>
+			approvalsCoverBash(bashApprovals, candidate, projectRoot, agentName, approvalsSettings);
+
+		let parsedBash: ParsedBash | undefined;
+		if (treeSitterReady) {
+			try {
+				parsedBash = await parseBashCommand(command);
+			} catch {
+				// tree-sitter failed; parsedBash stays undefined → simple fallback
+			}
+		}
+
+		const fallbackMode = sandboxFallbackMode();
+		if (fallbackMode === "block-all-bash") {
+			return { block: true, reason: `Bash blocked: sandbox unavailable in ${policy.mode} mode` };
+		}
+		if (fallbackMode === "ask-all-bash") {
+			return askPermission("bash", input, "Sandbox unavailable: confirmation required for all bash commands", projectRoot, ctx) as Promise<{ block: true; reason: string } | undefined>;
+		}
+		const dangerousReason = detectDangerousBashPattern(command);
+		if (dangerousReason) {
+			return askPermission("bash", input, dangerousReason, projectRoot, ctx) as Promise<{ block: true; reason: string } | undefined>;
+		}
+
+		if (parsedBash && canAutoApproveParsedBash(parsedBash, policy.rules, isApprovedBashSegment)) {
+			return undefined;
+		}
+
+		const getUnapprovedBashSegment = (): { segment?: string; parsed?: ParsedCommand } => {
+			if (parsedBash) {
+				const unapproved = getFirstUnapprovedParsedCommand(parsedBash, policy.rules, isApprovedBashSegment);
+				if (unapproved) return { segment: unapproved.source, parsed: unapproved };
+				return {};
+			}
+			return { segment: command };
+		};
+
+		const rule = policy.rules.length > 0 ? matchRule(policy.rules, "bash", input) : undefined;
+		if (!rule) return undefined;
+
+		if (rule.action === "block") {
+			const reason = rule.reason ?? `Blocked by permissions policy (profile: ${agentName})`;
+			if (ctx.hasUI) ctx.ui.notify(`🚫 bash: ${reason}`, "warning");
+			return { block: true, reason };
+		}
+
+		if (rule.action === "ask") {
+			if (parsedBash && canAutoApproveParsedBash(parsedBash, policy.rules, isApprovedBashSegment)) {
+				return undefined;
+			}
+			const { segment: unapprovedSegment, parsed: unapprovedParsed } = getUnapprovedBashSegment();
+			const note = rule.reason ?? (unapprovedSegment ? `Unapproved shell segment: ${unapprovedSegment}` : undefined);
+			return askPermission("bash", input, note, projectRoot, ctx, unapprovedSegment, unapprovedParsed) as Promise<{ block: true; reason: string } | undefined>;
+		}
+
+		if (rule.action === "allow" && parsedBash) {
+			if (parsedBash.isComplex || !isAllParsedCommandsAllowed(parsedBash, policy.rules, isApprovedBashSegment)) {
+				const { segment: unapprovedSegment, parsed: unapprovedParsed } = getUnapprovedBashSegment();
+				const note = unapprovedSegment
+					? `Unapproved shell segment: ${unapprovedSegment}`
+					: parsedBash.isComplex ? "Complex shell command requires confirmation" : undefined;
+				if (note) {
+					return askPermission("bash", input, note, projectRoot, ctx, unapprovedSegment, unapprovedParsed) as Promise<{ block: true; reason: string } | undefined>;
+				}
+			}
+		}
+
+		return undefined;
+	}
+
+	function blockedUserBashResult(reason: string): UserBashEventResult {
+		return {
+			result: {
+				output: `Blocked by permissions: ${reason}\n`,
+				exitCode: 1,
+				cancelled: false,
+				truncated: false,
+			},
+		};
+	}
+
+	async function getUserBashOperations(ctx: ExtensionContext): Promise<BashOperations | undefined> {
+		let active = activeSandboxState();
+		if (!active || active.execution.cwd !== ctx.cwd) {
+			await initializeSandbox(ctx);
+			active = activeSandboxState();
+		}
+		if (!active || !sandboxRuntime) return undefined;
+
+		return {
+			exec: (command, cwd, options) => {
+				const healthRuntime = sandboxRuntime;
+				const healthExecution = active?.execution;
+				if (!healthRuntime || !healthExecution) {
+					return createLocalBashOperations().exec(command, cwd, options);
+				}
+				return runSandboxedCommandAfterHealthCheck({
+					healthMonitor: sandboxHealthMonitor,
+					ensureHealthy: () => ensureSandboxHealthyAfterIdle(ctx, healthExecution, healthRuntime),
+					execute: () => {
+						const currentActive = activeSandboxState();
+						const currentRuntime = sandboxRuntime;
+						if (!currentActive || !currentRuntime) {
+							return createLocalBashOperations().exec(command, cwd, options);
+						}
+						return currentRuntime.createBashOperations(currentActive.execution).exec(command, cwd, options);
+					},
+				});
+			},
+		};
+	}
+
 	// ── Main gate ─────────────────────────────────────────────────────────────
+
+	pi.on("user_bash", async (event, ctx) => {
+		agentName = detectAgentName(pi);
+		profileName = detectProfileName(pi);
+		const input: PermissionToolInput = { command: event.command };
+		const projectRoot = canonicalizePath(ctx.cwd);
+		const blocked = await checkBashPermission(event.command, input, projectRoot, ctx);
+		if (blocked?.block) return blockedUserBashResult(blocked.reason);
+		const operations = await getUserBashOperations(ctx);
+		return operations ? { operations } : undefined;
+	});
 
 	pi.on("tool_call", async (event, ctx) => {
 		agentName = detectAgentName(pi);
@@ -1099,39 +1233,7 @@ export default function (pi: ExtensionAPI) {
 		let parsedBash: ParsedBash | undefined;
 
 		if (toolName === "bash") {
-			const command = getCommandInput(input) ?? "";
-			bashApprovals = [...persistentApprovals, ...sessionBashApprovals];
-			if (approvalsCoverBash(bashApprovals, command, projectRoot, agentName, approvalsSettings)) {
-				return undefined;
-			}
-			isApprovedBashSegment = (candidate: string) =>
-				approvalsCoverBash(bashApprovals, candidate, projectRoot, agentName, approvalsSettings);
-
-			// Parse with tree-sitter for compound command handling
-			if (treeSitterReady) {
-				try {
-					parsedBash = await parseBashCommand(command);
-				} catch {
-					// tree-sitter failed; parsedBash stays undefined → simple fallback
-				}
-			}
-
-			const fallbackMode = sandboxFallbackMode();
-			if (fallbackMode === "block-all-bash") {
-				return { block: true, reason: `Bash blocked: sandbox unavailable in ${policy.mode} mode` };
-			}
-			if (fallbackMode === "ask-all-bash") {
-				return askPermission(toolName, input, "Sandbox unavailable: confirmation required for all bash commands", projectRoot, ctx);
-			}
-			const dangerousReason = detectDangerousBashPattern(command);
-			if (dangerousReason) {
-				return askPermission(toolName, input, dangerousReason, projectRoot, ctx);
-			}
-
-			// If tree-sitter parsed successfully, only auto-allow simple commands that are fully covered.
-			if (parsedBash && canAutoApproveParsedBash(parsedBash, policy.rules, isApprovedBashSegment)) {
-				return undefined;
-			}
+			return checkBashPermission(getCommandInput(input) ?? "", input, projectRoot, ctx);
 		} else if (sessionAllows.has(toolName)) {
 			return undefined;
 		} else if (approvalsCoverTool(persistentApprovals, toolName, projectRoot, agentName, approvalsSettings)) {

@@ -816,7 +816,7 @@ describe("permissions extension sandbox lifecycle", () => {
 	type RegisteredCommand = { handler: (args: string | undefined, ctx: ExtensionContext) => Promise<void> | void };
 
 	async function setupPermissionsHarness(options: {
-		mode: "plan" | "workspace-write";
+		mode: "plan" | "workspace-write" | "full-access";
 		sandboxManager: { initialize: () => Promise<void>; reset: () => Promise<void>; wrapWithSandbox: (command: string) => Promise<string> };
 		now: () => number;
 		notifications?: string[];
@@ -1127,6 +1127,60 @@ describe("permissions extension sandbox lifecycle", () => {
 
 		expect(probeCount).toBe(2);
 		expect(commandCount).toBe(1);
+	});
+
+	it("blocks user bash when policy requires confirmation without UI", async () => {
+		let now = 0;
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => now,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const userBash = harness.handlers.get("user_bash")?.[0];
+			if (!userBash) throw new Error("user_bash handler was not registered");
+			const ctx = { ...harness.ctx, hasUI: false } as ExtensionContext;
+
+			const result = await userBash({ command: "npm test", excludeFromContext: true, cwd: harness.cwd }, ctx) as { result?: { output?: string; exitCode?: number } } | undefined;
+
+			expect(result?.result?.exitCode).toBe(1);
+			expect(result?.result?.output).toContain("Requires confirmation for bash but no UI is available");
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("runs user bash through active sandbox operations", async () => {
+		let now = 0;
+		const wrappedCommands: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			now: () => now,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					wrappedCommands.push(command);
+					return command;
+				},
+			},
+		});
+		try {
+			const userBash = harness.handlers.get("user_bash")?.[0];
+			if (!userBash) throw new Error("user_bash handler was not registered");
+			const result = await userBash({ command: "printf user-bash", excludeFromContext: false, cwd: harness.cwd }, harness.ctx) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
+
+			expect(result?.operations).toBeDefined();
+			await result!.operations!.exec("printf user-bash", harness.cwd, { onData: () => {} });
+		} finally {
+			await harness.restore();
+		}
+
+		expect(wrappedCommands).toContain("printf user-bash");
 	});
 });
 
