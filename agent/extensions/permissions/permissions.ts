@@ -236,7 +236,7 @@ export default function (pi: ExtensionAPI) {
 		return sandboxState.execution?.config;
 	}
 
-	let ensureSandboxHealthyAfterIdle: (ctx: ExtensionContext, execution: SandboxExecution, runtime: SandboxRuntimeAdapter) => Promise<void> = async () => {};
+	let ensureSandboxHealthyAfterIdle: (ctx: ExtensionContext, execution: SandboxExecution, runtime: SandboxRuntimeAdapter, signal?: AbortSignal) => Promise<void> = async () => {};
 
 	pi.registerTool({
 		...bashToolTemplate,
@@ -255,7 +255,8 @@ export default function (pi: ExtensionAPI) {
 			const healthExecution = active.execution;
 			return runSandboxedCommandAfterHealthCheck({
 				healthMonitor: sandboxHealthMonitor,
-				ensureHealthy: () => ensureSandboxHealthyAfterIdle(ctx, healthExecution, healthRuntime),
+				ensureHealthy: (signal) => ensureSandboxHealthyAfterIdle(ctx, healthExecution, healthRuntime, signal),
+				signal,
 				execute: () => {
 					const currentActive = activeSandboxState();
 					const currentRuntime = sandboxRuntime;
@@ -513,12 +514,18 @@ export default function (pi: ExtensionAPI) {
 		message: string;
 	};
 
+	function throwIfAborted(signal: AbortSignal | undefined): void {
+		if (signal?.aborted) throw new Error("aborted");
+	}
+
 	async function runSandboxWriteProbe(
 		runtime: SandboxRuntimeAdapter,
 		execution: SandboxExecution,
 		targetPath: string,
 		ctx: ExtensionContext,
+		signal?: AbortSignal,
 	): Promise<SandboxWriteProbeResult> {
+		throwIfAborted(signal);
 		const probePath = path.join(targetPath, `.pi-sandbox-write-probe-${process.pid}-${Date.now()}`);
 		const quotedProbePath = shellQuote(probePath);
 		const output: string[] = [];
@@ -527,6 +534,7 @@ export default function (pi: ExtensionAPI) {
 				command: `printf '%s\\n' probe > ${quotedProbePath} && test -f ${quotedProbePath} && rm -f ${quotedProbePath}`,
 				cwd: ctx.cwd,
 				timeout: 10,
+				signal,
 				onData: (chunk) => output.push(chunk.toString("utf8")),
 			});
 			if (result.exitCode === 0) return { ok: true, message: "passed" };
@@ -537,6 +545,7 @@ export default function (pi: ExtensionAPI) {
 				message: `failed with exit code ${result.exitCode ?? "unknown"}${details ? `: ${details}` : ""}`,
 			};
 		} catch (err) {
+			throwIfAborted(signal);
 			return {
 				ok: false,
 				message: `failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -554,8 +563,9 @@ export default function (pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		execution: SandboxExecution | undefined = activeSandboxState()?.execution,
 		runtime: SandboxRuntimeAdapter | undefined = sandboxRuntime,
-		options: { includeCwdWrite?: boolean } = {},
+		options: { includeCwdWrite?: boolean; signal?: AbortSignal } = {},
 	): Promise<SandboxProbeResult> {
+		throwIfAborted(options.signal);
 		if (sandboxState.kind !== "active" || !runtime || !execution) {
 			return {
 				ok: false,
@@ -575,7 +585,7 @@ export default function (pi: ExtensionAPI) {
 			};
 		}
 
-		const tmpDirProbe = await runSandboxWriteProbe(runtime, execution, execution.tmpDir, ctx);
+		const tmpDirProbe = await runSandboxWriteProbe(runtime, execution, execution.tmpDir, ctx, options.signal);
 		if (!tmpDirProbe.ok) {
 			return {
 				ok: false,
@@ -605,7 +615,7 @@ export default function (pi: ExtensionAPI) {
 			};
 		}
 
-		const cwdProbe = await runSandboxWriteProbe(runtime, execution, ctx.cwd, ctx);
+		const cwdProbe = await runSandboxWriteProbe(runtime, execution, ctx.cwd, ctx, options.signal);
 		return {
 			ok: cwdProbe.ok,
 			message: cwdProbe.ok
@@ -623,11 +633,13 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify(result.message, result.level);
 	}
 
-	async function repairSandboxRuntime(ctx: ExtensionContext, options: { reloadConfig?: boolean } = {}): Promise<SandboxProbeResult> {
+	async function repairSandboxRuntime(ctx: ExtensionContext, options: { reloadConfig?: boolean; signal?: AbortSignal } = {}): Promise<SandboxProbeResult> {
+		throwIfAborted(options.signal);
 		if (options.reloadConfig) reload(ctx);
 		await resetSandboxRuntime(ctx, "while repairing");
+		throwIfAborted(options.signal);
 		await initializeSandbox(ctx);
-		return runSandboxProbe(ctx);
+		return runSandboxProbe(ctx, undefined, undefined, { signal: options.signal });
 	}
 
 	async function repairSandbox(ctx: ExtensionContext) {
@@ -639,17 +651,18 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify(`Bash sandbox repair did not restore a healthy sandbox. ${result.message}`, result.level);
 	}
 
-	ensureSandboxHealthyAfterIdle = async (ctx: ExtensionContext, execution: SandboxExecution, runtime: SandboxRuntimeAdapter) => {
+	ensureSandboxHealthyAfterIdle = async (ctx: ExtensionContext, execution: SandboxExecution, runtime: SandboxRuntimeAdapter, signal?: AbortSignal) => {
+		throwIfAborted(signal);
 		if (sandboxState.kind !== "active") return;
 		const now = Date.now();
 		const idleMs = sandboxHealthMonitor.idleMs(now);
 		if (!sandboxHealthMonitor.shouldProbe(now)) return;
 
-		const probe = await runSandboxProbe(ctx, execution, runtime);
+		const probe = await runSandboxProbe(ctx, execution, runtime, { signal });
 		if (probe.ok) return;
 
 		ctx.ui.notify(`Bash sandbox health probe failed after ${Math.round(idleMs / 1000)}s idle; repairing sandbox runtime. ${probe.message}`, "warning");
-		const repair = await repairSandboxRuntime(ctx);
+		const repair = await repairSandboxRuntime(ctx, { signal });
 		if (repair.ok) {
 			ctx.ui.notify(`Bash sandbox automatic repair completed. ${repair.message}`, "info");
 			return;
@@ -1193,7 +1206,8 @@ export default function (pi: ExtensionAPI) {
 				}
 				return runSandboxedCommandAfterHealthCheck({
 					healthMonitor: sandboxHealthMonitor,
-					ensureHealthy: () => ensureSandboxHealthyAfterIdle(ctx, healthExecution, healthRuntime),
+					ensureHealthy: (signal) => ensureSandboxHealthyAfterIdle(ctx, healthExecution, healthRuntime, signal),
+					signal: options.signal,
 					execute: () => {
 						const currentActive = activeSandboxState();
 						const currentRuntime = sandboxRuntime;

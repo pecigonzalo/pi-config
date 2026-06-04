@@ -753,6 +753,26 @@ describe("sandboxed command runner", () => {
 		expect(healthMonitor.getLastCommandAt()).toBe(1_000);
 	});
 
+	it("threads abort signals into sandbox health checks", async () => {
+		const healthMonitor = new SandboxHealthMonitor(1_000, 1_000);
+		const controller = new AbortController();
+		let receivedSignal: AbortSignal | undefined;
+
+		await expect(runSandboxedCommandAfterHealthCheck({
+			healthMonitor,
+			ensureHealthy: async (signal) => {
+				receivedSignal = signal;
+				controller.abort();
+			},
+			execute: async () => "unreachable",
+			signal: controller.signal,
+			now: () => 3_000,
+		})).rejects.toThrow("aborted");
+
+		expect(receivedSignal).toBe(controller.signal);
+		expect(healthMonitor.getLastCommandAt()).toBe(1_000);
+	});
+
 	it("resets sandbox health timestamps at lifecycle boundaries", () => {
 		const healthMonitor = new SandboxHealthMonitor(1_000, 1_000);
 		healthMonitor.recordCommandFinished(3_000);

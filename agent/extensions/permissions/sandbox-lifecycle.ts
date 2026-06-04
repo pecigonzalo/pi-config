@@ -30,13 +30,20 @@ export class SandboxHealthMonitor {
 	}
 }
 
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) throw new Error("aborted");
+}
+
 export async function runSandboxedCommandAfterHealthCheck<T>(options: {
 	healthMonitor: SandboxHealthMonitor;
-	ensureHealthy: () => Promise<void>;
+	ensureHealthy: (signal?: AbortSignal) => Promise<void>;
 	execute: () => Promise<T>;
 	now?: () => number;
+	signal?: AbortSignal;
 }): Promise<T> {
-	await options.ensureHealthy();
+	throwIfAborted(options.signal);
+	await options.ensureHealthy(options.signal);
+	throwIfAborted(options.signal);
 	try {
 		return await options.execute();
 	} finally {
