@@ -142,6 +142,7 @@ const TASKS_COMMAND_USAGE = [
 const taskWidgetEnabledSessions = new Set<string>();
 let taskDialogRelayQueue: Promise<void> = Promise.resolve();
 const SUBPROCESS_SIGKILL_TIMEOUT_MS = 5000;
+const RPC_COMPLETION_GRACE_MS = 1000;
 
 function formatShortcutLabel(shortcut: string): string {
 	return shortcut
@@ -194,6 +195,54 @@ function terminateProcessWithEscalation(
 		}
 	}, options?.timeoutMs ?? SUBPROCESS_SIGKILL_TIMEOUT_MS);
 	killTimer.unref?.();
+}
+
+function createRpcCompletionCoordinator(options: {
+	controller: Pick<LiveTaskController, "isStreaming" | "pendingSteeringCount" | "pendingFollowUpCount">;
+	isClosed: () => boolean;
+	terminate: () => void;
+	delayMs?: number;
+}) {
+	let sawAgentEnd = false;
+	let completionTimer: ReturnType<typeof setTimeout> | undefined;
+
+	const clear = () => {
+		if (!completionTimer) return;
+		clearTimeout(completionTimer);
+		completionTimer = undefined;
+	};
+
+	const schedule = () => {
+		clear();
+		completionTimer = setTimeout(() => {
+			completionTimer = undefined;
+			if (options.isClosed()) return;
+			if (options.controller.isStreaming) return;
+			if (options.controller.pendingSteeringCount > 0 || options.controller.pendingFollowUpCount > 0) return;
+			options.terminate();
+		}, options.delayMs ?? RPC_COMPLETION_GRACE_MS);
+		completionTimer.unref?.();
+	};
+
+	return {
+		dispose: clear,
+		onAgentStart() {
+			clear();
+		},
+		onAgentEnd() {
+			sawAgentEnd = true;
+			schedule();
+		},
+		onQueueUpdate(steeringCount: number, followUpCount: number) {
+			options.controller.pendingSteeringCount = steeringCount;
+			options.controller.pendingFollowUpCount = followUpCount;
+			if (steeringCount > 0 || followUpCount > 0) {
+				clear();
+				return;
+			}
+			if (sawAgentEnd && !options.controller.isStreaming) schedule();
+		},
+	};
 }
 
 // Recursion depth guard
@@ -2022,6 +2071,11 @@ async function runSingleAgentViaRpc(
 		let sawAgentEnd = false;
 		let rpcAborted = false;
 		let closed = false;
+		const completionCoordinator = createRpcCompletionCoordinator({
+			controller,
+			isClosed: () => closed,
+			terminate: () => proc.kill("SIGTERM"),
+		});
 		let uiRelayQueue: Promise<void> = Promise.resolve();
 
 		const clearRelayedUi = () => {
@@ -2046,6 +2100,7 @@ async function runSingleAgentViaRpc(
 		const finishController = (exitCode: number) => {
 			if (closed) return;
 			closed = true;
+			completionCoordinator.dispose();
 			uiRelayAbortController.abort();
 			clearRelayedUi();
 			controller.finishedAt = new Date().toISOString();
@@ -2075,7 +2130,9 @@ async function runSingleAgentViaRpc(
 				return;
 			}
 			if (event.type === "agent_start") {
+				completionCoordinator.onAgentStart();
 				controller.isStreaming = true;
+				controller.status = rpcAborted ? "aborted" : "running";
 				controller.lastActivity = "agent_start";
 				return;
 			}
@@ -2090,7 +2147,7 @@ async function runSingleAgentViaRpc(
 					controller.lastMessageCount = maybeMessages.length;
 				}
 				emitUpdate();
-				proc.kill("SIGTERM");
+				completionCoordinator.onAgentEnd();
 				return;
 			}
 			if (event.type === "message_end" && event.message) {
@@ -2126,8 +2183,10 @@ async function runSingleAgentViaRpc(
 			}
 			if (event.type === "queue_update") {
 				controller.lastActivity = "queue_update";
-				controller.pendingSteeringCount = Array.isArray(event.steering) ? event.steering.length : controller.pendingSteeringCount;
-				controller.pendingFollowUpCount = Array.isArray(event.followUp) ? event.followUp.length : controller.pendingFollowUpCount;
+				completionCoordinator.onQueueUpdate(
+					Array.isArray(event.steering) ? event.steering.length : controller.pendingSteeringCount,
+					Array.isArray(event.followUp) ? event.followUp.length : controller.pendingFollowUpCount,
+				);
 				return;
 			}
 			if (event.type === "extension_ui_request" && typeof event.id === "string" && typeof event.method === "string") {
@@ -4549,4 +4608,5 @@ export const __test__ = {
 	resolveTaskSelector,
 	setTaskWidgetEnabled,
 	terminateProcessWithEscalation,
+	createRpcCompletionCoordinator,
 };

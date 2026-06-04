@@ -1420,3 +1420,60 @@ describe("tasks process termination escalation", () => {
 		expect(proc.signals).toEqual(["SIGTERM"]);
 	});
 });
+
+describe("tasks RPC completion coordination", () => {
+	function createCompletionHarness(delayMs = 10) {
+		const controller = {
+			isStreaming: false,
+			pendingSteeringCount: 0,
+			pendingFollowUpCount: 0,
+		};
+		let closed = false;
+		let terminateCount = 0;
+		const coordinator = __test__.createRpcCompletionCoordinator({
+			controller,
+			isClosed: () => closed,
+			terminate: () => {
+				terminateCount += 1;
+				closed = true;
+			},
+			delayMs,
+		});
+		return {
+			controller,
+			coordinator,
+			get terminateCount() {
+				return terminateCount;
+			},
+		};
+	}
+
+	it("terminates after agent_end when no follow-up work appears", async () => {
+		const harness = createCompletionHarness();
+		harness.coordinator.onAgentEnd();
+
+		expect(harness.terminateCount).toBe(0);
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(1);
+	});
+
+	it("waits for queued follow-up work to drain after agent_end", async () => {
+		const harness = createCompletionHarness();
+		harness.coordinator.onAgentEnd();
+		harness.coordinator.onQueueUpdate(0, 1);
+
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(0);
+
+		harness.controller.isStreaming = true;
+		harness.coordinator.onAgentStart();
+		harness.coordinator.onQueueUpdate(0, 0);
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(0);
+
+		harness.controller.isStreaming = false;
+		harness.coordinator.onAgentEnd();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(1);
+	});
+});
