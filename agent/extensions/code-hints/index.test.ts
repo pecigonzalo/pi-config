@@ -248,6 +248,16 @@ describe("code-hints turn flushing", () => {
   });
 });
 
+describe("code-hints input tracking", () => {
+  it("resets remediation guards only for idle user prompts", () => {
+    expect(__test__.shouldResetRemediationFollowUp({ source: "interactive" })).toBe(true);
+    expect(__test__.shouldResetRemediationFollowUp({ source: "rpc" })).toBe(true);
+    expect(__test__.shouldResetRemediationFollowUp({ source: "extension" })).toBe(false);
+    expect(__test__.shouldResetRemediationFollowUp({ source: "interactive", streamingBehavior: "steer" })).toBe(false);
+    expect(__test__.shouldResetRemediationFollowUp({ source: "interactive", streamingBehavior: "followUp" })).toBe(false);
+  });
+});
+
 describe("code-hints remediation prompts", () => {
   it("formats next-turn nudges and focused fix prompts", () => {
     const report = __test__.formatReport("/repo", [

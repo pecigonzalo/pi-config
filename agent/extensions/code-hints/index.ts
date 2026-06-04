@@ -38,6 +38,11 @@ interface CodeHintsOptions {
 type DiagnosticFingerprint = string;
 type CodeHintsCommandResult = { status: string; changed: boolean };
 
+interface CodeHintsInputEvent {
+  source?: string;
+  streamingBehavior?: "steer" | "followUp";
+}
+
 function getLspService(pi: ExtensionAPI): LspManagerService | undefined {
   const registry = pi.events as unknown as Record<string, unknown>;
   const service = registry[LSP_MANAGER_SERVICE_KEY];
@@ -46,6 +51,10 @@ function getLspService(pi: ExtensionAPI): LspManagerService | undefined {
 
 function isLspManagerService(value: unknown): value is LspManagerService {
   return !!value && typeof value === "object" && typeof (value as LspManagerService).diagnostics === "function";
+}
+
+function shouldResetRemediationFollowUp(event: CodeHintsInputEvent): boolean {
+  return event.source !== "extension" && event.streamingBehavior === undefined;
 }
 
 function messageText(content: unknown): string {
@@ -440,7 +449,7 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
   }));
 
   pi.on("input", async (event) => {
-    if (event.source !== "extension") remediationFollowUpUsed = false;
+    if (shouldResetRemediationFollowUp(event)) remediationFollowUpUsed = false;
   });
 
   pi.registerMessageRenderer(CODE_HINTS_MESSAGE_TYPE, (message, { expanded }, theme) => {
@@ -573,5 +582,6 @@ export const __test__ = {
   modeDescription,
   shouldFlushAtTurn,
   shouldKeepInModelContext,
+  shouldResetRemediationFollowUp,
   shouldSkipAgentEnd,
 };
