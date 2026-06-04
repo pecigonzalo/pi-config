@@ -153,6 +153,12 @@ function buildToolLines(tools: readonly ToolInfo[]): string[] {
     lines.push(`name: ${tool.name}`);
     lines.push(`  description: ${tool.description}`);
     lines.push(`  source: ${sourceText}`);
+    if (tool.promptGuidelines && tool.promptGuidelines.length > 0) {
+      lines.push("  promptGuidelines:");
+      for (const guideline of tool.promptGuidelines) {
+        lines.push(`    - ${guideline}`);
+      }
+    }
     lines.push("  parameters:");
 
     for (const line of safeJson(tool.parameters).split("\n")) {

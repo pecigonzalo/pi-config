@@ -50,6 +50,7 @@ describe("debug prompt tool formatting", () => {
         name: "read",
         description: "Read file contents",
         parameters: { type: "object", properties: { path: { type: "string" } } },
+        promptGuidelines: ["Use read when inspecting a known file path."],
         sourceInfo: {
           path: "<builtin:read>",
           source: "builtin",
@@ -62,6 +63,8 @@ describe("debug prompt tool formatting", () => {
     expect(lines.join("\n")).toContain("Tool definitions (1 tools)");
     expect(lines.join("\n")).toContain("name: read");
     expect(lines.join("\n")).toContain("source: built-in");
+    expect(lines.join("\n")).toContain("promptGuidelines:");
+    expect(lines.join("\n")).toContain("- Use read when inspecting a known file path.");
     expect(lines.join("\n")).toContain('"path"');
   });
 });
