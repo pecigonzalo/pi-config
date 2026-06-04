@@ -26,7 +26,7 @@ function getSessionTitle(ctx: ExtensionContext): string {
 }
 
 function formatSessionReminder(ctx: ExtensionContext, sessionId: string, sessionTitle: string): string {
-  const command = `pi --session ${sessionId}`;
+  const command = `pi --session-id ${sessionId}`;
 
   if (!ctx.hasUI || !process.stderr.isTTY) {
     return [

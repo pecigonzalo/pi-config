@@ -63,7 +63,7 @@ describe("session reminder", () => {
         [
           "Session: abc123",
           "Title:   Ship the exit reminder",
-          "Resume:  pi --session abc123",
+          "Resume:  pi --session-id abc123",
         ].join("\n"),
       );
     });
@@ -77,7 +77,7 @@ describe("session reminder", () => {
         [
           "<muted>*Session:*</muted> *abc123*",
           "<muted>*Title:  *</muted> *Ship the exit reminder*",
-          "<muted>*Resume: *</muted> *pi --session abc123*",
+          "<muted>*Resume: *</muted> *pi --session-id abc123*",
         ].join("\n"),
       );
     });
