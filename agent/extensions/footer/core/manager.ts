@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ReadonlyFooterDataProvider } from "@earendil-works/pi-coding-agent";
 import { renderFooterLines } from "./layout";
 import type {
   FooterActivateLayoutEventPayload,
@@ -21,6 +21,31 @@ import {
 
 function getItemKey(owner: string, id: string): string {
   return `${owner}:${id}`;
+}
+
+function sanitizeStatusText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function formatExtensionStatuses(statuses: ReadonlyMap<string, string>): string | null {
+  const text = [...statuses.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, status]) => sanitizeStatusText(status))
+    .filter(Boolean)
+    .join(" ");
+  return text || null;
+}
+
+function createExtensionStatusItem(footerData: ReadonlyFooterDataProvider): FooterItem {
+  return {
+    owner: "footer",
+    id: "extension-statuses",
+    getPlacement: () => ({ row: "context", section: "z", order: 1000 }),
+    render: ({ theme }) => {
+      const statuses = formatExtensionStatuses(footerData.getExtensionStatuses());
+      return statuses ? theme.fg("dim", statuses) : null;
+    },
+  };
 }
 
 export class FooterManager {
@@ -111,13 +136,15 @@ export class FooterManager {
     this.currentCtx = ctx;
     if (!ctx.hasUI) return;
 
-    ctx.ui.setFooter((_tui, theme) => {
+    ctx.ui.setFooter((_tui, theme, footerData) => {
       const nextRequestRender = () => _tui.requestRender();
       this.requestRender = nextRequestRender;
+      const extensionStatusItem = createExtensionStatusItem(footerData);
 
       return {
         render: (width: number): string[] => {
-          return renderFooterLines(this.items.values(), this.getActiveLayout(), { ctx, theme: theme as FooterTheme, layoutName: this.activeLayoutName }, width);
+          const items = [...this.items.values(), extensionStatusItem];
+          return renderFooterLines(items, this.getActiveLayout(), { ctx, theme: theme as FooterTheme, layoutName: this.activeLayoutName }, width);
         },
         invalidate: () => {
           this.invalidate();
@@ -176,3 +203,8 @@ export class FooterManager {
     this.unmount(ctx);
   }
 }
+
+export const __test__ = {
+  formatExtensionStatuses,
+  sanitizeStatusText,
+};
