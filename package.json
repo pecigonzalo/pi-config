@@ -5,7 +5,7 @@
   "scripts": {
     "generate:footer-schema": "cd agent/extensions/footer && bun run generate:footer-schema",
     "lefthook:install": "lefthook install",
-    "test": "bun run --filter './agent/extensions/*' test"
+    "test": "bun run --filter './agent/extensions/*' test --only-failures"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.75.1",

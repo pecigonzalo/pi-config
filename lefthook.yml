@@ -1,3 +1,9 @@
+no_auto_install: true
+
+output:
+  - failure
+  - summary
+
 pre-commit:
   jobs:
     - name: test
