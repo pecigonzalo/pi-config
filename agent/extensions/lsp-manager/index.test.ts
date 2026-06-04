@@ -65,6 +65,15 @@ describe("lsp-manager helpers", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("includes pending initialization clients in shutdown snapshots", () => {
+    const running = { id: "typescript", process: "running" };
+    const pending = { id: "python", process: "pending" };
+    const clients = new Map([["typescript:/repo", running]]);
+    const pendingClients = new Set([pending, running]);
+
+    expect(serviceTest.collectUniqueClients(clients.values(), pendingClients.values())).toEqual([running, pending]);
+  });
 });
 
 describe("lsp-manager status command", () => {

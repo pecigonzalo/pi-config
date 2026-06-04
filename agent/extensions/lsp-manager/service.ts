@@ -409,9 +409,14 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
   });
 }
 
+function collectUniqueClients(clients: Iterable<LspClientState>, pendingClients: Iterable<LspClientState>): LspClientState[] {
+  return [...new Set([...clients, ...pendingClients])];
+}
+
 /** LSP service implementation backed by stdio language servers. */
 export class DefaultLspManagerService implements LspManagerService {
   private readonly clients = new Map<string, LspClientState>();
+  private readonly pendingClients = new Set<LspClientState>();
   private readonly spawning = new Map<string, Promise<LspClientState | undefined>>();
   private shuttingDown = false;
 
@@ -596,8 +601,9 @@ export class DefaultLspManagerService implements LspManagerService {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
-    const clients = [...this.clients.values()];
+    const clients = collectUniqueClients(this.clients.values(), this.pendingClients.values());
     this.clients.clear();
+    this.pendingClients.clear();
     this.spawning.clear();
 
     await Promise.all(clients.map((client) => this.shutdownClient(client)));
@@ -700,6 +706,7 @@ export class DefaultLspManagerService implements LspManagerService {
       });
 
       connection.listen();
+      this.pendingClients.add(client);
       await withTimeout(
         connection.sendRequest(InitializeRequest.method, {
           processId: process.pid,
@@ -724,6 +731,7 @@ export class DefaultLspManagerService implements LspManagerService {
         INIT_TIMEOUT_MS,
         `${server.id} initialize`,
       );
+      this.pendingClients.delete(client);
       if (this.shuttingDown) {
         await this.shutdownClient(client);
         return undefined;
@@ -733,6 +741,10 @@ export class DefaultLspManagerService implements LspManagerService {
     } catch {
       if (child) child.kill();
       return undefined;
+    } finally {
+      for (const client of this.pendingClients) {
+        if (client.process === child) this.pendingClients.delete(client);
+      }
     }
   }
 
@@ -859,6 +871,7 @@ export const __test__ = {
   diagnosticToItem,
   filterBySeverity,
   findNearestRoot,
+  collectUniqueClients,
   normalizePath,
   serverForFile,
   severityName,
