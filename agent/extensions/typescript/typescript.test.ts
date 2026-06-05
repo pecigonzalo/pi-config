@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it, mock } from "bun:test";
 import { EventEmitter } from "node:events";
 
 let __test__: any;
+let extensionFactory: any;
 
 beforeAll(async () => {
 	mock.module("@earendil-works/pi-ai", () => ({
@@ -57,10 +58,27 @@ beforeAll(async () => {
 	});
 	mock.module("../tasks/agents.js", mockAgentsModule);
 
-	__test__ = (await import("./typescript")).__test__;
+	const mod = await import("./typescript");
+	__test__ = mod.__test__;
+	extensionFactory = mod.default;
 });
 
 describe("typescript tool helpers", () => {
+	it("names the typescript tool in every prompt guideline", () => {
+		let registeredTool: { promptGuidelines?: string[] } | undefined;
+		extensionFactory({
+			registerTool(tool: { promptGuidelines?: string[] }) {
+				registeredTool = tool;
+			},
+		});
+
+		expect(registeredTool?.promptGuidelines?.length).toBeGreaterThan(0);
+		for (const guideline of registeredTool!.promptGuidelines!) {
+			expect(guideline).toContain("typescript");
+			expect(guideline.toLowerCase()).not.toContain("this tool");
+		}
+	});
+
 	it("parses protocol output lines", () => {
 		const parsed = __test__.parseProtocolOutput(
 			[

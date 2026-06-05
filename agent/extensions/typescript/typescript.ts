@@ -858,11 +858,11 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet:
 			"Execute one-shot TypeScript in a sandboxed runtime for batched analysis, local data processing, artifact generation, and limited host-orchestrated workflows.",
 		promptGuidelines: [
-			"Use this CodeMode-style tool when the task benefits from batching multiple local operations into one scripted execution instead of many step-by-step tool calls.",
-			"Prefer this tool for codebase analysis, structured extraction, summarization over many inputs, and artifact generation.",
-			"Do not use this tool for trivial single-step actions when direct tools are simpler.",
-			"Use profile \"analysis\" for read/analyze/report tasks and \"orchestrator\" only when host bridge operations like task delegation are needed.",
-			"When using this tool, return a compact result and use artifact writing for larger outputs.",
+			"Use the typescript tool when the task benefits from batching multiple local operations into one scripted execution instead of many step-by-step tool calls.",
+			"Prefer the typescript tool for codebase analysis, structured extraction, summarization over many inputs, and artifact generation.",
+			"Do not use the typescript tool for trivial single-step actions when direct tools are simpler.",
+			"Use the typescript tool with profile \"analysis\" for read/analyze/report tasks and profile \"orchestrator\" only when host bridge operations like task delegation are needed.",
+			"When using the typescript tool, return a compact result and use artifact writing for larger outputs.",
 		],
 		parameters: CodemodeParams,
 		renderCall(args, theme, context) {
