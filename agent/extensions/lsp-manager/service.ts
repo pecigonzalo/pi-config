@@ -195,6 +195,21 @@ const SERVER_DEFINITIONS: ServerDefinition[] = [
     rootMarkers: ["Cargo.toml", ".git"],
     languageId: () => "rust",
   },
+  {
+    id: "terraform",
+    command: "terraform-ls",
+    args: ["serve"],
+    extensions: [".tf", ".tfvars", ".tfcomponent.hcl", ".tfstack.hcl", ".tfdeploy.hcl", ".tfquery.hcl"],
+    rootMarkers: [".terraform", ".terraform.lock.hcl", "terraform.tf", "main.tf", ".git"],
+    languageId: (filePath) => {
+      const lowerPath = filePath.toLowerCase();
+      if (lowerPath.endsWith(".tfvars")) return "terraform-vars";
+      if (lowerPath.endsWith(".tfcomponent.hcl") || lowerPath.endsWith(".tfstack.hcl")) return "terraform-stack";
+      if (lowerPath.endsWith(".tfdeploy.hcl")) return "terraform-deploy";
+      if (lowerPath.endsWith(".tfquery.hcl")) return "terraform-search";
+      return "terraform";
+    },
+  },
 ];
 
 function commandExists(command: string): boolean {
@@ -247,8 +262,8 @@ function findNearestRoot(startPath: string, cwd: string, markers: string[]): str
 }
 
 function serverForFile(filePath: string): ServerDefinition | undefined {
-  const ext = extname(filePath).toLowerCase();
-  return SERVER_DEFINITIONS.find((server) => server.extensions.includes(ext));
+  const lowerPath = filePath.toLowerCase();
+  return SERVER_DEFINITIONS.find((server) => server.extensions.some((extension) => lowerPath.endsWith(extension)));
 }
 
 function severityName(value: number | undefined): LspDiagnosticSeverity {
@@ -453,7 +468,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string, s
   }), signal);
 }
 
-function collectUniqueClients(clients: Iterable<LspClientState>, pendingClients: Iterable<LspClientState>): LspClientState[] {
+function collectUniqueClients<T>(clients: Iterable<T>, pendingClients: Iterable<T>): T[] {
   return [...new Set([...clients, ...pendingClients])];
 }
 

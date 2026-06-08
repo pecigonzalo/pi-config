@@ -17,7 +17,20 @@ describe("lsp-manager helpers", () => {
   it("detects builtin server definitions by extension", () => {
     expect(serviceTest.serverForFile("src/index.ts")?.id).toBe("typescript");
     expect(serviceTest.serverForFile("main.go")?.id).toBe("go");
+    expect(serviceTest.serverForFile("main.tf")?.id).toBe("terraform");
+    expect(serviceTest.serverForFile("terraform.tfvars")?.id).toBe("terraform");
     expect(serviceTest.serverForFile("README.md")).toBeUndefined();
+  });
+
+  it("maps Terraform file suffixes to Terraform language IDs", () => {
+    const terraform = serviceTest.serverForFile("main.tf");
+
+    expect(terraform?.languageId("main.tf")).toBe("terraform");
+    expect(terraform?.languageId("prod.tfvars")).toBe("terraform-vars");
+    expect(terraform?.languageId("network.tfcomponent.hcl")).toBe("terraform-stack");
+    expect(terraform?.languageId("deploy.tfdeploy.hcl")).toBe("terraform-deploy");
+    expect(terraform?.languageId("search.tfquery.hcl")).toBe("terraform-search");
+    expect(serviceTest.serverForFile("packer.pkr.hcl")).toBeUndefined();
   });
 
   it("maps diagnostics into compact serializable items", () => {
