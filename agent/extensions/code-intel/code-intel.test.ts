@@ -16,6 +16,13 @@ const goSourceFile = {
 	size: 100,
 };
 
+const terraformSourceFile = {
+	absPath: "/repo/infra/main.tf",
+	relPath: "infra/main.tf",
+	language: "terraform",
+	size: 100,
+};
+
 function definition(overrides: Partial<Definition> & Pick<Definition, "name" | "kind">): Definition {
 	return {
 		file: "internal/broker/server.go",
@@ -46,6 +53,60 @@ describe("code-intel Phase 1 extraction", () => {
 
 		expect(__test.findDefinitionEnd(lines, 0, "typescript")).toBe(6);
 		expect(__test.findDefinitionEnd(lines, 1, "typescript")).toBe(5);
+	});
+
+	test("extracts Terraform blocks", () => {
+		const defs = __test.extractDefinitions(
+			terraformSourceFile,
+			`terraform {
+  required_version = ">= 1.6"
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+resource "aws_instance" "web" {
+  ami = "ami-123"
+}
+
+data "aws_ami" "ubuntu" {
+  most_recent = true
+}
+
+module "network" {
+  source = "./modules/network"
+}
+
+variable "instance_type" {}
+output "instance_id" {}
+locals {
+  tags = {}
+}
+`,
+		);
+
+		expect(defs.map((def) => `${def.kind}:${def.name}`)).toEqual([
+			"block:terraform",
+			"provider:aws",
+			"resource:aws_instance.web",
+			"data:aws_ami.ubuntu",
+			"module:network",
+			"variable:instance_type",
+			"output:instance_id",
+			"block:locals",
+		]);
+		expect(defs.find((def) => def.name === "aws_instance.web")?.column).toBe(10);
+	});
+
+	test("detects Terraform source file suffixes", () => {
+		expect(__test.languageForPath("infra/main.tf")).toBe("terraform");
+		expect(__test.languageForPath("infra/prod.tfvars")).toBe("terraform");
+		expect(__test.languageForPath("infra/network.tfcomponent.hcl")).toBe("terraform");
+		expect(__test.languageForPath("infra/stack.tfstack.hcl")).toBe("terraform");
+		expect(__test.languageForPath("infra/deploy.tfdeploy.hcl")).toBe("terraform");
+		expect(__test.languageForPath("infra/search.tfquery.hcl")).toBe("terraform");
+		expect(__test.languageForPath("infra/packer.pkr.hcl")).toBeUndefined();
 	});
 
 	test("extracts go interface members as declaration symbols", () => {

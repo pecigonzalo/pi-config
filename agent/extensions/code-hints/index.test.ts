@@ -301,8 +301,21 @@ describe("code-hints remediation prompts", () => {
 });
 
 describe("code-hints service discovery", () => {
+  it("delegates Terraform diagnostic support to lsp-manager", () => {
+    const service = {
+      supportsFile: (path: string) => path.endsWith(".tf") || path.endsWith(".tfvars"),
+      diagnostics: async () => [],
+      status: () => [],
+    } as unknown as LspManagerService;
+
+    expect(__test__.supportsDiagnosticsForPath(service, "infra/main.tf")).toBe(true);
+    expect(__test__.supportsDiagnosticsForPath(service, "infra/prod.tfvars")).toBe(true);
+    expect(__test__.supportsDiagnosticsForPath(service, "infra/packer.pkr.hcl")).toBe(false);
+  });
+
   it("finds an lsp-manager service through the event bus", () => {
     const service = {
+      supportsFile: () => true,
       diagnostics: async () => [],
       status: () => [],
     } as unknown as LspManagerService;

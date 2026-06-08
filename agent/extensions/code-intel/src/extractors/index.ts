@@ -11,6 +11,14 @@ import { rustPatterns } from "./lang/rust";
 import { swiftPatterns } from "./lang/swift";
 import type { DefinitionPattern } from "./types";
 
+interface MatchedDefinition {
+	name: string;
+	kind: string;
+	declaration?: boolean;
+	container?: string;
+	column?: number;
+}
+
 const PATTERN_REGISTRY: Record<string, () => DefinitionPattern[]> = {
 	typescript: javascriptPatterns,
 	tsx: javascriptPatterns,
@@ -43,7 +51,7 @@ export function extractDefinitions(file: SourceFile, text: string): Definition[]
 			kind: match.kind,
 			file: file.relPath,
 			line: index,
-			column: line.indexOf(match.name),
+			column: match.column ?? Math.max(0, line.indexOf(match.name)),
 			text: line.trimEnd(),
 			signatureLines: captureSignature(lines, index, file.language),
 			score: 0,
@@ -73,12 +81,10 @@ export function extractDefinitions(file: SourceFile, text: string): Definition[]
 	return definitions;
 }
 
-export function matchDefinition(
-	language: string,
-	line: string,
-): { name: string; kind: string; declaration?: boolean; container?: string } | undefined {
+export function matchDefinition(language: string, line: string): MatchedDefinition | undefined {
 	const trimmed = line.trim();
 	if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#") || trimmed.startsWith("*")) return;
+	if (language === "terraform") return matchTerraformDefinition(line);
 
 	const patterns = PATTERN_REGISTRY[language]?.() ?? javascriptPatterns();
 	for (const pattern of patterns) {
@@ -88,6 +94,35 @@ export function matchDefinition(
 		if (!name || KEYWORDS.has(name.toLowerCase())) continue;
 		return { name, kind: pattern.kind };
 	}
+}
+
+function matchTerraformDefinition(line: string): MatchedDefinition | undefined {
+	const trimmed = line.trim();
+	const resourceMatch = trimmed.match(/^(resource|data)\s+"([^"]+)"\s+"([^"]+)"/);
+	if (resourceMatch) {
+		const kind = resourceMatch[1];
+		const type = resourceMatch[2];
+		const name = resourceMatch[3];
+		if (!kind || !type || !name) return;
+		return {
+			name: `${type}.${name}`,
+			kind,
+			column: Math.max(0, line.indexOf(type)),
+		};
+	}
+
+	const namedBlockMatch = trimmed.match(/^(module|variable|output|provider)\s+"([^"]+)"/);
+	if (namedBlockMatch) {
+		const kind = namedBlockMatch[1];
+		const name = namedBlockMatch[2];
+		if (!kind || !name || KEYWORDS.has(name.toLowerCase())) return;
+		return { name, kind, column: Math.max(0, line.indexOf(name)) };
+	}
+
+	const singletonBlockMatch = trimmed.match(/^(terraform|locals)\s*\{/);
+	const name = singletonBlockMatch?.[1];
+	if (!name) return;
+	return { name, kind: "block", column: Math.max(0, line.indexOf(name)) };
 }
 
 export function captureSignature(lines: string[], start: number, language: string): string[] {

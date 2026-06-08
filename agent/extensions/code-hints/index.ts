@@ -59,6 +59,10 @@ function isLspManagerService(value: unknown): value is LspManagerService {
   return !!value && typeof value === "object" && typeof (value as LspManagerService).diagnostics === "function";
 }
 
+function supportsDiagnosticsForPath(service: LspManagerService | undefined, filePath: string): boolean {
+  return service?.supportsFile(filePath) === true;
+}
+
 function shouldResetRemediationFollowUp(event: CodeHintsInputEvent): boolean {
   return event.source !== "extension" && event.streamingBehavior === undefined;
 }
@@ -493,7 +497,7 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
     if (!active || !options.enabled) return;
 
     const service = lspService ?? getLspService(pi);
-    if (!service?.supportsFile(input.path)) return;
+    if (!service || !supportsDiagnosticsForPath(service, input.path)) return;
     if (baselinePromises.has(input.path)) return;
 
     const baselineGeneration = generation;
@@ -516,7 +520,7 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
     if (!active || !options.enabled) return;
 
     const service = lspService ?? getLspService(pi);
-    if (!service?.supportsFile(input.path)) return;
+    if (!service || !supportsDiagnosticsForPath(service, input.path)) return;
     if (touchedFiles.size === 0) firstDirtyAt = Date.now();
     touchedFiles.add(input.path);
     dirtyGeneration++;
@@ -593,4 +597,5 @@ export const __test__ = {
   shouldKeepInModelContext,
   shouldResetRemediationFollowUp,
   shouldSkipAgentEnd,
+  supportsDiagnosticsForPath,
 };

@@ -1,6 +1,6 @@
 import { formatSize } from "@earendil-works/pi-coding-agent";
 
-export const CODE_INTEL_CACHE_VERSION = 5;
+export const CODE_INTEL_CACHE_VERSION = 6;
 export const DEFAULT_MAP_TOKENS = 1600;
 export const DEFAULT_MAX_FILES = 2500;
 export const DEFAULT_MAX_FILE_BYTES = 512 * 1024;
@@ -54,6 +54,12 @@ export const EXT_TO_LANGUAGE = new Map<string, string>([
 	[".go", "go"],
 	[".py", "python"],
 	[".rs", "rust"],
+	[".tf", "terraform"],
+	[".tfvars", "terraform"],
+	[".tfcomponent.hcl", "terraform"],
+	[".tfstack.hcl", "terraform"],
+	[".tfdeploy.hcl", "terraform"],
+	[".tfquery.hcl", "terraform"],
 	[".java", "java"],
 	[".kt", "kotlin"],
 	[".kts", "kotlin"],
@@ -82,6 +88,7 @@ export const LANGUAGE_SPECIFIC_PATTERN_SUPPORT = new Set([
 	"go",
 	"python",
 	"rust",
+	"terraform",
 	"java",
 	"kotlin",
 	"csharp",

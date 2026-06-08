@@ -6,6 +6,8 @@ import { EXT_TO_LANGUAGE, LANGUAGE_SPECIFIC_PATTERN_SUPPORT, SKIP_DIRS } from ".
 import { looksBinary, normalizePath } from "./helpers";
 import type { RepoMapOptions, SourceDiscoveryResult, SourceFile } from "./types";
 
+const SOURCE_SUFFIXES = [...EXT_TO_LANGUAGE.keys()].sort((left, right) => right.length - left.length);
+
 export async function findProjectRoot(pi: ExtensionAPI, cwd: string, signal?: AbortSignal): Promise<string> {
 	try {
 		const result = await pi.exec("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { signal, timeout: 5000 });
@@ -84,7 +86,7 @@ function incrementCount(map: Map<string, number>, key: string): void {
 }
 
 function extensionLabel(relPath: string): string {
-	const extension = extname(relPath).toLowerCase();
+	const extension = sourceSuffixForPath(relPath) ?? extname(relPath).toLowerCase();
 	return extension || "(no extension)";
 }
 
@@ -134,7 +136,13 @@ function shouldIncludePath(relPath: string, include?: string[], exclude?: string
 }
 
 export function languageForPath(path: string): string | undefined {
-	return EXT_TO_LANGUAGE.get(extname(path).toLowerCase());
+	const suffix = sourceSuffixForPath(path);
+	return suffix ? EXT_TO_LANGUAGE.get(suffix) : undefined;
+}
+
+function sourceSuffixForPath(path: string): string | undefined {
+	const lowerPath = path.toLowerCase();
+	return SOURCE_SUFFIXES.find((suffix) => lowerPath.endsWith(suffix));
 }
 
 function isGeneratedOrVendored(path: string): boolean {
