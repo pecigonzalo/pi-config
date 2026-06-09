@@ -441,6 +441,28 @@ describe("tasks worker tool configuration", () => {
 
 		expect(args).toEqual(["--tools", "read,edit", "--exclude-tools", "bash"]);
 	});
+
+	it("approves project-local inputs for child pi processes when project context is requested", () => {
+		const args: string[] = [];
+
+		__test__.appendProjectTrustFlags(args, {
+			context: { mode: "fresh", project: true, skills: false },
+			inheritProjectContext: false,
+		});
+
+		expect(args).toEqual(["--approve"]);
+	});
+
+	it("does not approve project-local inputs when project context is not requested", () => {
+		const args: string[] = [];
+
+		__test__.appendProjectTrustFlags(args, {
+			context: { mode: "fresh", project: false, skills: false },
+			inheritProjectContext: false,
+		});
+
+		expect(args).toEqual([]);
+	});
 });
 
 describe("tasks extension persisted-session guardrails", () => {

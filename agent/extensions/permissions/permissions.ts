@@ -137,6 +137,7 @@ import {
 	dedupeStrings,
 	isFilesystemToolName,
 	type ApprovalRecord,
+	type PermissionMode,
 	type PermissionToolInput,
 	type PermissionToolName,
 	type PermissionsConfig,
@@ -181,6 +182,7 @@ export default function (pi: ExtensionAPI) {
 	type SandboxBashFallbackMode = "normal" | "ask-all-bash" | "block-all-bash";
 	type SandboxExecution = {
 		cwd: string;
+		policyMode: PermissionMode;
 		enabled: boolean;
 		config: SandboxRuntimeConfigLike;
 		configKey: string;
@@ -378,6 +380,7 @@ export default function (pi: ExtensionAPI) {
 		const compiled = compileSandboxConfig(policy, ctx.cwd, config.sandbox, effectiveTmpDir);
 		return {
 			cwd: ctx.cwd,
+			policyMode: policy.mode,
 			enabled: compiled.enabled,
 			config: compiled.config,
 			configKey: JSON.stringify(compiled.config),
@@ -604,11 +607,13 @@ export default function (pi: ExtensionAPI) {
 			};
 		}
 
-		const cwdWriteExpected = isSandboxWriteAllowedForPath(execution.config, ctx.cwd);
+		const policyAllowsCwdWrites = execution.policyMode !== "plan";
+		const cwdWriteExpected = policyAllowsCwdWrites && isSandboxWriteAllowedForPath(execution.config, ctx.cwd);
 		if (!cwdWriteExpected) {
+			const reason = policyAllowsCwdWrites ? "sandbox config does not allow writes" : "active policy does not allow writes";
 			return {
 				ok: true,
-				message: `Bash sandbox probe passed: TMPDIR writes are allowed in ${execution.tmpDir}; workspace write check skipped because active policy does not allow writes in ${ctx.cwd}`,
+				message: `Bash sandbox probe passed: TMPDIR writes are allowed in ${execution.tmpDir}; workspace write check skipped because ${reason} in ${ctx.cwd}`,
 				level: "info",
 				tmpDirOk: true,
 				cwdWriteExpected,

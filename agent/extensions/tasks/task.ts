@@ -997,6 +997,13 @@ function appendWorkerToolFlags(args: string[], worker: Pick<ResolvedWorkerConfig
 	}
 }
 
+function appendProjectTrustFlags(
+	args: string[],
+	worker: Pick<ResolvedWorkerConfig, "context" | "inheritProjectContext">,
+): void {
+	if (worker.context.project || worker.inheritProjectContext) args.push("--approve");
+}
+
 function getPersistedMainAgentState(entries: SessionEntry[]): PersistedMainAgentState {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
@@ -1745,6 +1752,7 @@ async function runSingleAgentViaJson(
 	if (agentModel) args.push("--model", agentModel);
 	if (worker.effort?.thinkingLevel) args.push("--thinking", worker.effort.thinkingLevel);
 	appendWorkerToolFlags(args, worker);
+	appendProjectTrustFlags(args, worker);
 	if (!worker.inheritProjectContext) args.push("--no-context-files");
 
 	if (worker.skills && worker.skills.length > 0) {
@@ -1969,6 +1977,7 @@ async function runSingleAgentViaRpc(
 	if (agentModel) args.push("--model", agentModel);
 	if (worker.effort?.thinkingLevel) args.push("--thinking", worker.effort.thinkingLevel);
 	appendWorkerToolFlags(args, worker);
+	appendProjectTrustFlags(args, worker);
 	if (!worker.inheritProjectContext) args.push("--no-context-files");
 	if (worker.skills && worker.skills.length > 0) {
 		const { paths, missing } = resolveSkillPaths(worker.skills, preparedStep.launchCwd);
@@ -4609,6 +4618,7 @@ export const __test__ = {
 	shouldDisplayTaskInlineNotice,
 	buildTaskWidgetLines,
 	normalizeChildSessionSnapshot: (data: unknown) => normalizeChildSessionSnapshot(data, TASK_CHILD_SESSION_METADATA_VERSION),
+	appendProjectTrustFlags,
 	appendWorkerToolFlags,
 	parseTaskTerminalBackendPreference,
 	parseTasksCommand,
