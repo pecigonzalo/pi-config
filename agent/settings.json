@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.75.5",
+  "lastChangelogVersion": "0.79.0",
   "theme": "dracula",
   "extensions": [
     "-extensions/store/index.ts"
@@ -17,7 +17,7 @@
     "github-copilot/claude-haiku-4.5"
   ],
   "defaultProvider": "github-copilot",
-  "defaultModel": "gpt-5.5",
+  "defaultModel": "gpt-5.3-codex",
   "defaultThinkingLevel": "high",
   "compaction": {
     "enabled": true
