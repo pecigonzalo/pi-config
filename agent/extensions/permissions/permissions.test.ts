@@ -35,7 +35,7 @@ import {
 	shouldProbeSandboxAfterIdle,
 } from "./sandbox-lifecycle";
 import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-parse";
-import type { Rule, SandboxRuntimeConfigLike } from "./shared";
+import type { Rule, SandboxManagerLike, SandboxRuntimeConfigLike } from "./shared";
 
 const execFile = promisify(execFileCallback);
 const TEST_SCRATCH_DIR = path.join(process.cwd(), ".tmp", "permissions-tests");
@@ -626,7 +626,7 @@ describe("sandboxed command runner", () => {
 		expect(receivedConfig).toBe(sandboxConfig);
 	});
 
-	it("resets the sandbox runtime only when the config key changes", async () => {
+	it("reinitializes the sandbox runtime on every initialize call", async () => {
 		const calls: string[] = [];
 		const adapter = new SandboxRuntimeAdapter({
 			initialize: async (_config) => {
@@ -646,10 +646,10 @@ describe("sandboxed command runner", () => {
 		await adapter.initialize(sandboxConfig, "key-1");
 		await adapter.initialize(sandboxConfig, "key-2");
 
-		expect(calls).toEqual(["reset", "initialize", "initialize", "reset", "initialize"]);
+		expect(calls).toEqual(["reset", "initialize", "reset", "initialize", "reset", "initialize"]);
 	});
 
-	it("clears the adapter config key when reset", async () => {
+	it("explicit reset remains supported between initialize calls", async () => {
 		const calls: string[] = [];
 		const adapter = new SandboxRuntimeAdapter({
 			initialize: async (_config) => {
@@ -672,7 +672,7 @@ describe("sandboxed command runner", () => {
 		expect(calls).toEqual(["reset", "initialize", "reset", "reset", "initialize"]);
 	});
 
-	it("reports reset errors while still initializing with the requested config", async () => {
+	it("reports reset errors and aborts initialize when reset fails", async () => {
 		const calls: string[] = [];
 		const resetErrors: unknown[] = [];
 		const adapter = new SandboxRuntimeAdapter({
@@ -690,11 +690,11 @@ describe("sandboxed command runner", () => {
 			network: { allowLocalBinding: true },
 		};
 
-		await adapter.initialize(sandboxConfig, "key-1", {
+		await expect(adapter.initialize(sandboxConfig, "key-1", {
 			onResetError: (err) => resetErrors.push(err),
-		});
+		})).rejects.toThrow("stale reset failed");
 
-		expect(calls).toEqual(["reset", "initialize"]);
+		expect(calls).toEqual(["reset"]);
 		expect(resetErrors).toHaveLength(1);
 		expect(resetErrors[0]).toBeInstanceOf(Error);
 	});
@@ -730,6 +730,88 @@ describe("sandboxed command runner", () => {
 		expect(result.exitCode).toBe(0);
 		expect(receivedConfig).toBe(sandboxConfig);
 		expect(chunks.join("")).toBe(`${runtimeTmpDir}\nadapter-env\n`);
+	});
+
+	it("reinitializes manager network state for each runCommand execution", async () => {
+		const runtimeTmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "perm-adapter-network-state-"));
+		let activeConfig: SandboxRuntimeConfigLike | undefined = {
+			filesystem: { denyRead: [], allowWrite: [runtimeTmpDir], denyWrite: [] },
+			network: { allowedDomains: [], deniedDomains: [] },
+		};
+		const seenConfigDuringWrap: Array<SandboxRuntimeConfigLike | undefined> = [];
+		const manager: SandboxManagerLike = {
+			initialize: async (config) => {
+				activeConfig = config;
+			},
+			reset: async () => {
+				// reset intentionally leaves activeConfig unchanged to model stale upstream state
+			},
+			wrapWithSandbox: async (command) => {
+				seenConfigDuringWrap.push(activeConfig);
+				return command;
+			},
+		};
+		const adapter = new SandboxRuntimeAdapter(manager);
+		const unrestrictedConfig: SandboxRuntimeConfigLike = {
+			filesystem: { denyRead: [], allowWrite: [runtimeTmpDir], denyWrite: [] },
+			network: { allowLocalBinding: true },
+		};
+		const blockedConfig: SandboxRuntimeConfigLike = {
+			filesystem: { denyRead: [], allowWrite: [runtimeTmpDir], denyWrite: [] },
+			network: { allowedDomains: [], deniedDomains: [] },
+		};
+
+		await adapter.runCommand(
+			{ config: unrestrictedConfig, tmpDir: runtimeTmpDir },
+			{ command: "true", cwd: process.cwd() },
+		);
+		await adapter.runCommand(
+			{ config: blockedConfig, tmpDir: runtimeTmpDir },
+			{ command: "true", cwd: process.cwd() },
+		);
+
+		expect(seenConfigDuringWrap).toHaveLength(2);
+		expect(seenConfigDuringWrap[0]).toBe(unrestrictedConfig);
+		expect(seenConfigDuringWrap[1]).toBe(blockedConfig);
+	});
+
+	it("serializes executions across adapters sharing one manager", async () => {
+		const runtimeTmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "perm-adapter-serial-"));
+		const manager: SandboxManagerLike = {
+			initialize: async () => {},
+			reset: async () => {},
+			wrapWithSandbox: async (command) => command,
+		};
+		const adapterA = new SandboxRuntimeAdapter(manager);
+		const adapterB = new SandboxRuntimeAdapter(manager);
+		const config: SandboxRuntimeConfigLike = {
+			filesystem: { denyRead: [], allowWrite: [runtimeTmpDir], denyWrite: [] },
+			network: { allowLocalBinding: true },
+		};
+		const spawnTimes: number[] = [];
+
+		const first = adapterA.runCommand(
+			{ config, tmpDir: runtimeTmpDir },
+			{
+				command: "sleep 0.25",
+				cwd: process.cwd(),
+				onSpawn: () => spawnTimes.push(Date.now()),
+			},
+		);
+		const second = adapterB.runCommand(
+			{ config, tmpDir: runtimeTmpDir },
+			{
+				command: "true",
+				cwd: process.cwd(),
+				onSpawn: () => spawnTimes.push(Date.now()),
+			},
+		);
+
+		const [firstResult, secondResult] = await Promise.all([first, second]);
+		expect(firstResult.exitCode).toBe(0);
+		expect(secondResult.exitCode).toBe(0);
+		expect(spawnTimes).toHaveLength(2);
+		expect(spawnTimes[1] - spawnTimes[0]).toBeGreaterThanOrEqual(200);
 	});
 
 	it("detects when an idle gap should trigger a sandbox health probe", () => {

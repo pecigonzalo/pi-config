@@ -15,7 +15,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { activePolicy, loadConfig } from "../permissions/config";
 import { resolveCodemodePolicy } from "../permissions/codemode";
-import { getEffectiveSandboxTmpDir, runSandboxedCommand } from "../permissions/sandbox";
+import { getEffectiveSandboxTmpDir, SandboxRuntimeAdapter } from "../permissions/sandbox";
 import type { CodemodeCapability, CodemodeProfileName, SandboxManagerLike } from "../permissions/shared";
 import * as taskAgents from "../tasks/agents.js";
 import type { AgentScope } from "../tasks/agents.js";
@@ -602,11 +602,14 @@ async function createRuntimeFiles(runtimeDir: string, code: string, capabilities
 	return { entryFile };
 }
 
-async function initializeSandboxManager(config: unknown): Promise<SandboxManagerLike> {
+let codemodeSandboxRuntime: SandboxRuntimeAdapter | undefined;
+
+async function getCodemodeSandboxRuntime(): Promise<SandboxRuntimeAdapter> {
 	const mod = await import("../permissions/node_modules/@anthropic-ai/sandbox-runtime/dist/index.js");
-	const sandboxManager = mod.SandboxManager as SandboxManagerLike;
-	await sandboxManager.initialize(config as Parameters<SandboxManagerLike["initialize"]>[0]);
-	return sandboxManager;
+	if (!codemodeSandboxRuntime || codemodeSandboxRuntime.manager !== mod.SandboxManager) {
+		codemodeSandboxRuntime = new SandboxRuntimeAdapter(mod.SandboxManager as SandboxManagerLike);
+	}
+	return codemodeSandboxRuntime;
 }
 
 function sanitizeArtifactName(name: string): string {
@@ -1085,25 +1088,27 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			try {
-				const sandboxManager = await initializeSandboxManager(resolvedPolicy.sandbox.config);
-				try {
-					const result = await runSandboxedCommand(sandboxManager, {
+				const sandboxRuntime = await getCodemodeSandboxRuntime();
+				const result = await sandboxRuntime.runCommand(
+					{
+						config: resolvedPolicy.sandbox.config,
+						tmpDir: runtimeDir,
+						env: runtimeEnv,
+					},
+					{
 						command,
 						cwd,
 						timeout,
 						signal,
-						env: runtimeEnv,
 						stdinMode: "pipe",
 						onSpawn: (child) => {
 							stdinWriter = child.stdin ?? undefined;
 						},
 						onStdoutData: handleStdoutData,
 						onStderrData: handleStderrData,
-					});
-					exitCode = result.exitCode;
-				} finally {
-					await sandboxManager.reset().catch(() => {});
-				}
+					},
+				);
+				exitCode = result.exitCode;
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				const rawOutput = finalizeRawOutput(rawOutputState);

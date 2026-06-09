@@ -539,7 +539,7 @@ export interface SandboxedCommandResult {
 export interface SandboxCommandExecution {
 	config: SandboxRuntimeConfigLike;
 	tmpDir: string;
-	env?: Record<string, string>;
+	env?: NodeJS.ProcessEnv;
 }
 
 function sandboxCommandEnv(execution: SandboxCommandExecution): NodeJS.ProcessEnv | undefined {
@@ -619,47 +619,90 @@ export function isSandboxWriteAllowedForPath(config: SandboxRuntimeConfigLike, t
 		&& !denyWrite.some((writePath) => deniedWritePathCoversTarget(writePath, targetPath));
 }
 
-export class SandboxRuntimeAdapter {
-	private initializedKey: string | undefined;
+interface SandboxManagerLeaseState {
+	tail: Promise<void>;
+}
 
+const sandboxManagerLeases = new WeakMap<SandboxManagerLike, SandboxManagerLeaseState>();
+
+function getSandboxManagerLeaseState(manager: SandboxManagerLike): SandboxManagerLeaseState {
+	const existing = sandboxManagerLeases.get(manager);
+	if (existing) return existing;
+	const created: SandboxManagerLeaseState = { tail: Promise.resolve() };
+	sandboxManagerLeases.set(manager, created);
+	return created;
+}
+
+async function withSandboxManagerLease<T>(manager: SandboxManagerLike, work: () => Promise<T>): Promise<T> {
+	const state = getSandboxManagerLeaseState(manager);
+	const previousTail = state.tail;
+	let release: (() => void) | undefined;
+	const nextTail = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	state.tail = previousTail.then(() => nextTail, () => nextTail);
+
+	await previousTail;
+	try {
+		return await work();
+	} finally {
+		release?.();
+	}
+}
+
+export class SandboxRuntimeAdapter {
 	constructor(readonly manager: SandboxManagerLike) {}
 
+	private async prepare(config: SandboxRuntimeConfigLike): Promise<void> {
+		await this.manager.reset();
+		await this.manager.initialize(config);
+	}
+
 	async reset(): Promise<void> {
-		try {
+		await withSandboxManagerLease(this.manager, async () => {
 			await this.manager.reset();
-		} finally {
-			this.initializedKey = undefined;
-		}
+		});
 	}
 
 	async initialize(
 		config: SandboxRuntimeConfigLike,
-		configKey: string,
+		_configKey: string,
 		options: { onResetError?: (error: unknown) => void } = {},
 	): Promise<void> {
-		if (this.initializedKey !== configKey) {
+		await withSandboxManagerLease(this.manager, async () => {
 			try {
-				await this.reset();
+				await this.manager.reset();
 			} catch (err) {
 				options.onResetError?.(err);
+				throw err;
 			}
-		}
-		await this.manager.initialize(config);
-		this.initializedKey = configKey;
+			await this.manager.initialize(config);
+		});
 	}
 
 	createBashOperations(execution: SandboxCommandExecution): BashOperations {
-		return createSandboxedBashOps(this.manager, execution.tmpDir, execution.env, execution.config);
+		return {
+			exec: (command, cwd, options) => this.runCommand(execution, {
+				command,
+				cwd,
+				timeout: options.timeout,
+				signal: options.signal,
+				onData: options.onData,
+			}),
+		};
 	}
 
 	runCommand(
 		execution: SandboxCommandExecution,
 		options: Omit<SandboxedCommandOptions, "env" | "sandboxConfig">,
 	): Promise<SandboxedCommandResult> {
-		return runSandboxedCommand(this.manager, {
-			...options,
-			env: sandboxCommandEnv(execution),
-			sandboxConfig: execution.config,
+		return withSandboxManagerLease(this.manager, async () => {
+			await this.prepare(execution.config);
+			return runSandboxedCommand(this.manager, {
+				...options,
+				env: sandboxCommandEnv(execution),
+				sandboxConfig: execution.config,
+			});
 		});
 	}
 }
@@ -762,7 +805,7 @@ export async function runSandboxedCommand(
 export function createSandboxedBashOps(
 	sandboxManager: SandboxManagerLike,
 	runtimeTmpDir?: string,
-	sandboxEnv?: Record<string, string>,
+	sandboxEnv?: NodeJS.ProcessEnv,
 	sandboxConfig?: SandboxRuntimeConfigLike,
 ): BashOperations {
 	return {
