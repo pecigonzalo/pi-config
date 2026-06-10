@@ -4,6 +4,7 @@ import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   createMessageConnection,
+  ConfigurationRequest,
   DidChangeTextDocumentNotification,
   DidCloseTextDocumentNotification,
   DidOpenTextDocumentNotification,
@@ -19,7 +20,7 @@ import {
   StreamMessageWriter,
   type MessageConnection,
 } from "vscode-languageserver-protocol/node.js";
-import type { Diagnostic, DocumentSymbol, Hover, Location, LocationLink, SymbolInformation } from "vscode-languageserver-protocol";
+import type { ConfigurationParams, Diagnostic, DocumentSymbol, Hover, Location, LocationLink, SymbolInformation } from "vscode-languageserver-protocol";
 
 /** Event emitted when an LSP manager service is available. */
 export const LSP_MANAGER_READY_EVENT = "lsp-manager:ready";
@@ -37,6 +38,19 @@ export interface LspManagerServiceRequest {
 const INIT_TIMEOUT_MS = 30_000;
 const DEFAULT_DIAGNOSTIC_TIMEOUT_MS = 3_000;
 const MAX_OPEN_FILES = 40;
+const CONFIGURATION_SECTION_ROOTS = new Set([
+  "gopls",
+  "javascript",
+  "javascriptreact",
+  "pyright",
+  "python",
+  "rust-analyzer",
+  "rust_analyzer",
+  "terraform",
+  "terraform-ls",
+  "typescript",
+  "typescriptreact",
+]);
 
 export type LspDiagnosticSeverity = "error" | "warning" | "info" | "hint";
 export type LspDiagnosticStatus = "ok" | "unsupported" | "timeout" | "error";
@@ -421,6 +435,17 @@ function hoverContentsToText(contents: Hover["contents"]): string {
   return contents.value;
 }
 
+function resolveWorkspaceConfiguration(params: ConfigurationParams): unknown[] {
+  return params.items.map((item) => workspaceConfigurationForSection(item.section));
+}
+
+function workspaceConfigurationForSection(section: string | undefined): unknown {
+  if (!section) return {};
+  const sectionRoot = section.split(".", 1)[0];
+  if (sectionRoot && CONFIGURATION_SECTION_ROOTS.has(sectionRoot)) return {};
+  return null;
+}
+
 function abortError(): Error {
   return new Error("aborted");
 }
@@ -747,6 +772,7 @@ export class DefaultLspManagerService implements LspManagerService {
         closed: false,
       };
 
+      connection.onRequest(ConfigurationRequest.type, (params) => resolveWorkspaceConfiguration(params));
       connection.onNotification(PublishDiagnosticsNotification.type, (params) => {
         const file = uriToPath(params.uri);
         client.diagnostics.set(file, params.diagnostics ?? []);
@@ -941,6 +967,7 @@ export const __test__ = {
   collectUniqueClients,
   isAborted,
   normalizePath,
+  resolveWorkspaceConfiguration,
   serverForFile,
   severityName,
   withAbort,

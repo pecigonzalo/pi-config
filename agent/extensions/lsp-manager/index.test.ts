@@ -69,6 +69,19 @@ describe("lsp-manager helpers", () => {
     ]);
   });
 
+  it("returns empty client configuration for supported language server sections", () => {
+    const result = serviceTest.resolveWorkspaceConfiguration({
+      items: [
+        { scopeUri: "file:///repo", section: "gopls" },
+        { scopeUri: "file:///repo", section: "typescript.preferences" },
+        { scopeUri: "file:///repo" },
+        { scopeUri: "file:///repo", section: "unknown-server" },
+      ],
+    });
+
+    expect(result).toEqual([{}, {}, {}, null]);
+  });
+
   it("finds project roots by nearest marker", () => {
     const root = makeTempProject();
     try {
