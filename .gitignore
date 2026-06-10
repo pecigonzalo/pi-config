@@ -1,28 +1,11 @@
-# Pi credentials (contains API keys and OAuth tokens)
-# Upstream docs: docs/providers.md, docs/custom-provider.md
+### Pi
+agent/trust.json
+agent/permissions-approvals.json
 agent/auth.json
 agent/**/auth.json
-
-# Pi session transcripts (runtime data)
-# Upstream docs: README.md#sessions, docs/session.md
 agent/sessions/
-
-# Pi runtime/debug artifacts
-# Upstream docs: docs/development.md
 agent/pi-debug.log
-.tmp/
 
-# Extension local dependencies
-agent/extensions/**/node_modules/
-
-# Installed git packages (reproducible via `pi install` + settings)
-# Upstream docs: docs/packages.md
-agent/git/
-
-# Common local noise
-.DS_Store
-*.log
-*.bkp
 ### Node
 # Logs
 logs
