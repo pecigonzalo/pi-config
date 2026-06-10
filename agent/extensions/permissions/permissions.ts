@@ -200,6 +200,7 @@ export default function (pi: ExtensionAPI) {
 		| { kind: "failed"; reason: string; fallbackMode: SandboxBashFallbackMode; execution: SandboxExecution };
 	const SANDBOX_RESUME_IDLE_PROBE_MS = 5 * 60 * 1000;
 	let sandboxState: SandboxState = { kind: "inactive", reason: "inactive", fallbackMode: "normal" };
+	let sandboxDisabledForSession = false;
 	let sandboxTmpDir: string | undefined;
 	let sandboxTmpDirEphemeral = false;
 	const sandboxHealthMonitor = new SandboxHealthMonitor(SANDBOX_RESUME_IDLE_PROBE_MS);
@@ -412,6 +413,17 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		if (sandboxDisabledForSession) {
+			await resetSandboxRuntime(ctx, "after /permissions sandbox disable");
+			sandboxState = {
+				kind: "disabled",
+				reason: "disabled by /permissions sandbox disable",
+				fallbackMode: execution.fallbackMode,
+				execution,
+			};
+			return;
+		}
+
 		if (!execution.enabled) {
 			await resetSandboxRuntime(ctx, "after sandbox disabled by config");
 			sandboxState = {
@@ -478,20 +490,23 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function disableSandboxForSession(ctx: ExtensionContext) {
+		sandboxDisabledForSession = true;
 		if (sandboxState.kind === "active" && sandboxRuntime) {
 			await resetSandboxRuntime(ctx, "while disabling");
 		}
 
-		const policy = activePolicy(config, agentName, profileName);
+		const execution = buildSandboxExecution(ctx);
 		sandboxState = {
 			kind: "disabled",
 			reason: "disabled by /permissions sandbox disable",
-			fallbackMode: sandboxFallbackModeForPolicy(policy.mode),
+			fallbackMode: execution.fallbackMode,
+			execution,
 		};
 		clearSandboxEnv();
 	}
 
 	async function enableSandboxForSession(ctx: ExtensionContext) {
+		sandboxDisabledForSession = false;
 		if (sandboxState.kind === "active" && sandboxRuntime) {
 			await resetSandboxRuntime(ctx, "while re-enabling");
 		}
@@ -680,6 +695,7 @@ export default function (pi: ExtensionAPI) {
 		sessionAllows.clear();
 		sessionPathApprovals.length = 0;
 		sessionBashApprovals.length = 0;
+		sandboxDisabledForSession = false;
 		sandboxHealthMonitor.reset();
 		sandboxTmpDir = undefined;
 		sandboxTmpDirEphemeral = false;
@@ -713,6 +729,7 @@ export default function (pi: ExtensionAPI) {
 		sandboxTmpDir = undefined;
 		sandboxTmpDirEphemeral = false;
 		sandboxState = { kind: "inactive", reason: "inactive", fallbackMode: "normal" };
+		sandboxDisabledForSession = false;
 		sandboxHealthMonitor.reset();
 		clearSandboxEnv();
 	});

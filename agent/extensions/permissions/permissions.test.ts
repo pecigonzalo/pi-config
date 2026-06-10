@@ -1021,6 +1021,42 @@ describe("permissions extension sandbox lifecycle", () => {
 		expect(notifications).toContain("Bash sandbox disabled for this session; bash exec mode: local (block-all-bash)");
 	});
 
+	it("keeps the sandbox disabled across the next bash execution", async () => {
+		let now = 0;
+		let initializeCount = 0;
+		const notifications: string[] = [];
+		const wrappedCommands: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			now: () => now,
+			notifications,
+			sandboxManager: {
+				initialize: async () => {
+					initializeCount++;
+				},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					wrappedCommands.push(command);
+					return command;
+				},
+			},
+		});
+		try {
+			await harness.commands.get("permissions")?.handler("sandbox disable", harness.ctx);
+			const bashTool = harness.tools.get("bash");
+			if (!bashTool) throw new Error("bash tool was not registered");
+
+			await bashTool.execute("disabled-sandbox-test", { command: "true" }, undefined, undefined, harness.ctx);
+			await harness.commands.get("permissions")?.handler("sandbox status", harness.ctx);
+		} finally {
+			await harness.restore();
+		}
+
+		expect(initializeCount).toBe(1);
+		expect(wrappedCommands).toEqual([]);
+		expect(notifications).toContain("Bash sandbox: disabled by /permissions sandbox disable; bash exec mode: local");
+	});
+
 	it("runs sandbox repair through reset, initialize, and probe", async () => {
 		let now = 0;
 		let resetCount = 0;
