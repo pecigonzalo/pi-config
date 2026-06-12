@@ -12,8 +12,14 @@
     "timeoutMs": 3000,
     "shell": "bash",
   },
+  // Status filters apply to keys passed to ctx.ui.setStatus(). Supports `*` wildcards.
+  // When `keep` is empty, all statuses are eligible. `hide` wins over `keep`.
+  "statuses": {
+    "keep": [],
+    "hide": [],
+  },
   // Built-in item ids: starship, path, git, agent, model, thinking,
-  // context, tokens, cost, time_spent
+  // context, tokens, cost, time_spent, extension-statuses
   "layouts": {
     "default": {
       "rows": {

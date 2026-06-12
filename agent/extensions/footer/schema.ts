@@ -72,6 +72,21 @@ export const footerLayoutOverrideSchema = z.object({
     .catch(undefined),
 });
 
+export const footerStatusFilterConfigFileSchema = z.object({
+  keep: z
+    .array(z.string().trim().min(1))
+    .describe(
+      "Optional status-key patterns to render. Supports `*` wildcards. When empty or omitted, all statuses are eligible.",
+    )
+    .optional()
+    .catch(undefined),
+  hide: z
+    .array(z.string().trim().min(1))
+    .describe("Status-key patterns to hide. Supports `*` wildcards and wins over `keep`.")
+    .optional()
+    .catch(undefined),
+});
+
 export const footerLayoutsOverrideSchema = z.object({
   default: footerLayoutOverrideSchema.optional().catch(undefined),
   minimal: footerLayoutOverrideSchema.optional().catch(undefined),
@@ -83,6 +98,10 @@ export const footerConfigFileSchema = z.object({
   $schema: z.string().describe("Optional JSON Schema reference used by editors.").optional().catch(undefined),
   layout: footerLayoutNameSchema.describe("Active layout when a session starts.").optional().catch(undefined),
   starship: footerStarshipConfigFileSchema.describe("Starship command settings.").optional().catch(undefined),
+  statuses: footerStatusFilterConfigFileSchema
+    .describe("Filters for extension statuses rendered by the `extension-statuses` item.")
+    .optional()
+    .catch(undefined),
   layouts: footerLayoutsOverrideSchema.describe("Per-layout row and item overrides.").optional().catch(undefined),
 });
 
@@ -93,6 +112,11 @@ export const footerStarshipSettingsSchema = z.object({
   shell: z.string().trim().min(1),
 });
 
+export const footerStatusFilterSettingsSchema = z.object({
+  keep: z.array(z.string().trim().min(1)),
+  hide: z.array(z.string().trim().min(1)),
+});
+
 export const footerLayoutOverrideResolvedSchema = z.object({
   items: z.record(z.string(), footerItemOverrideSchema),
   rows: z.record(z.string(), footerRowOverrideSchema),
@@ -101,6 +125,7 @@ export const footerLayoutOverrideResolvedSchema = z.object({
 export const footerConfigSchema = z.object({
   layout: footerLayoutNameSchema,
   starship: footerStarshipSettingsSchema,
+  statuses: footerStatusFilterSettingsSchema,
   layouts: z.object({
     default: footerLayoutOverrideResolvedSchema.optional(),
     minimal: footerLayoutOverrideResolvedSchema.optional(),
@@ -113,6 +138,7 @@ export type FooterConfigFile = z.infer<typeof footerConfigFileSchema>;
 export type FooterLayoutsOverrideFile = z.infer<typeof footerLayoutsOverrideSchema>;
 export type FooterLayoutOverrideFile = z.infer<typeof footerLayoutOverrideSchema>;
 export type FooterStarshipSettings = z.infer<typeof footerStarshipSettingsSchema>;
+export type FooterStatusFilterSettings = z.infer<typeof footerStatusFilterSettingsSchema>;
 export type FooterItemOverride = z.infer<typeof footerItemOverrideSchema>;
 export type FooterRowOverride = z.infer<typeof footerRowOverrideSchema>;
 export type FooterLayoutOverride = z.infer<typeof footerLayoutOverrideResolvedSchema>;
@@ -125,6 +151,10 @@ export const DEFAULT_FOOTER_CONFIG: FooterConfig = footerConfigSchema.parse({
     command: "starship",
     timeoutMs: 3_000,
     shell: "bash",
+  },
+  statuses: {
+    keep: [],
+    hide: [],
   },
   layouts: {},
 });

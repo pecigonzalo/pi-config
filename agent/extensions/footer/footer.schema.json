@@ -35,20 +35,33 @@
       "additionalProperties": false,
       "description": "Starship command settings."
     },
+    "statuses": {
+      "type": "object",
+      "properties": {
+        "keep": {
+          "$ref": "#/$defs/__schema4"
+        },
+        "hide": {
+          "$ref": "#/$defs/__schema6"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Filters for extension statuses rendered by the `extension-statuses` item."
+    },
     "layouts": {
       "type": "object",
       "properties": {
         "default": {
-          "$ref": "#/$defs/__schema4"
+          "$ref": "#/$defs/__schema8"
         },
         "minimal": {
-          "$ref": "#/$defs/__schema10"
+          "$ref": "#/$defs/__schema14"
         },
         "compact": {
-          "$ref": "#/$defs/__schema11"
+          "$ref": "#/$defs/__schema15"
         },
         "full": {
-          "$ref": "#/$defs/__schema12"
+          "$ref": "#/$defs/__schema16"
         }
       },
       "additionalProperties": false,
@@ -78,38 +91,60 @@
       "description": "Value passed as STARSHIP_SHELL."
     },
     "__schema4": {
-      "$ref": "#/$defs/__schema5"
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/__schema5"
+      },
+      "description": "Optional status-key patterns to render. Supports `*` wildcards. When empty or omitted, all statuses are eligible."
     },
     "__schema5": {
+      "type": "string",
+      "minLength": 1
+    },
+    "__schema6": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/__schema7"
+      },
+      "description": "Status-key patterns to hide. Supports `*` wildcards and wins over `keep`."
+    },
+    "__schema7": {
+      "type": "string",
+      "minLength": 1
+    },
+    "__schema8": {
+      "$ref": "#/$defs/__schema9"
+    },
+    "__schema9": {
       "type": "object",
       "properties": {
         "items": {
           "type": "object",
           "propertyNames": {
-            "$ref": "#/$defs/__schema6"
+            "$ref": "#/$defs/__schema10"
           },
           "additionalProperties": {
-            "$ref": "#/$defs/__schema7"
+            "$ref": "#/$defs/__schema11"
           },
           "description": "Per-item overrides keyed by item id."
         },
         "rows": {
           "type": "object",
           "propertyNames": {
-            "$ref": "#/$defs/__schema8"
+            "$ref": "#/$defs/__schema12"
           },
           "additionalProperties": {
-            "$ref": "#/$defs/__schema9"
+            "$ref": "#/$defs/__schema13"
           },
           "description": "Per-row overrides keyed by row id."
         }
       },
       "additionalProperties": false
     },
-    "__schema6": {
+    "__schema10": {
       "type": "string"
     },
-    "__schema7": {
+    "__schema11": {
       "default": {},
       "type": "object",
       "properties": {
@@ -142,10 +177,10 @@
       },
       "additionalProperties": false
     },
-    "__schema8": {
+    "__schema12": {
       "type": "string"
     },
-    "__schema9": {
+    "__schema13": {
       "default": {},
       "type": "object",
       "properties": {
@@ -170,14 +205,14 @@
       },
       "additionalProperties": false
     },
-    "__schema10": {
-      "$ref": "#/$defs/__schema5"
+    "__schema14": {
+      "$ref": "#/$defs/__schema9"
     },
-    "__schema11": {
-      "$ref": "#/$defs/__schema5"
+    "__schema15": {
+      "$ref": "#/$defs/__schema9"
     },
-    "__schema12": {
-      "$ref": "#/$defs/__schema5"
+    "__schema16": {
+      "$ref": "#/$defs/__schema9"
     }
   },
   "$id": "https://pi.local/schemas/footer.schema.json",

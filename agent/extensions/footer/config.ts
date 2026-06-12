@@ -14,6 +14,7 @@ import {
   type FooterLayoutOverrideFile,
   type FooterRowOverride,
   type FooterStarshipSettings,
+  type FooterStatusFilterSettings,
 } from "./schema";
 
 export type {
@@ -23,6 +24,7 @@ export type {
   FooterLayoutOverride,
   FooterRowOverride,
   FooterStarshipSettings,
+  FooterStatusFilterSettings,
 } from "./schema";
 
 export interface FooterConfigDiagnostic {
@@ -213,6 +215,10 @@ function mergeFooterConfig(base: FooterConfig, override: FooterConfigFile): Foot
       timeoutMs: override.starship?.timeoutMs ?? base.starship.timeoutMs,
       shell: override.starship?.shell ?? base.starship.shell,
     },
+    statuses: {
+      keep: override.statuses?.keep ?? base.statuses.keep,
+      hide: override.statuses?.hide ?? base.statuses.hide,
+    },
     layouts: mergeLayouts(base.layouts, override.layouts),
   });
 }
@@ -257,6 +263,10 @@ export class FooterConfigController {
 
   getStarshipSettings(): FooterStarshipSettings {
     return this.config.starship;
+  }
+
+  getStatusFilter(): FooterStatusFilterSettings {
+    return this.config.statuses;
   }
 
   resolvePlacement(

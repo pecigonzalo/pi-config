@@ -9,7 +9,7 @@ other extensions, and can use the Starship CLI for the left side.
 - Rows are split into sections: `a`, `b`, `c`, `x`, `y`, `z`
 - Built-in layouts: `default`, `minimal`, `compact`, `full`
 - Built-in items: `starship`, `path`, `git`, `agent`, `model`, `thinking`,
-  `context`, `tokens`, `cost`, `time_spent`
+  `context`, `tokens`, `cost`, `time_spent`, `extension-statuses`
 - Shipped defaults live in `agent/extensions/footer/footer.jsonc`
 - User overrides live in `~/.pi/agent/footer.jsonc`
 - Project-local overrides live in `<project>/.pi/footer.jsonc`
@@ -108,6 +108,10 @@ Example:
     "timeoutMs": 3000,
     "shell": "bash",
   },
+  "statuses": {
+    "keep": [],
+    "hide": ["langfuse", "task*"],
+  },
   "layouts": {
     "default": {
       "rows": {
@@ -145,11 +149,35 @@ Example:
 - `starship.command`: command to execute
 - `starship.timeoutMs`: subprocess timeout
 - `starship.shell`: value passed as `STARSHIP_SHELL`
+- `statuses.keep`: optional status-key patterns to render; supports `*` wildcards. When empty, all statuses are eligible.
+- `statuses.hide`: status-key patterns to hide; supports `*` wildcards and wins over `keep`.
 - `layouts.<name>.rows.<rowId>`: override row separators (`itemSeparator`,
   `sectionSeparator`, optional `rightSectionSeparator`) and order, or add a
   new custom row
 - `layouts.<name>.items.<itemId>`: override `enabled`, `row`, `section`,
   `order`
+
+## Status filters
+
+The `extension-statuses` item renders texts set by other extensions through `ctx.ui.setStatus(key, text)`. Use `statuses.keep` and `statuses.hide` to select which status keys appear in the footer.
+
+Examples:
+
+```jsonc
+{
+  "statuses": {
+    "hide": ["langfuse", "task*"],
+  },
+}
+```
+
+```jsonc
+{
+  "statuses": {
+    "keep": ["permissions", "tasks.rpc.*.status.permissions"],
+  },
+}
+```
 
 ## Custom rows
 
@@ -202,6 +230,7 @@ If Starship is missing or fails, the footer falls back to the built-in
 - `tokens`
 - `cost`
 - `time_spent`
+- `extension-statuses`
 
 ## See also
 

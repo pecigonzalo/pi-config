@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext, ReadonlyFooterDataProvider } from "@earendil-works/pi-coding-agent";
+import type { FooterConfigController, FooterStatusFilterSettings } from "../config";
 import { renderFooterLines } from "./layout";
 import type {
   FooterActivateLayoutEventPayload,
@@ -27,8 +28,36 @@ function sanitizeStatusText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
-function formatExtensionStatuses(statuses: ReadonlyMap<string, string>): string | null {
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function matchesStatusPattern(key: string, pattern: string): boolean {
+  if (pattern === key) return true;
+  if (!pattern.includes("*")) return false;
+
+  const source = pattern
+    .split("*")
+    .map((part) => escapeRegExp(part))
+    .join(".*");
+  return new RegExp(`^${source}$`).test(key);
+}
+
+function matchesAnyStatusPattern(key: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => matchesStatusPattern(key, pattern));
+}
+
+function shouldRenderStatus(key: string, filter: FooterStatusFilterSettings): boolean {
+  if (matchesAnyStatusPattern(key, filter.hide)) return false;
+  return filter.keep.length === 0 || matchesAnyStatusPattern(key, filter.keep);
+}
+
+function formatExtensionStatuses(
+  statuses: ReadonlyMap<string, string>,
+  filter: FooterStatusFilterSettings,
+): string | null {
   const text = [...statuses.entries()]
+    .filter(([key]) => shouldRenderStatus(key, filter))
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([, status]) => sanitizeStatusText(status))
     .filter(Boolean)
@@ -36,13 +65,24 @@ function formatExtensionStatuses(statuses: ReadonlyMap<string, string>): string 
   return text || null;
 }
 
-function createExtensionStatusItem(footerData: ReadonlyFooterDataProvider): FooterItem {
+function createExtensionStatusItem(
+  footerData: ReadonlyFooterDataProvider,
+  config: FooterConfigController,
+): FooterItem {
   return {
     owner: "footer",
     id: "extension-statuses",
-    getPlacement: () => ({ row: "context", section: "z", order: 1000 }),
+    getPlacement: (layoutName) =>
+      config.resolvePlacement("extension-statuses", layoutName, {
+        row: "context",
+        section: "z",
+        order: 1000,
+      }),
     render: ({ theme }) => {
-      const statuses = formatExtensionStatuses(footerData.getExtensionStatuses());
+      const statuses = formatExtensionStatuses(
+        footerData.getExtensionStatuses(),
+        config.getStatusFilter(),
+      );
       return statuses ? theme.fg("dim", statuses) : null;
     },
   };
@@ -55,7 +95,10 @@ export class FooterManager {
   private currentCtx: ExtensionContext | undefined;
   private requestRender: (() => void) | undefined;
 
-  constructor(private readonly pi: ExtensionAPI) {
+  constructor(
+    private readonly pi: ExtensionAPI,
+    private readonly config: FooterConfigController,
+  ) {
     this.pi.events.on(FOOTER_REGISTER_EVENT, (payload) => {
       const { item } = payload as FooterRegisterEventPayload;
       this.registerItem(item);
@@ -139,7 +182,7 @@ export class FooterManager {
     ctx.ui.setFooter((_tui, theme, footerData) => {
       const nextRequestRender = () => _tui.requestRender();
       this.requestRender = nextRequestRender;
-      const extensionStatusItem = createExtensionStatusItem(footerData);
+      const extensionStatusItem = createExtensionStatusItem(footerData, this.config);
 
       return {
         render: (width: number): string[] => {
@@ -206,5 +249,7 @@ export class FooterManager {
 
 export const __test__ = {
   formatExtensionStatuses,
+  matchesStatusPattern,
   sanitizeStatusText,
+  shouldRenderStatus,
 };

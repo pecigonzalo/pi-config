@@ -12,7 +12,7 @@ import { createStarshipController } from "./starship";
 
 export default function footer(pi: ExtensionAPI) {
   const config = new FooterConfigController();
-  const footerManager = new FooterManager(pi);
+  const footerManager = new FooterManager(pi, config);
   footerManager.setLayouts(footerLayouts);
 
   const sessionContext = createSessionContextController(pi);
