@@ -25,6 +25,7 @@ import {
 	getSandboxTmpDirMode,
 	getWorkspaceWritePaths,
 	isSandboxWriteAllowedForPath,
+	matchSandboxBypassCommand,
 	runSandboxedCommand,
 	SandboxRuntimeAdapter,
 } from "./sandbox";
@@ -179,6 +180,24 @@ describe("permissions config merge", () => {
 		} finally {
 			if (old === undefined) delete process.env.PI_PACKAGE_DIR;
 			else process.env.PI_PACKAGE_DIR = old;
+		}
+	});
+
+	it("interpolates environment variables in sandbox bypass commands as regex literals", () => {
+		const old = process.env.PI_TEST_HOST;
+		process.env.PI_TEST_HOST = "localhost:5173";
+		try {
+			const config = configModule.interpolateConfig({
+				sandbox: {
+					bypassCommands: ["^bunx\\s+@playwright/cli@latest\\s+open\\s+http://${PI_TEST_HOST}$"],
+				},
+			});
+			expect(config.sandbox?.bypassCommands).toEqual(["^bunx\\s+@playwright/cli@latest\\s+open\\s+http://localhost:5173$"]);
+			expect(matchSandboxBypassCommand("bunx @playwright/cli@latest open http://localhost:5173", config.sandbox?.bypassCommands)).toBe(config.sandbox?.bypassCommands?.[0]);
+			expect(matchSandboxBypassCommand("bunx @playwright/cli@latest open http://localhostX5173", config.sandbox?.bypassCommands)).toBeUndefined();
+		} finally {
+			if (old === undefined) delete process.env.PI_TEST_HOST;
+			else process.env.PI_TEST_HOST = old;
 		}
 	});
 
@@ -470,6 +489,30 @@ describe("codemode policy", () => {
 		expect(resolved.mode).toBe("workspace-write");
 		expect(resolved.capabilities).toEqual(["message", "artifact", "task", "todo"]);
 		expect(resolved.sandbox.enabled).toBe(true);
+	});
+});
+
+describe("sandbox command bypass matching", () => {
+	it("matches explicit localhost Playwright commands only", () => {
+		const patterns = ["^bunx\\s+@playwright/cli(@[^\\s]+)?\\s+--browser\\s+firefox\\s+open\\s+https?://localhost(?::[0-9]+)?(?:/[^\\s]*)?\\s*$"];
+
+		expect(matchSandboxBypassCommand(
+			"bunx @playwright/cli@latest --browser firefox open http://localhost:5173",
+			patterns,
+		)).toBe(patterns[0]);
+		expect(matchSandboxBypassCommand(
+			"bunx @playwright/cli@latest --browser chromium open http://localhost:5173",
+			patterns,
+		)).toBeUndefined();
+		expect(matchSandboxBypassCommand(
+			"bunx @playwright/cli@latest --browser firefox open https://example.com",
+			patterns,
+		)).toBeUndefined();
+	});
+
+	it("supports simple bash-prefix bypass patterns", () => {
+		expect(matchSandboxBypassCommand("open http://localhost:5173", ["open *"])).toBe("open *");
+		expect(matchSandboxBypassCommand("printf open", ["open *"])).toBeUndefined();
 	});
 });
 
@@ -919,6 +962,7 @@ describe("permissions extension sandbox lifecycle", () => {
 
 	async function setupPermissionsHarness(options: {
 		mode: "plan" | "workspace-write" | "full-access";
+		sandbox?: Record<string, unknown>;
 		sandboxManager: { initialize: () => Promise<void>; reset: () => Promise<void>; wrapWithSandbox: (command: string) => Promise<string> };
 		now: () => number;
 		notifications?: string[];
@@ -930,7 +974,10 @@ describe("permissions extension sandbox lifecycle", () => {
 		await fs.mkdir(path.join(cwd, ".pi"), { recursive: true });
 		await fs.writeFile(
 			path.join(cwd, ".pi", "permissions.jsonc"),
-			JSON.stringify({ default: { mode: options.mode }, sandbox: { enabled: true, tmpDir: sandboxTmpDir } }),
+			JSON.stringify({
+				default: { mode: options.mode },
+				sandbox: { enabled: true, tmpDir: sandboxTmpDir, ...(options.sandbox ?? {}) },
+			}),
 			"utf8",
 		);
 		mock.module("@anthropic-ai/sandbox-runtime", () => ({ SandboxManager: options.sandboxManager }));
@@ -1055,6 +1102,65 @@ describe("permissions extension sandbox lifecycle", () => {
 		expect(initializeCount).toBe(1);
 		expect(wrappedCommands).toEqual([]);
 		expect(notifications).toContain("Bash sandbox: disabled by /permissions sandbox disable; bash exec mode: local");
+	});
+
+	it("runs matching sandbox bypass tool commands without wrapping them", async () => {
+		let now = 0;
+		const notifications: string[] = [];
+		const wrappedCommands: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			sandbox: { bypassCommands: ["^printf\\s+bypass$"] },
+			now: () => now,
+			notifications,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					wrappedCommands.push(command);
+					return command;
+				},
+			},
+		});
+		try {
+			const bashTool = harness.tools.get("bash");
+			if (!bashTool) throw new Error("bash tool was not registered");
+
+			await bashTool.execute("bypass-test", { command: "printf bypass" }, undefined, undefined, harness.ctx);
+		} finally {
+			await harness.restore();
+		}
+
+		expect(wrappedCommands).toEqual([]);
+		expect(notifications).toContain("Bash sandbox bypassed for command matching: ^printf\\s+bypass$");
+	});
+
+	it("keeps non-matching commands sandboxed when bypasses are configured", async () => {
+		let now = 0;
+		const wrappedCommands: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			sandbox: { bypassCommands: ["^printf\\s+bypass$"] },
+			now: () => now,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					wrappedCommands.push(command);
+					return command;
+				},
+			},
+		});
+		try {
+			const bashTool = harness.tools.get("bash");
+			if (!bashTool) throw new Error("bash tool was not registered");
+
+			await bashTool.execute("sandboxed-test", { command: "printf sandboxed" }, undefined, undefined, harness.ctx);
+		} finally {
+			await harness.restore();
+		}
+
+		expect(wrappedCommands).toContain("printf sandboxed");
 	});
 
 	it("runs sandbox repair through reset, initialize, and probe", async () => {
@@ -1290,6 +1396,39 @@ describe("permissions extension sandbox lifecycle", () => {
 		} finally {
 			await harness.restore();
 		}
+	});
+
+	it("runs matching user bash bypass commands without wrapping them", async () => {
+		let now = 0;
+		const notifications: string[] = [];
+		const wrappedCommands: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			sandbox: { bypassCommands: ["^printf\\s+user-bypass$"] },
+			now: () => now,
+			notifications,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					wrappedCommands.push(command);
+					return command;
+				},
+			},
+		});
+		try {
+			const userBash = harness.handlers.get("user_bash")?.[0];
+			if (!userBash) throw new Error("user_bash handler was not registered");
+			const result = await userBash({ command: "printf user-bypass", excludeFromContext: false, cwd: harness.cwd }, harness.ctx) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
+
+			expect(result?.operations).toBeDefined();
+			await result!.operations!.exec("printf user-bypass", harness.cwd, { onData: () => {} });
+		} finally {
+			await harness.restore();
+		}
+
+		expect(wrappedCommands).toEqual([]);
+		expect(notifications).toContain("Bash sandbox bypassed for command matching: ^printf\\s+user-bypass$");
 	});
 
 	it("runs user bash through active sandbox operations", async () => {

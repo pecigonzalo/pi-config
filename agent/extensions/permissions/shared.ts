@@ -116,6 +116,7 @@ export interface SandboxSettings {
 	allowLocalBinding?: boolean;
 	allowMachLookup?: string[];
 	allowPty?: boolean;
+	bypassCommands?: string[];
 	allowWrite?: string[];
 	denyRead?: string[];
 	denyWrite?: string[];

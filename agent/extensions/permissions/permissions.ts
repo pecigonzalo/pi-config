@@ -127,6 +127,7 @@ import {
 	getEffectiveSandboxTmpDir,
 	getSandboxTmpDirMode,
 	isSandboxWriteAllowedForPath,
+	matchSandboxBypassCommand,
 	SandboxRuntimeAdapter,
 } from "./sandbox";
 import {
@@ -191,6 +192,7 @@ export default function (pi: ExtensionAPI) {
 		env?: Record<string, string>;
 		warnings: string[];
 		fallbackMode: SandboxBashFallbackMode;
+		bypassCommands: string[];
 	};
 	type SandboxState =
 		| { kind: "inactive"; reason: string; fallbackMode: SandboxBashFallbackMode; execution?: SandboxExecution }
@@ -239,6 +241,15 @@ export default function (pi: ExtensionAPI) {
 		return sandboxState.execution?.config;
 	}
 
+	function sandboxBypassMatch(command: string, execution: SandboxExecution): string | undefined {
+		return matchSandboxBypassCommand(command, execution.bypassCommands);
+	}
+
+	function notifySandboxBypass(ctx: ExtensionContext, match: string) {
+		if (!ctx.hasUI) return;
+		ctx.ui.notify(`Bash sandbox bypassed for command matching: ${match}`, "warning");
+	}
+
 	let ensureSandboxHealthyAfterIdle: (ctx: ExtensionContext, execution: SandboxExecution, runtime: SandboxRuntimeAdapter, signal?: AbortSignal) => Promise<void> = async () => {};
 
 	pi.registerTool({
@@ -252,6 +263,11 @@ export default function (pi: ExtensionAPI) {
 				active = activeSandboxState();
 			}
 			if (!active || !sandboxRuntime) {
+				return localBash.execute(id, params, signal, onUpdate);
+			}
+			const bypassMatch = sandboxBypassMatch(params.command, active.execution);
+			if (bypassMatch) {
+				notifySandboxBypass(ctx, bypassMatch);
 				return localBash.execute(id, params, signal, onUpdate);
 			}
 			const healthRuntime = sandboxRuntime;
@@ -390,6 +406,7 @@ export default function (pi: ExtensionAPI) {
 			env: config.sandbox?.env,
 			warnings: compiled.warnings,
 			fallbackMode: sandboxFallbackModeForPolicy(policy.mode),
+			bypassCommands: config.sandbox?.bypassCommands ?? [],
 		};
 	}
 
@@ -1224,6 +1241,11 @@ export default function (pi: ExtensionAPI) {
 				const healthRuntime = sandboxRuntime;
 				const healthExecution = active?.execution;
 				if (!healthRuntime || !healthExecution) {
+					return createLocalBashOperations().exec(command, cwd, options);
+				}
+				const bypassMatch = sandboxBypassMatch(command, healthExecution);
+				if (bypassMatch) {
+					notifySandboxBypass(ctx, bypassMatch);
 					return createLocalBashOperations().exec(command, cwd, options);
 				}
 				return runSandboxedCommandAfterHealthCheck({

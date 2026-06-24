@@ -11,7 +11,7 @@ import {
 	type SandboxSettings,
 	dedupeStrings,
 } from "./shared";
-import { resolveToken } from "./matching";
+import { resolveToken, ruleMatch } from "./matching";
 import { getProtectedResourceSandboxDenySpec, type ProtectedResourceAccess } from "./protected-resources";
 
 /**
@@ -491,6 +491,13 @@ function compileSandboxNetworkConfig(
 		deniedDomains: dedupeStrings(explicitDeniedDomains ?? []),
 		...commonNetworkConfig,
 	};
+}
+
+export function matchSandboxBypassCommand(command: string, bypassCommands: string[] | undefined): string | undefined {
+	for (const pattern of bypassCommands ?? []) {
+		if (ruleMatch({ tool: "bash", match: pattern, action: "allow" }, "bash", command)) return pattern;
+	}
+	return undefined;
 }
 
 export function compileSandboxConfig(
