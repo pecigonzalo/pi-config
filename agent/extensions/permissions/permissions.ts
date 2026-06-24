@@ -247,12 +247,32 @@ export default function (pi: ExtensionAPI) {
 		return patterns.map((pattern) => `/${pattern}/`).join(" | ");
 	}
 
-	function sandboxBypassMatch(command: string, execution: SandboxExecution): string | undefined {
+	function sandboxBypassReasonForRule(rule: Rule, detail?: string): string {
+		const ruleText = rule.match ? `sandbox=false rule ${formatRuleMatch(rule)}` : "sandbox=false catch-all rule";
+		return detail ? `${ruleText} (${detail})` : ruleText;
+	}
+
+	async function sandboxBypassMatch(command: string, execution: SandboxExecution): Promise<string | undefined> {
 		const policy = activePolicy(config, agentName, profileName);
 		const rule = matchRule(policy.rules, "bash", { command });
 		if (rule?.sandbox === false && rule.action !== "block") {
-			return rule.match ? `sandbox=false rule ${formatRuleMatch(rule)}` : "sandbox=false catch-all rule";
+			return sandboxBypassReasonForRule(rule);
 		}
+
+		if (treeSitterReady) {
+			try {
+				const parsed = await parseBashCommand(command);
+				for (const parsedCommand of parsed.commands) {
+					const parsedRule = matchRule(policy.rules, "bash", { command: parsedCommand.source });
+					if (parsedRule?.sandbox === false && parsedRule.action !== "block") {
+						return sandboxBypassReasonForRule(parsedRule, "matched shell segment");
+					}
+				}
+			} catch {
+				// Keep the existing whole-command matching behavior if parsing fails.
+			}
+		}
+
 		return matchSandboxBypassCommand(command, execution.bypassCommands);
 	}
 
@@ -276,7 +296,7 @@ export default function (pi: ExtensionAPI) {
 			if (!active || !sandboxRuntime) {
 				return localBash.execute(id, params, signal, onUpdate);
 			}
-			const bypassMatch = sandboxBypassMatch(params.command, active.execution);
+			const bypassMatch = await sandboxBypassMatch(params.command, active.execution);
 			if (bypassMatch) {
 				notifySandboxBypass(ctx, bypassMatch);
 				return localBash.execute(id, params, signal, onUpdate);
@@ -1248,13 +1268,13 @@ export default function (pi: ExtensionAPI) {
 		if (!active || !sandboxRuntime) return undefined;
 
 		return {
-			exec: (command, cwd, options) => {
+			exec: async (command, cwd, options) => {
 				const healthRuntime = sandboxRuntime;
 				const healthExecution = active?.execution;
 				if (!healthRuntime || !healthExecution) {
 					return createLocalBashOperations().exec(command, cwd, options);
 				}
-				const bypassMatch = sandboxBypassMatch(command, healthExecution);
+				const bypassMatch = await sandboxBypassMatch(command, healthExecution);
 				if (bypassMatch) {
 					notifySandboxBypass(ctx, bypassMatch);
 					return createLocalBashOperations().exec(command, cwd, options);

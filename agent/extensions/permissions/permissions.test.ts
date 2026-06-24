@@ -1217,6 +1217,43 @@ describe("permissions extension sandbox lifecycle", () => {
 		expect(wrappedCommands).toContain("printf sandboxed");
 	});
 
+	it("runs compound bash commands outside the sandbox when a parsed segment has sandbox=false", async () => {
+		let now = 0;
+		const notifications: string[] = [];
+		const wrappedCommands: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			rules: [{ tool: "bash", match: "printf bypass *", action: "allow", sandbox: false }],
+			now: () => now,
+			notifications,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					wrappedCommands.push(command);
+					return command;
+				},
+			},
+		});
+		try {
+			const bashTool = harness.tools.get("bash");
+			if (!bashTool) throw new Error("bash tool was not registered");
+
+			await bashTool.execute(
+				"compound-bypass-test",
+				{ command: "set -euo pipefail\nprintf setup\nprintf bypass >/tmp/mcpc.json\nprintf done" },
+				undefined,
+				undefined,
+				harness.ctx,
+			);
+		} finally {
+			await harness.restore();
+		}
+
+		expect(wrappedCommands).toEqual([]);
+		expect(notifications).toContain("Bash sandbox bypassed for command matching: sandbox=false rule /printf bypass */ (matched shell segment)");
+	});
+
 	it("runs sandbox repair through reset, initialize, and probe", async () => {
 		let now = 0;
 		let resetCount = 0;
