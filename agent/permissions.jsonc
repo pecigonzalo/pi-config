@@ -212,6 +212,36 @@
         "action": "allow",
       },
       // ── Bash: ask for direct code execution / ephemeral executors ────────────
+      // sandbox=false still applies normal permission checks, but executes the
+      // approved command outside the OS sandbox for GUI/MCP process trees.
+      {
+        "tool": "bash",
+        "match": "bunx @playwright/cli *",
+        "action": "ask",
+        "sandbox": false,
+        "reason": "Browser automation process trees cannot be usefully sandboxed",
+      },
+      {
+        "tool": "bash",
+        "match": "bunx @playwright/mcp *",
+        "action": "ask",
+        "sandbox": false,
+        "reason": "Browser automation process trees cannot be usefully sandboxed",
+      },
+      {
+        "tool": "bash",
+        "match": "bunx playwright *",
+        "action": "ask",
+        "sandbox": false,
+        "reason": "Browser automation process trees cannot be usefully sandboxed",
+      },
+      {
+        "tool": "bash",
+        "match": "bunx @apify/mcpc *",
+        "action": "allow",
+        "sandbox": false,
+        "reason": "mcpc manages persistent MCP sessions outside the workspace sandbox",
+      },
       {
         "tool": "bash",
         "match": "^go\\s+(run|generate)\\b",
@@ -475,9 +505,8 @@
   //   // com.apple.SystemConfiguration.configd by default when network=true
   //   // so c-ares-based tools (for example Nix curl) can read DNS settings.
   //   "allowMachLookup": ["com.example.service"],
-  //   // Command patterns that bypass only the OS sandbox after normal
-  //   // permission checks pass. Use narrow patterns for GUI/browser launchers.
-  //   "bypassCommands": ["^bunx\\s+@playwright/cli"],
+  //   // Per-rule `sandbox: false` can bypass only the OS sandbox after normal
+  //   // permission checks pass. Use narrow bash rules for GUI/browser launchers.
   //   "addAllowWrite": ["/tmp"],
   //   "denyRead": ["~/.ssh", "~/.aws", "~/.gnupg"],
   //   "denyWrite": [".env", ".env.*", "*.pem", "*.key"]
@@ -487,13 +516,6 @@
     "enableWeakerNetworkIsolation": true,
     "allowSshAuthSock": true,
     "allowLocalBinding": true,
-    // Commands that still go through permission rules, but execute outside the
-    // OS sandbox after approval. Keep these narrow; this is for GUI tools whose
-    // process tree cannot be usefully sandboxed, such as Playwright launching
-    // local browser windows.
-    "bypassCommands": [
-      "^bunx\\s+(?:@playwright/cli|playwright)(?:@\\S+)?(?:\\s|$)",
-    ],
     "addAllowWrite": ["~/.mcpc", "~/.mcp.json"],
     "denyRead": ["~/.aws", "~/.gnupg"],
   },

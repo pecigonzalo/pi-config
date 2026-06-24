@@ -242,6 +242,11 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function sandboxBypassMatch(command: string, execution: SandboxExecution): string | undefined {
+		const policy = activePolicy(config, agentName, profileName);
+		const rule = matchRule(policy.rules, "bash", { command });
+		if (rule?.sandbox === false && rule.action !== "block") {
+			return rule.match ? `sandbox=false rule /${rule.match}/` : "sandbox=false catch-all rule";
+		}
 		return matchSandboxBypassCommand(command, execution.bypassCommands);
 	}
 

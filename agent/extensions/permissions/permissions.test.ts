@@ -466,6 +466,14 @@ describe("simple matcher shorthand", () => {
 		expect(ruleMatch(rule, "bash", "grep foo src")).toBe(false);
 	});
 
+	it("lets command-prefix shorthand match package version suffixes", () => {
+		const rule = { tool: "bash", match: "bunx @playwright/mcp *", action: "allow" as const };
+		expect(ruleMatch(rule, "bash", "bunx @playwright/mcp@latest --port 3000")).toBe(true);
+		expect(ruleMatch(rule, "bash", "bunx @playwright/mcp --port 3000")).toBe(true);
+		expect(ruleMatch(rule, "bash", "bunx @playwright/mcp-server --port 3000")).toBe(false);
+		expect(ruleMatch(rule, "bash", "echo bunx @playwright/mcp@latest")).toBe(false);
+	});
+
 	it("keeps regex behavior when regex metacharacters are used", () => {
 		const rule = { tool: "bash", match: "^git\\b", action: "allow" as const };
 		expect(ruleMatch(rule, "bash", "git status")).toBe(true);
@@ -973,6 +981,7 @@ describe("permissions extension sandbox lifecycle", () => {
 
 	async function setupPermissionsHarness(options: {
 		mode: "plan" | "workspace-write" | "full-access";
+		rules?: Rule[];
 		sandbox?: Record<string, unknown>;
 		sandboxManager: { initialize: () => Promise<void>; reset: () => Promise<void>; wrapWithSandbox: (command: string) => Promise<string> };
 		now: () => number;
@@ -986,7 +995,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		await fs.writeFile(
 			path.join(cwd, ".pi", "permissions.jsonc"),
 			JSON.stringify({
-				default: { mode: options.mode },
+				default: { mode: options.mode, rules: options.rules },
 				sandbox: { enabled: true, tmpDir: sandboxTmpDir, ...(options.sandbox ?? {}) },
 			}),
 			"utf8",
@@ -1115,13 +1124,13 @@ describe("permissions extension sandbox lifecycle", () => {
 		expect(notifications).toContain("Bash sandbox: disabled by /permissions sandbox disable; bash exec mode: local");
 	});
 
-	it("runs matching sandbox bypass tool commands without wrapping them", async () => {
+	it("runs bash rules with sandbox=false without wrapping them", async () => {
 		let now = 0;
 		const notifications: string[] = [];
 		const wrappedCommands: string[] = [];
 		const harness = await setupPermissionsHarness({
 			mode: "full-access",
-			sandbox: { bypassCommands: ["^printf\\s+bypass$"] },
+			rules: [{ tool: "bash", match: "^printf\\s+bypass$", action: "allow", sandbox: false }],
 			now: () => now,
 			notifications,
 			sandboxManager: {
@@ -1143,15 +1152,15 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 
 		expect(wrappedCommands).toEqual([]);
-		expect(notifications).toContain("Bash sandbox bypassed for command matching: ^printf\\s+bypass$");
+		expect(notifications).toContain("Bash sandbox bypassed for command matching: sandbox=false rule /^printf\\s+bypass$/");
 	});
 
-	it("keeps non-matching commands sandboxed when bypasses are configured", async () => {
+	it("keeps non-matching commands sandboxed when sandbox=false rules are configured", async () => {
 		let now = 0;
 		const wrappedCommands: string[] = [];
 		const harness = await setupPermissionsHarness({
 			mode: "full-access",
-			sandbox: { bypassCommands: ["^printf\\s+bypass$"] },
+			rules: [{ tool: "bash", match: "^printf\\s+bypass$", action: "allow", sandbox: false }],
 			now: () => now,
 			sandboxManager: {
 				initialize: async () => {},
@@ -1409,13 +1418,13 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 	});
 
-	it("runs matching user bash bypass commands without wrapping them", async () => {
+	it("runs user bash rules with sandbox=false without wrapping them", async () => {
 		let now = 0;
 		const notifications: string[] = [];
 		const wrappedCommands: string[] = [];
 		const harness = await setupPermissionsHarness({
 			mode: "full-access",
-			sandbox: { bypassCommands: ["^printf\\s+user-bypass$"] },
+			rules: [{ tool: "bash", match: "^printf\\s+user-bypass$", action: "allow", sandbox: false }],
 			now: () => now,
 			notifications,
 			sandboxManager: {
@@ -1439,7 +1448,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 
 		expect(wrappedCommands).toEqual([]);
-		expect(notifications).toContain("Bash sandbox bypassed for command matching: ^printf\\s+user-bypass$");
+		expect(notifications).toContain("Bash sandbox bypassed for command matching: sandbox=false rule /^printf\\s+user-bypass$/");
 	});
 
 	it("runs user bash through active sandbox operations", async () => {

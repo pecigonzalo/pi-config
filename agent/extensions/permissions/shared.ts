@@ -18,6 +18,8 @@ export interface Rule {
 	action: "allow" | "block" | "ask";
 	reason?: string;
 	externalPathAction?: "inherit" | "allow" | "ask" | "block";
+	/** For bash rules, false runs the command outside the OS sandbox after permission checks pass. */
+	sandbox?: boolean;
 }
 
 export interface AgentProfile {

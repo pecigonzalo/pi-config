@@ -52,7 +52,7 @@ export function bashPrefixMatchesCommand(prefix: string, command: string): boole
 	if (trimmedCommand === trimmedPrefix) return true;
 	if (!trimmedCommand.startsWith(trimmedPrefix)) return false;
 	const boundaryChar = trimmedCommand[trimmedPrefix.length];
-	return boundaryChar !== undefined && /\s/.test(boundaryChar);
+	return boundaryChar !== undefined && (/\s/.test(boundaryChar) || boundaryChar === "@");
 }
 
 export function matchSimpleBashPattern(pattern: string, command: string): boolean {
