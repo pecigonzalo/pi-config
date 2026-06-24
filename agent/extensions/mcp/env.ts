@@ -19,3 +19,8 @@ export function applyMcpEnvironment(cwd: string, sessionId?: string): void {
 	fs.mkdirSync(daemonDir, { recursive: true });
 	process.env.MCPORTER_DAEMON_DIR = daemonDir;
 }
+
+export function applyMcpServerEnvironment(cwd: string, sessionId: string | undefined, serverName: string): void {
+	applyMcpEnvironment(cwd, sessionId);
+	fs.mkdirSync(getMcpServerDir(cwd, sessionId, serverName), { recursive: true });
+}

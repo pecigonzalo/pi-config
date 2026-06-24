@@ -11,7 +11,7 @@ import {
 	type ServerDefinition,
 	type ServerToolInfo,
 } from "mcporter";
-import { applyMcpEnvironment } from "./env";
+import { applyMcpEnvironment, applyMcpServerEnvironment } from "./env";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const STATUS_TIMEOUT_MS = 5_000;
@@ -219,6 +219,15 @@ export class McpService {
 		return this.runtime;
 	}
 
+	private async prepareServerEnvironment(serverName: string): Promise<void> {
+		applyMcpServerEnvironment(this.options.cwd, this.options.sessionId, serverName);
+		const definitions = await loadServerDefinitions({ rootDir: this.options.cwd, configPath: this.configPath });
+		const definition = definitions.find((candidate) => candidate.name === serverName);
+		if (definition?.command.kind === "stdio") {
+			await fs.mkdir(definition.command.cwd, { recursive: true });
+		}
+	}
+
 	async close(): Promise<void> {
 		const runtime = this.runtime;
 		this.runtime = undefined;
@@ -232,6 +241,7 @@ export class McpService {
 	}
 
 	async listTools(input: McpListToolsInput): Promise<ServerToolInfo[]> {
+		await this.prepareServerEnvironment(input.server);
 		const runtime = await this.getRuntime();
 		return await runtime.listTools(input.server, {
 			includeSchema: input.includeSchema ?? false,
@@ -240,6 +250,7 @@ export class McpService {
 	}
 
 	async call(input: McpCallInput): Promise<McpNormalizedCallResult> {
+		await this.prepareServerEnvironment(input.server);
 		const runtime = await this.getRuntime();
 		const raw = await runtime.callTool(input.server, input.tool, {
 			args: input.args ?? {},
@@ -250,11 +261,13 @@ export class McpService {
 	}
 
 	async listResources(input: McpListResourcesInput): Promise<unknown> {
+		await this.prepareServerEnvironment(input.server);
 		const runtime = await this.getRuntime();
 		return await runtime.listResources(input.server, { disableOAuth: input.disableOAuth ?? true });
 	}
 
 	async readResource(input: McpReadResourceInput): Promise<unknown> {
+		await this.prepareServerEnvironment(input.server);
 		const runtime = await this.getRuntime();
 		return await runtime.readResource(input.server, input.uri, { disableOAuth: input.disableOAuth ?? true });
 	}
