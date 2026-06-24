@@ -6,7 +6,7 @@ allowed-tools: Bash(bunx mcporter:*), Bash(npx -y mcporter:*), Read, Grep
 
 # MCP via mcporter
 
-Use Pi's MCP config at `~/.pi/agent/mcp.json` so CLI calls match `mcp_status` and `host.mcp`.
+Use Pi's MCP config at `~/.pi/agent/mcp.json` so CLI calls match `/mcp status` and `host.mcp`.
 
 Prefer:
 
@@ -53,6 +53,22 @@ bunx mcporter --config ~/.pi/agent/mcp.json call 'server.tool(name: "value", opt
 ```
 
 For file-backed text arguments, use `key=@path`.
+
+## TypeScript workflows
+
+For batched or programmatic MCP workflows, prefer the `typescript` tool's `host.mcp` bridge once the relevant server or tool is known:
+
+```ts
+const tools = await host.mcp.listTools({ server: "deep-wiki" });
+const result = await host.mcp.call({
+  server: "deep-wiki",
+  tool: "read_wiki_contents",
+  args: { repoName: "owner/repo" },
+});
+return result.text ?? result.raw;
+```
+
+Use the mcporter CLI for discovery, config, auth, and ad-hoc exploration; use `host.mcp` for composed workflows inside TypeScript.
 
 ## Resources
 

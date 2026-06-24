@@ -962,14 +962,15 @@ export default function (pi: ExtensionAPI) {
 		name: "typescript",
 		label: "TypeScript",
 		description:
-			"Execute one-shot TypeScript in a sandboxed Bun runtime. Best for batched analysis and local data processing. Includes an MVP host bridge for message, artifact, and task operations.",
+			"Execute one-shot TypeScript in a sandboxed Bun runtime. Best for batched analysis, local data processing, and programmatic MCP workflows. Includes an MVP host bridge for message, artifact, MCP, and task operations.",
 		promptSnippet:
-			"Execute one-shot TypeScript in a sandboxed runtime for batched analysis, local data processing, artifact generation, and limited host-orchestrated workflows.",
+			"Execute one-shot TypeScript in a sandboxed runtime for batched analysis, local data processing, MCP workflows, artifact generation, and limited host-orchestrated workflows.",
 		promptGuidelines: [
 			"Use the typescript tool when the task benefits from batching multiple local operations into one scripted execution instead of many step-by-step tool calls.",
 			"Prefer the typescript tool for codebase analysis, structured extraction, summarization over many inputs, and artifact generation.",
 			"Do not use the typescript tool for trivial single-step actions when direct tools are simpler.",
 			"Use the typescript tool with profile \"analysis\" for read/analyze/report tasks and profile \"orchestrator\" only when host bridge operations like task delegation are needed.",
+			"Use the typescript tool's host.mcp methods for batched programmatic MCP workflows once the relevant server or tool is known.",
 			"When using the typescript tool, return a compact result and use artifact writing for larger outputs.",
 		],
 		parameters: CodemodeParams,
