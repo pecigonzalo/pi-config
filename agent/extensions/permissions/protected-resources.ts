@@ -65,9 +65,15 @@ const BUILTIN_PROTECTED_RESOURCES: readonly ProtectedResourceDefinition[] = [
 	},
 	{
 		id: "developer-config-files",
-		match: "(^|[/])\\.(gitconfig|gitmodules|ripgreprc|mcp\\.json)$",
+		match: "(^|[/])\\.(gitconfig|gitmodules|ripgreprc)$",
 		denyWrite: true,
-		sandboxDenyWrite: ["**/.gitconfig", "**/.gitmodules", "**/.ripgreprc", "**/.mcp.json"],
+		sandboxDenyWrite: ["**/.gitconfig", "**/.gitmodules", "**/.ripgreprc"],
+	},
+	{
+		id: "mcp-config-file",
+		match: "(^|[/])\\.mcp\\.json$",
+		denyWrite: true,
+		sandboxDenyWrite: ["**/.mcp.json"],
 	},
 	{
 		id: "editor-directories",

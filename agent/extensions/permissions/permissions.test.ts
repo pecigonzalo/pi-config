@@ -124,6 +124,17 @@ describe("permissions config merge", () => {
 		expect(resolved.denyWrite).toContain("\\.(pem|key|p12|pfx|crt|ca-bundle)$");
 	});
 
+	it("can unprotect the MCP config without unprotecting other developer config files", () => {
+		const resolved = configModule.resolveProtectedResources({
+			protectedResources: {
+				unprotectWrite: ["(^|[/])\\.mcp\\.json$"],
+			},
+		});
+
+		expect(resolved.denyWrite).not.toContain("(^|[/])\\.mcp\\.json$");
+		expect(resolved.denyWrite).toContain("(^|[/])\\.(gitconfig|gitmodules|ripgreprc)$");
+	});
+
 	it("interpolates environment variables in rule matches as regex literals", () => {
 		const old = process.env.PI_PACKAGE_DIR;
 		process.env.PI_PACKAGE_DIR = "/tmp/pi.package";

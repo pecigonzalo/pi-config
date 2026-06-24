@@ -3,6 +3,26 @@
     // Named preset: plan | workspace-write | full-access
     "mode": "workspace-write",
     "rules": [
+      // Allow the global MCP config to be managed from this Pi config workspace.
+      // Protected resources are still enabled globally; only this file is unprotected below.
+      {
+        "tool": "read",
+        "match": "^${HOME}/\\.mcp\\.json$",
+        "action": "allow",
+        "externalPathAction": "allow",
+      },
+      {
+        "tool": "write",
+        "match": "^${HOME}/\\.mcp\\.json$",
+        "action": "allow",
+        "externalPathAction": "allow",
+      },
+      {
+        "tool": "edit",
+        "match": "^${HOME}/\\.mcp\\.json$",
+        "action": "allow",
+        "externalPathAction": "allow",
+      },
       // ── Read: protect secrets and credentials ───────────────────────────────
       // Allow Pi's own shipped docs/examples without approving the changing bunx path.
       {
@@ -322,6 +342,11 @@
   //   "unprotectRead": ["\\.env(\\..+)?$"],
   //   "unprotectWrite": ["(^|[/])\\.git/(hooks/|config$)"]
   // },
+  "protectedResources": {
+    "enabled": true,
+    "defaults": true,
+    "unprotectWrite": ["(^|[/])\\.mcp\\.json$"],
+  },
   "profiles": {
     "read-only": {
       "inherit": true,
