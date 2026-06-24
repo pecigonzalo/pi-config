@@ -1197,7 +1197,7 @@ export default function (pi: ExtensionAPI) {
 		if (fallbackMode === "ask-all-bash") {
 			return askPermission("bash", input, "Sandbox unavailable: confirmation required for all bash commands", projectRoot, ctx) as Promise<{ block: true; reason: string } | undefined>;
 		}
-		const dangerousReason = detectDangerousBashPattern(command);
+		const dangerousReason = parsedBash ? undefined : detectDangerousBashPattern(command);
 		if (dangerousReason) {
 			return askPermission("bash", input, dangerousReason, projectRoot, ctx) as Promise<{ block: true; reason: string } | undefined>;
 		}

@@ -69,7 +69,7 @@ const ARITY: Record<string, number> = {
 	// Basic Unix
 	cat: 1, cd: 1, chmod: 1, chown: 1, cp: 1, echo: 1, env: 1, export: 1,
 	grep: 1, head: 1, kill: 1, killall: 1, ln: 1, ls: 1, mkdir: 1, mv: 1,
-	ps: 1, pwd: 1, rm: 1, rmdir: 1, sleep: 1, sort: 1, source: 1, tail: 1,
+	ps: 1, pwd: 1, rm: 1, rmdir: 1, set: 1, sleep: 1, sort: 1, source: 1, tail: 1,
 	tee: 1, touch: 1, uniq: 1, unset: 1, wc: 1, which: 1,
 	// Build tools
 	make: 2, task: 2, just: 2,
@@ -124,8 +124,7 @@ export function arityPrefix(tokens: string[]): string[] {
 // Node types that indicate complex/dangerous constructs beyond simple commands
 const COMPLEX_NODE_TYPES = new Set([
 	"for_statement", "while_statement", "if_statement", "case_statement",
-	"subshell", "command_substitution", "process_substitution",
-	"function_definition", "c_style_for_statement",
+	"subshell", "function_definition", "c_style_for_statement",
 ]);
 
 function isComplexNode(node: any): boolean {
@@ -172,12 +171,29 @@ function unquote(text: string): string {
 	return text;
 }
 
+/** Recursively collect nested `command` nodes below an already-collected command. */
+function collectNestedCommands(node: any): any[] {
+	const result: any[] = [];
+	for (let i = 0; i < node.childCount; i++) {
+		const child = node.child(i);
+		if (!child) continue;
+		if (child.type === "command") {
+			result.push(child);
+			result.push(...collectNestedCommands(child));
+			continue;
+		}
+		result.push(...collectNestedCommands(child));
+	}
+	return result;
+}
+
 /** Recursively collect all `command` nodes from an AST */
 function collectCommands(node: any): any[] {
 	const result: any[] = [];
 	if (node.type === "command") {
 		result.push(node);
-		return result; // don't descend into command children
+		result.push(...collectNestedCommands(node));
+		return result;
 	}
 	for (let i = 0; i < node.childCount; i++) {
 		const child = node.child(i);

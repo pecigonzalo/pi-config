@@ -133,7 +133,7 @@
       // - "rg *" => command-prefix match ("rg" or "rg ...")
       {
         "tool": "bash",
-        "match": "^set\\s+-euo\\s+pipefail\\s*$",
+        "match": "^set\\s+(?:-euo\\s+pipefail|-o\\s+pipefail)\\s*$",
         "action": "allow",
       },
       {

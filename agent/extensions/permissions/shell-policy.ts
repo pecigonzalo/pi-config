@@ -26,6 +26,21 @@ export function detectDangerousBashPattern(command: string): string | undefined 
 	return undefined;
 }
 
+function detectDangerousParsedCommand(cmd: ParsedCommand): string | undefined {
+	const name = cmd.name.toLowerCase();
+	if (name === "rm") return "Deletes files";
+	if (name === "mv") return "Moves or renames";
+	if (name === "sudo") return "Elevated privileges";
+	if (name === "chmod" || name === "chown") return "Changes permissions or ownership";
+	if (name === "kill") return "Terminates processes";
+	if (name === "curl") {
+		return /\bcurl\b.+(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|PUT|DELETE|PATCH))/i.test(cmd.source)
+			? "HTTP write operation"
+			: undefined;
+	}
+	return undefined;
+}
+
 // ── Tree-sitter-based policy functions ────────────────────────────────────────
 // These operate on a pre-parsed AST (ParsedBash) from shell-parse.ts.
 
@@ -33,7 +48,7 @@ export function detectDangerousBashPattern(command: string): string | undefined 
  * Check if a single parsed command is allowed by rules (not dangerous, rule matches "allow").
  */
 export function isParsedCommandAllowed(cmd: ParsedCommand, rules: Rule[]): boolean {
-	if (detectDangerousBashPattern(cmd.source)) return false;
+	if (detectDangerousParsedCommand(cmd)) return false;
 	const rule = matchRule(rules, "bash", { command: cmd.source });
 	return rule?.action === "allow";
 }

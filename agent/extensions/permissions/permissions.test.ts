@@ -2130,7 +2130,7 @@ describe("tree-sitter shell parsing", () => {
 		const forLoop = await parseBashCommand("for f in *.txt; do echo $f; done");
 		expect(forLoop.isComplex).toBe(true);
 
-		const subshell = await parseBashCommand("echo $(whoami)");
+		const subshell = await parseBashCommand("(whoami)");
 		expect(subshell.isComplex).toBe(true);
 
 		const simple = await parseBashCommand("ls -la");
@@ -2142,6 +2142,13 @@ describe("tree-sitter shell parsing", () => {
 		expect(parsed.commands).toHaveLength(2);
 		expect(commandAt(parsed, 0).name).toBe("echo");
 		expect(commandAt(parsed, 1).name).toBe("grep");
+	});
+
+	it("handles command substitutions as nested commands", async () => {
+		const parsed = await parseBashCommand('echo "$(cat file.txt)"');
+		expect(parsed.isComplex).toBe(false);
+		expect(parsed.commands.map((cmd) => cmd.name)).toEqual(["echo", "cat"]);
+		expect(commandAt(parsed, 1).source).toBe("cat file.txt");
 	});
 
 	it("handles multi-command chains", async () => {
@@ -2220,5 +2227,14 @@ describe("tree-sitter policy integration", () => {
 		expect(parsed.isComplex).toBe(true);
 		expect(isAllParsedCommandsAllowed(parsed, allowRules)).toBe(true);
 		expect(canAutoApproveParsedBash(parsed, allowRules)).toBe(false);
+	});
+
+	it("does not let command substitutions hide unapproved commands", async () => {
+		const parsed = await parseBashCommand('echo "$(rm -rf foo)"');
+		expect(parsed.isComplex).toBe(false);
+		expect(parsed.commands.map((cmd) => cmd.name)).toEqual(["echo", "rm"]);
+		const unapproved = getFirstUnapprovedParsedCommand(parsed, allowRules);
+		expect(unapproved).toBeDefined();
+		expect(unapproved!.name).toBe("rm");
 	});
 });
