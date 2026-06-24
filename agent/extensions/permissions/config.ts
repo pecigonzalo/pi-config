@@ -252,7 +252,7 @@ export function interpolateConfig(config: PermissionsConfig): PermissionsConfig 
 				allowUnixSockets: interpolateStringArray(config.sandbox.allowUnixSockets),
 				allowMachLookup: interpolateStringArray(config.sandbox.allowMachLookup),
 				bypassCommands: interpolateStringArray(config.sandbox.bypassCommands, { regex: true }),
-				allowWrite: interpolateStringArray(config.sandbox.allowWrite),
+				addAllowWrite: interpolateStringArray(config.sandbox.addAllowWrite),
 				denyRead: interpolateStringArray(config.sandbox.denyRead),
 				denyWrite: interpolateStringArray(config.sandbox.denyWrite),
 				env: interpolateStringRecord(config.sandbox.env),

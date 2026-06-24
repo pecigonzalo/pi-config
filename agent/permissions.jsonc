@@ -453,7 +453,7 @@
   //   // Command patterns that bypass only the OS sandbox after normal
   //   // permission checks pass. Use narrow patterns for GUI/browser launchers.
   //   "bypassCommands": ["^bunx\\s+@playwright/cli"],
-  //   "allowWrite": ["/tmp"],
+  //   "addAllowWrite": ["/tmp"],
   //   "denyRead": ["~/.ssh", "~/.aws", "~/.gnupg"],
   //   "denyWrite": [".env", ".env.*", "*.pem", "*.key"]
   // }
@@ -464,11 +464,12 @@
     "allowLocalBinding": true,
     // Commands that still go through permission rules, but execute outside the
     // OS sandbox after approval. Keep these narrow; this is for GUI tools whose
-    // process tree cannot be usefully sandboxed, such as Playwright opening a
-    // local browser window against a localhost dev server.
+    // process tree cannot be usefully sandboxed, such as Playwright launching
+    // local browser windows.
     "bypassCommands": [
-      "^bunx\\s+@playwright/cli(?:@\\S+)?\\s+--browser\\s+firefox\\s+open\\s+https?://(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::[0-9]+)?(?:/[^\\s]*)?\\s*$",
+      "^bunx\\s+(?:@playwright/cli|playwright)(?:@\\S+)?(?:\\s|$)",
     ],
+    "addAllowWrite": ["~/.mcpc", "~/.mcp.json"],
     "denyRead": ["~/.aws", "~/.gnupg"],
   },
 }

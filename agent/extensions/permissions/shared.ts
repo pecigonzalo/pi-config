@@ -117,7 +117,7 @@ export interface SandboxSettings {
 	allowMachLookup?: string[];
 	allowPty?: boolean;
 	bypassCommands?: string[];
-	allowWrite?: string[];
+	addAllowWrite?: string[];
 	denyRead?: string[];
 	denyWrite?: string[];
 	env?: Record<string, string>;

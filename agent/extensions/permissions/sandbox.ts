@@ -415,10 +415,9 @@ function compileSandboxFilesystemConfig(
 		...dockerBuildxWritePaths,
 		...effectiveTmpDirWritePaths,
 	]);
-	const configuredAllowWrite = overrides?.allowWrite
-		? resolveSandboxPathTokens(overrides.allowWrite, cwd)
-		: defaultAllowWrite;
+	const configuredAllowWrite = resolveSandboxPathTokens(overrides?.addAllowWrite ?? [], cwd);
 	const allowWrite = dedupeStrings([
+		...defaultAllowWrite,
 		...configuredAllowWrite,
 		...compatWritePaths,
 		...platformCachePaths,

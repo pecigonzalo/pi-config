@@ -167,16 +167,16 @@ describe("permissions config merge", () => {
 		}
 	});
 
-	it("interpolates environment variables in sandbox paths as raw paths", () => {
+	it("interpolates environment variables in additional sandbox write paths as raw paths", () => {
 		const old = process.env.PI_PACKAGE_DIR;
 		process.env.PI_PACKAGE_DIR = "/tmp/pi.package";
 		try {
 			const config = configModule.interpolateConfig({
 				sandbox: {
-					allowWrite: ["${PI_PACKAGE_DIR}/cache"],
+					addAllowWrite: ["${PI_PACKAGE_DIR}/cache"],
 				},
 			});
-			expect(config.sandbox?.allowWrite).toEqual(["/tmp/pi.package/cache"]);
+			expect(config.sandbox?.addAllowWrite).toEqual(["/tmp/pi.package/cache"]);
 		} finally {
 			if (old === undefined) delete process.env.PI_PACKAGE_DIR;
 			else process.env.PI_PACKAGE_DIR = old;
@@ -1611,15 +1611,16 @@ describe("sandbox network config", () => {
 		expect(isSandboxWriteAllowedForPath(compiled.config, "/repo")).toBe(false);
 	});
 
-	it("does not expect cwd writes when custom allowWrite excludes the workspace", () => {
+	it("adds configured addAllowWrite paths to the default write allowances", () => {
 		const compiled = compileSandboxConfig(policy, "/repo", {
 			enabled: true,
 			tmpDir: "/tmp/custom-pi",
-			allowWrite: ["/tmp/custom-output"],
+			addAllowWrite: ["/tmp/custom-output"],
 		});
 
 		expect(isSandboxWriteAllowedForPath(compiled.config, "/tmp/custom-pi")).toBe(true);
-		expect(isSandboxWriteAllowedForPath(compiled.config, "/repo")).toBe(false);
+		expect(isSandboxWriteAllowedForPath(compiled.config, "/tmp/custom-output")).toBe(true);
+		expect(isSandboxWriteAllowedForPath(compiled.config, "/repo")).toBe(true);
 	});
 
 	it("keeps protected-resource globs from masking workspace write expectations", () => {
@@ -1858,7 +1859,7 @@ func TestGoCache(t *testing.T) {}
 	it("resolves configured sandbox paths relative to the command cwd", () => {
 		const compiled = compileSandboxConfig(policy, "/repo/packages/app", {
 			enabled: true,
-			allowWrite: ["dist"],
+			addAllowWrite: ["dist"],
 			denyRead: ["secrets"],
 			denyWrite: ["generated/locked"],
 		});
