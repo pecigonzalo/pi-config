@@ -7,8 +7,11 @@
         "--browser",
         "firefox",
         "--headless",
-        "--isolated"
-      ]
+        "--isolated",
+        "--output-dir",
+        "${MCPORTER_DAEMON_DIR:-/tmp/.pi-mcporter-daemon}/playwright-output"
+      ],
+      "lifecycle": "keep-alive"
     },
     "github-grep": {
       "baseUrl": "https://mcp.grep.app"

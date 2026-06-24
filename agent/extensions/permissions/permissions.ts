@@ -163,6 +163,14 @@ function detectProfileName(pi: ExtensionAPI): string | undefined {
 	return undefined;
 }
 
+function getMcpDaemonDir(cwd: string): string {
+	return path.join(path.resolve(cwd), ".pi", "mcporter-daemon");
+}
+
+function applyMcpEnvironment(cwd: string): void {
+	process.env.MCPORTER_DAEMON_DIR = getMcpDaemonDir(cwd);
+}
+
 // ─── Extension ────────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -1299,6 +1307,7 @@ export default function (pi: ExtensionAPI) {
 	// ── Main gate ─────────────────────────────────────────────────────────────
 
 	pi.on("user_bash", async (event, ctx) => {
+		applyMcpEnvironment(ctx.cwd);
 		agentName = detectAgentName(pi);
 		profileName = detectProfileName(pi);
 		const input: PermissionToolInput = { command: event.command };

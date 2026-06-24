@@ -11,6 +11,7 @@ import {
 	type ServerDefinition,
 	type ServerToolInfo,
 } from "mcporter";
+import { applyMcpEnvironment } from "./env";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const STATUS_TIMEOUT_MS = 5_000;
@@ -203,9 +204,11 @@ export class McpService {
 
 	constructor(readonly options: McpServiceOptions) {
 		this.configPath = resolveConfigPath(options.configPath);
+		applyMcpEnvironment(options.cwd);
 	}
 
 	private async getRuntime(): Promise<Runtime> {
+		applyMcpEnvironment(this.options.cwd);
 		if (!this.runtime) {
 			this.runtime = await createRuntime({
 				rootDir: this.options.cwd,
@@ -222,6 +225,7 @@ export class McpService {
 	}
 
 	async servers(): Promise<McpServerSummary[]> {
+		applyMcpEnvironment(this.options.cwd);
 		const definitions = await loadServerDefinitions({ rootDir: this.options.cwd, configPath: this.configPath });
 		return definitions.map(summarizeServer);
 	}
@@ -255,6 +259,7 @@ export class McpService {
 	}
 
 	async status(): Promise<McpStatus> {
+		applyMcpEnvironment(this.options.cwd);
 		const servers = await this.servers();
 		const daemon = await runMcporterCli(["daemon", "status"], { cwd: this.options.cwd, timeoutMs: STATUS_TIMEOUT_MS });
 		return {
