@@ -8,8 +8,8 @@ import {
 } from "./shared";
 
 const PROFILE_CAPABILITIES: Record<CodemodeProfileName, CodemodeCapability[]> = {
-	analysis: ["message", "artifact"],
-	orchestrator: ["message", "artifact", "task", "todo"],
+	analysis: ["message", "artifact", "mcp"],
+	orchestrator: ["message", "artifact", "task", "todo", "mcp"],
 };
 
 function codemodeSandboxSettingsFor(

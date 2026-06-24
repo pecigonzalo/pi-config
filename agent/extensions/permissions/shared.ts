@@ -3,7 +3,7 @@ export type ExternalPathPolicy = "allow" | "ask" | "block";
 
 export const FILESYSTEM_TOOL_NAMES = ["read", "write", "edit", "grep", "find", "ls"] as const;
 export type FilesystemToolName = (typeof FILESYSTEM_TOOL_NAMES)[number];
-export type KnownToolName = "bash" | FilesystemToolName;
+export type KnownToolName = "bash" | "mcp" | FilesystemToolName;
 export type RuleToolName = KnownToolName | "*" | (string & {});
 export type PermissionToolName = Exclude<RuleToolName, "*">;
 
@@ -50,7 +50,7 @@ export interface EffectivePolicy {
 }
 
 export type CodemodeProfileName = "analysis" | "orchestrator";
-export type CodemodeCapability = "message" | "artifact" | "task" | "todo";
+export type CodemodeCapability = "message" | "artifact" | "task" | "todo" | "mcp";
 
 export interface CodemodeEffectivePolicy {
 	profile: CodemodeProfileName;

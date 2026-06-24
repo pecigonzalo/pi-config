@@ -227,10 +227,10 @@
       },
       {
         "tool": "bash",
-        "match": "bunx @apify/mcpc *",
+        "match": "bunx mcporter *",
         "action": "allow",
         "sandbox": false,
-        "reason": "mcpc manages persistent MCP sessions outside the workspace sandbox",
+        "reason": "mcporter manages MCP transports and daemon state outside the workspace sandbox",
       },
       {
         "tool": "bash",
@@ -506,7 +506,7 @@
     "enableWeakerNetworkIsolation": true,
     "allowSshAuthSock": true,
     "allowLocalBinding": true,
-    "addAllowWrite": ["~/.mcpc", "~/.mcp.json"],
+    "addAllowWrite": ["~/.mcporter", "~/.mcp.json"],
     "denyRead": ["~/.aws", "~/.gnupg"],
   },
 }

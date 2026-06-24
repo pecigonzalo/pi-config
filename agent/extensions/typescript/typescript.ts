@@ -13,10 +13,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { createMcpService, type McpService } from "../mcp/service";
 import { activePolicy, loadConfig } from "../permissions/config";
 import { resolveCodemodePolicy } from "../permissions/codemode";
+import { matchRule } from "../permissions/matching";
 import { getEffectiveSandboxTmpDir, SandboxRuntimeAdapter } from "../permissions/sandbox";
-import type { CodemodeCapability, CodemodeProfileName, SandboxManagerLike } from "../permissions/shared";
+import type { CodemodeCapability, CodemodeProfileName, EffectivePolicy, SandboxManagerLike } from "../permissions/shared";
 import * as taskAgents from "../tasks/agents.js";
 import type { AgentScope } from "../tasks/agents.js";
 
@@ -146,6 +148,8 @@ interface BridgeRuntimeState {
 	signal?: AbortSignal;
 	cwd: string;
 	allowProjectAgents: boolean;
+	policy: EffectivePolicy;
+	mcpService?: McpService;
 }
 
 const CodemodeParams = Type.Object({
@@ -494,6 +498,23 @@ const host = {
       return await callHost("todo.update", params);
     },
   },
+  mcp: {
+    async servers() {
+      return await callHost("mcp.servers", {});
+    },
+    async listTools(params) {
+      return await callHost("mcp.listTools", params);
+    },
+    async call(params) {
+      return await callHost("mcp.call", params);
+    },
+    async listResources(params) {
+      return await callHost("mcp.listResources", params);
+    },
+    async readResource(params) {
+      return await callHost("mcp.readResource", params);
+    },
+  },
 };
 
 const state = Object.create(null);
@@ -757,6 +778,49 @@ async function runTaskBridge(state: BridgeRuntimeState, args: unknown): Promise<
 	}
 }
 
+function getMcpService(state: BridgeRuntimeState): McpService {
+	state.mcpService ??= createMcpService({ cwd: state.cwd });
+	return state.mcpService;
+}
+
+function requireMcpCapability(state: BridgeRuntimeState): void {
+	if (!state.capabilities.includes("mcp")) throw new Error("host.mcp is not available for this profile");
+}
+
+function asRecord(value: unknown, method: string): Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${method} expects an object argument`);
+	return value as Record<string, unknown>;
+}
+
+function requireStringField(input: Record<string, unknown>, field: string, method: string): string {
+	const value = input[field];
+	if (typeof value !== "string" || value.trim() === "") throw new Error(`${method} requires string field '${field}'`);
+	return value;
+}
+
+function optionalBooleanField(input: Record<string, unknown>, field: string): boolean | undefined {
+	const value = input[field];
+	return typeof value === "boolean" ? value : undefined;
+}
+
+function optionalNumberField(input: Record<string, unknown>, field: string): number | undefined {
+	const value = input[field];
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function optionalArgsField(input: Record<string, unknown>): Record<string, unknown> | undefined {
+	const value = input.args;
+	if (value === undefined) return undefined;
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("host.mcp.call field 'args' must be an object when provided");
+	return value as Record<string, unknown>;
+}
+
+function assertMcpAllowed(state: BridgeRuntimeState, target: string): void {
+	const rule = matchRule(state.policy.rules, "mcp", { command: target });
+	if (rule?.action === "block") throw new Error(rule.reason || `MCP access blocked: ${target}`);
+	if (rule?.action === "ask") throw new Error(rule.reason || `MCP access requires approval: ${target}`);
+}
+
 async function executeBridgeRequest(state: BridgeRuntimeState, request: BridgeRequest): Promise<unknown> {
 	switch (request.method) {
 		case "message.info": {
@@ -795,6 +859,47 @@ async function executeBridgeRequest(state: BridgeRuntimeState, request: BridgeRe
 		case "todo.add":
 		case "todo.update":
 			throw new Error("host.todo bridge is not implemented yet");
+		case "mcp.servers":
+			requireMcpCapability(state);
+			return getMcpService(state).servers();
+		case "mcp.listTools": {
+			requireMcpCapability(state);
+			const input = asRecord(request.args, "host.mcp.listTools");
+			const server = requireStringField(input, "server", "host.mcp.listTools");
+			return getMcpService(state).listTools({
+				server,
+				includeSchema: optionalBooleanField(input, "includeSchema"),
+				disableOAuth: optionalBooleanField(input, "disableOAuth"),
+			});
+		}
+		case "mcp.call": {
+			requireMcpCapability(state);
+			const input = asRecord(request.args, "host.mcp.call");
+			const server = requireStringField(input, "server", "host.mcp.call");
+			const tool = requireStringField(input, "tool", "host.mcp.call");
+			assertMcpAllowed(state, `${server}.${tool}`);
+			return getMcpService(state).call({
+				server,
+				tool,
+				args: optionalArgsField(input),
+				timeoutMs: optionalNumberField(input, "timeoutMs"),
+				disableOAuth: optionalBooleanField(input, "disableOAuth"),
+			});
+		}
+		case "mcp.listResources": {
+			requireMcpCapability(state);
+			const input = asRecord(request.args, "host.mcp.listResources");
+			const server = requireStringField(input, "server", "host.mcp.listResources");
+			return getMcpService(state).listResources({ server, disableOAuth: optionalBooleanField(input, "disableOAuth") });
+		}
+		case "mcp.readResource": {
+			requireMcpCapability(state);
+			const input = asRecord(request.args, "host.mcp.readResource");
+			const server = requireStringField(input, "server", "host.mcp.readResource");
+			const uri = requireStringField(input, "uri", "host.mcp.readResource");
+			assertMcpAllowed(state, `${server}.resource`);
+			return getMcpService(state).readResource({ server, uri, disableOAuth: optionalBooleanField(input, "disableOAuth") });
+		}
 		default:
 			throw new Error(`Unknown bridge method: ${request.method}`);
 	}
@@ -1003,6 +1108,7 @@ export default function (pi: ExtensionAPI) {
 				signal,
 				cwd,
 				allowProjectAgents: resolvedPolicy.allowProjectAgents,
+				policy,
 			};
 
 			const handleProtocolLine = (line: string) => {
@@ -1139,6 +1245,7 @@ export default function (pi: ExtensionAPI) {
 				};
 				throwCodemodeExecutionError(details);
 			} finally {
+				await bridgeState.mcpService?.close().catch(() => {});
 				await fs.rm(runtimeDir, { recursive: true, force: true }).catch(() => {});
 			}
 

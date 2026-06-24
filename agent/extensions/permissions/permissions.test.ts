@@ -526,7 +526,7 @@ describe("codemode policy", () => {
 	it("maps analysis profile to plan mode with limited capabilities", () => {
 		const resolved = resolveCodemodePolicy(basePolicy, "/repo", { enabled: true, network: true }, "analysis");
 		expect(resolved.mode).toBe("plan");
-		expect(resolved.capabilities).toEqual(["message", "artifact"]);
+		expect(resolved.capabilities).toEqual(["message", "artifact", "mcp"]);
 		expect(resolved.allowProjectAgents).toBe(false);
 		expect(resolved.sandbox.enabled).toBe(true);
 		expect(resolved.sandbox.config.network?.allowedDomains).toEqual([]);
@@ -540,7 +540,7 @@ describe("codemode policy", () => {
 			"orchestrator",
 		);
 		expect(resolved.mode).toBe("workspace-write");
-		expect(resolved.capabilities).toEqual(["message", "artifact", "task", "todo"]);
+		expect(resolved.capabilities).toEqual(["message", "artifact", "task", "todo", "mcp"]);
 		expect(resolved.sandbox.enabled).toBe(true);
 	});
 });

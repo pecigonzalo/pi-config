@@ -28,6 +28,7 @@ export function asPermissionToolName(toolName: string): PermissionToolName {
 export function getMatchTarget(toolName: PermissionToolName, input: PermissionToolInput): string | undefined {
 	switch (toolName) {
 		case "bash":
+		case "mcp":
 			return getCommandInput(input);
 		case "write":
 		case "edit":

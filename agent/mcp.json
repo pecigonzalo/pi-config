@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "bunx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--browser",
+        "firefox",
+        "--headless",
+        "--isolated"
+      ]
+    },
+    "github-grep": {
+      "baseUrl": "https://mcp.grep.app"
+    },
+    "deep-wiki": {
+      "baseUrl": "https://mcp.deepwiki.com/mcp"
+    }
+  },
+  "imports": []
+}

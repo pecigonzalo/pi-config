@@ -13,6 +13,7 @@ This is useful for tasks like:
 - local data transformation
 - artifact generation
 - delegated sub-work through the host bridge
+- MCP-backed data gathering through the host bridge
 
 ## Tool name
 
@@ -69,6 +70,7 @@ Bridge capabilities:
 - `host.capabilities()`
 - `host.help()`
 - `host.artifact.write()`
+- `host.mcp.*`
 
 Blocked:
 
@@ -129,6 +131,28 @@ Returns metadata like:
   size: number;
 }
 ```
+
+### `host.mcp.*`
+
+Host-mediated MCP access is available in `analysis` and `orchestrator` profiles. The sandbox still does not get arbitrary network access; MCP calls go through the host bridge and are permission-gated by target such as `server.tool`.
+
+```ts
+const tools = await host.mcp.listTools({ server: "context7" });
+const result = await host.mcp.call({
+  server: "context7",
+  tool: "resolve-library-id",
+  args: { query: "React hooks docs", libraryName: "react" },
+});
+return result.text;
+```
+
+Available methods:
+
+- `host.mcp.servers()`
+- `host.mcp.listTools({ server, includeSchema?, disableOAuth? })`
+- `host.mcp.call({ server, tool, args?, timeoutMs?, disableOAuth? })`
+- `host.mcp.listResources({ server, disableOAuth? })`
+- `host.mcp.readResource({ server, uri, disableOAuth? })`
 
 ### `host.task.run`
 
@@ -252,6 +276,7 @@ Implemented:
 - dedicated sandboxed execution
 - `host.message.*`
 - `host.artifact.write()`
+- `host.mcp.*`
 - `host.task.run()`
 - custom rendering and audit details
 
