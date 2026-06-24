@@ -14,7 +14,7 @@ export type PermissionToolInput = {
 
 export interface Rule {
 	tool: RuleToolName;
-	match?: string;
+	match?: string | string[];
 	action: "allow" | "block" | "ask";
 	reason?: string;
 	externalPathAction?: "inherit" | "allow" | "ask" | "block";

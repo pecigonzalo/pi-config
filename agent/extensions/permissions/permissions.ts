@@ -241,11 +241,17 @@ export default function (pi: ExtensionAPI) {
 		return sandboxState.execution?.config;
 	}
 
+	function formatRuleMatch(rule: Rule): string {
+		if (rule.match === undefined) return "-";
+		const patterns = Array.isArray(rule.match) ? rule.match : [rule.match];
+		return patterns.map((pattern) => `/${pattern}/`).join(" | ");
+	}
+
 	function sandboxBypassMatch(command: string, execution: SandboxExecution): string | undefined {
 		const policy = activePolicy(config, agentName, profileName);
 		const rule = matchRule(policy.rules, "bash", { command });
 		if (rule?.sandbox === false && rule.action !== "block") {
-			return rule.match ? `sandbox=false rule /${rule.match}/` : "sandbox=false catch-all rule";
+			return rule.match ? `sandbox=false rule ${formatRuleMatch(rule)}` : "sandbox=false catch-all rule";
 		}
 		return matchSandboxBypassCommand(command, execution.bypassCommands);
 	}
@@ -1489,7 +1495,7 @@ export default function (pi: ExtensionAPI) {
 				.slice(0, 6)
 				.map(([tool, count]) => `${tool}:${count}`)
 				.join(", ");
-			const sampleRules = rules.slice(0, 5).map((r) => `[${r.action}] ${r.tool}${r.match ? ` /${r.match}/` : ""}`);
+			const sampleRules = rules.slice(0, 5).map((r) => `[${r.action}] ${r.tool}${r.match ? ` ${formatRuleMatch(r)}` : ""}`);
 
 			if (!ctx.hasUI) {
 				ctx.ui.notify(
@@ -1623,9 +1629,10 @@ export default function (pi: ExtensionAPI) {
 							return parts;
 						};
 						const toolW  = Math.min(18, Math.max(4, ...rules.map((r) => r.tool.length)));
-						const matchW = Math.min(48, Math.max(5, ...rules.map((r) => (r.match ? r.match.length + 2 : 1))));
+						const matchW = Math.min(48, Math.max(5, ...rules.map((r) => formatRuleMatch(r).length)));
 						const actionW = 10;
 						const extW = 10;
+						const sandboxW = 10;
 						const reasonW = 40;
 
 						lines.push(
@@ -1633,28 +1640,35 @@ export default function (pi: ExtensionAPI) {
 							`${theme.fg("dim", pad("MATCH", matchW + 2))}` +
 							`${theme.fg("dim", pad("ACTION", actionW))}` +
 							`${theme.fg("dim", pad("EXT PATH", extW + 2))}` +
+							`${theme.fg("dim", pad("SANDBOX", sandboxW + 2))}` +
 							`${theme.fg("dim", "REASON")}`,
 						);
-						lines.push(`  ${theme.fg("borderMuted", "─".repeat(toolW + matchW + actionW + extW + reasonW + 10))}`);
+						lines.push(`  ${theme.fg("borderMuted", "─".repeat(toolW + matchW + actionW + extW + sandboxW + reasonW + 12))}`);
 
 						for (const rule of rules) {
 							const toolRaw = truncate(rule.tool, toolW);
-							const matchSource = rule.match ? `/${rule.match}/` : "-";
+							const matchSource = formatRuleMatch(rule);
 							const matchParts = wrap(matchSource, matchW);
 							const actionRaw = truncate(`${actionIcon(rule.action)} ${rule.action}`, actionW - 1);
 							const epa = rule.externalPathAction ?? "inherit";
+							const sandboxRaw = rule.tool === "bash"
+								? rule.sandbox === false ? "off" : rule.sandbox === true ? "on" : "inherit"
+								: "-";
 							const reasonRaw = truncate(rule.reason ?? "-", reasonW);
 							const tool = theme.fg("text", pad(toolRaw, toolW + 2));
 							const action = theme.fg(actionColor(rule.action), pad(actionRaw, actionW));
 							const epaColor = epa === "allow" ? "success" : epa === "block" ? "error" : epa === "ask" ? "warning" : "dim";
+							const sandboxColor = sandboxRaw === "off" ? "warning" : sandboxRaw === "on" ? "success" : "dim";
 							const epaStr = theme.fg(epaColor, pad(truncate(epa, extW), extW + 2));
+							const sandboxStr = theme.fg(sandboxColor, pad(truncate(sandboxRaw, sandboxW), sandboxW + 2));
 							const reason = theme.fg("dim", reasonRaw);
-							lines.push(`  ${tool}${theme.fg("muted", pad(matchParts[0] ?? "", matchW + 2))}${action}${epaStr}${reason}`);
+							lines.push(`  ${tool}${theme.fg("muted", pad(matchParts[0] ?? "", matchW + 2))}${action}${epaStr}${sandboxStr}${reason}`);
 							for (const continuation of matchParts.slice(1)) {
 								const emptyTool = pad("", toolW + 2);
 								const emptyAction = pad("", actionW);
 								const emptyExt = pad("", extW + 2);
-								lines.push(`  ${theme.fg("dim", emptyTool)}${theme.fg("dim", pad(`↳ ${continuation}`, matchW + 2))}${theme.fg("dim", emptyAction)}${theme.fg("dim", emptyExt)}`);
+								const emptySandbox = pad("", sandboxW + 2);
+								lines.push(`  ${theme.fg("dim", emptyTool)}${theme.fg("dim", pad(`↳ ${continuation}`, matchW + 2))}${theme.fg("dim", emptyAction)}${theme.fg("dim", emptyExt)}${theme.fg("dim", emptySandbox)}`);
 							}
 						}
 						lines.push(`  ${theme.fg("dim", "(Long MATCH values wrap to continuation lines)")}`);

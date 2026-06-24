@@ -45,9 +45,13 @@ export function hasRegexMeta(pattern: string): boolean {
 	return /[.^$+?(){}[\]\\|]/.test(pattern);
 }
 
+function stripLeadingBashEnvAssignments(command: string): string {
+	return command.trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|[^\s;&|<>$`]+)\s+)*/, "");
+}
+
 export function bashPrefixMatchesCommand(prefix: string, command: string): boolean {
 	const trimmedPrefix = prefix.trim();
-	const trimmedCommand = command.trim();
+	const trimmedCommand = stripLeadingBashEnvAssignments(command);
 	if (!trimmedPrefix || !trimmedCommand) return false;
 	if (trimmedCommand === trimmedPrefix) return true;
 	if (!trimmedCommand.startsWith(trimmedPrefix)) return false;
@@ -72,10 +76,7 @@ export function matchSimpleBashPattern(pattern: string, command: string): boolea
 	return command.toLowerCase().includes(trimmedPattern.toLowerCase());
 }
 
-export function ruleMatch(rule: Rule, toolName: PermissionToolName, target: string): boolean {
-	const pattern = rule.match;
-	if (pattern === undefined) return true;
-
+function patternMatches(pattern: string, toolName: PermissionToolName, target: string): boolean {
 	if (hasRegexMeta(pattern)) {
 		try {
 			return new RegExp(pattern, "i").test(target);
@@ -89,6 +90,13 @@ export function ruleMatch(rule: Rule, toolName: PermissionToolName, target: stri
 	}
 
 	return target.toLowerCase().includes(pattern.toLowerCase());
+}
+
+export function ruleMatch(rule: Rule, toolName: PermissionToolName, target: string): boolean {
+	const patterns = rule.match;
+	if (patterns === undefined) return true;
+
+	return (Array.isArray(patterns) ? patterns : [patterns]).some((pattern) => patternMatches(pattern, toolName, target));
 }
 
 export function matchRule(rules: Rule[], toolName: PermissionToolName, input: PermissionToolInput): Rule | undefined {

@@ -160,6 +160,31 @@ describe("permissions config merge", () => {
 		}
 	});
 
+	it("interpolates environment variables in rule match arrays", () => {
+		const old = process.env.PI_PACKAGE_DIR;
+		process.env.PI_PACKAGE_DIR = "/tmp/pi.package";
+		try {
+			const config = configModule.interpolateConfig({
+				default: {
+					rules: [
+						{
+							tool: "read",
+							match: ["^${PI_PACKAGE_DIR}/docs(/|$)", "^${PI_PACKAGE_DIR}/examples(/|$)"],
+							action: "allow",
+						},
+					],
+				},
+			});
+			const rule = config.default?.rules?.[0];
+			expect(rule?.match).toEqual(["^/tmp/pi\\.package/docs(/|$)", "^/tmp/pi\\.package/examples(/|$)"]);
+			expect(ruleMatch(rule!, "read", "/tmp/pi.package/examples/demo.ts")).toBe(true);
+			expect(ruleMatch(rule!, "read", "/tmp/piXpackage/examples/demo.ts")).toBe(false);
+		} finally {
+			if (old === undefined) delete process.env.PI_PACKAGE_DIR;
+			else process.env.PI_PACKAGE_DIR = old;
+		}
+	});
+
 	it("interpolates environment variables in sandbox env values", () => {
 		const old = process.env.PI_TEST_SOCKET_DIR;
 		process.env.PI_TEST_SOCKET_DIR = "/tmp/pi sockets";
@@ -469,9 +494,18 @@ describe("simple matcher shorthand", () => {
 	it("lets command-prefix shorthand match package version suffixes", () => {
 		const rule = { tool: "bash", match: "bunx @playwright/mcp *", action: "allow" as const };
 		expect(ruleMatch(rule, "bash", "bunx @playwright/mcp@latest --port 3000")).toBe(true);
+		expect(ruleMatch(rule, "bash", "DEBUG=pw:* bunx @playwright/mcp@latest --port 3000")).toBe(true);
+		expect(ruleMatch(rule, "bash", "FOO='bar baz' DEBUG=1 bunx @playwright/mcp --port 3000")).toBe(true);
 		expect(ruleMatch(rule, "bash", "bunx @playwright/mcp --port 3000")).toBe(true);
 		expect(ruleMatch(rule, "bash", "bunx @playwright/mcp-server --port 3000")).toBe(false);
 		expect(ruleMatch(rule, "bash", "echo bunx @playwright/mcp@latest")).toBe(false);
+	});
+
+	it("supports arrays of match patterns", () => {
+		const rule = { tool: "bash", match: ["bunx @playwright/mcp *", "bunx playwright *"], action: "allow" as const };
+		expect(ruleMatch(rule, "bash", "bunx @playwright/mcp@latest --port 3000")).toBe(true);
+		expect(ruleMatch(rule, "bash", "bunx playwright test")).toBe(true);
+		expect(ruleMatch(rule, "bash", "bunx @apify/mcpc@latest tools-list")).toBe(false);
 	});
 
 	it("keeps regex behavior when regex metacharacters are used", () => {

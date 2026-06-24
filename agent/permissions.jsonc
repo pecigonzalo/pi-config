@@ -216,21 +216,11 @@
       // approved command outside the OS sandbox for GUI/MCP process trees.
       {
         "tool": "bash",
-        "match": "bunx @playwright/cli *",
-        "action": "ask",
-        "sandbox": false,
-        "reason": "Browser automation process trees cannot be usefully sandboxed",
-      },
-      {
-        "tool": "bash",
-        "match": "bunx @playwright/mcp *",
-        "action": "ask",
-        "sandbox": false,
-        "reason": "Browser automation process trees cannot be usefully sandboxed",
-      },
-      {
-        "tool": "bash",
-        "match": "bunx playwright *",
+        "match": [
+          "bunx @playwright/cli *",
+          "bunx @playwright/mcp *",
+          "bunx playwright *",
+        ],
         "action": "ask",
         "sandbox": false,
         "reason": "Browser automation process trees cannot be usefully sandboxed",

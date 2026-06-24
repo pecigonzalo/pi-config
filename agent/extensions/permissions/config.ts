@@ -218,10 +218,15 @@ function interpolateStringRecord(values: Record<string, string> | undefined): Re
 }
 
 export function interpolateConfig(config: PermissionsConfig): PermissionsConfig {
+	const interpolateRuleMatch = (match: Rule["match"]): Rule["match"] => {
+		if (match === undefined) return undefined;
+		if (Array.isArray(match)) return match.map((pattern) => interpolateEnvString(pattern, { regex: true }));
+		return interpolateEnvString(match, { regex: true });
+	};
 	const interpolateRules = (rules: Rule[] | undefined): Rule[] | undefined =>
 		rules?.map((rule) => ({
 			...rule,
-			match: rule.match === undefined ? undefined : interpolateEnvString(rule.match, { regex: true }),
+			match: interpolateRuleMatch(rule.match),
 		}));
 	const interpolateProfile = <T extends { rules?: Rule[]; tmpDir?: string }>(profile: T | undefined): T | undefined => {
 		if (!profile) return undefined;
