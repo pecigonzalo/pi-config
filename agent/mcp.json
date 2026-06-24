@@ -9,8 +9,9 @@
         "--headless",
         "--isolated",
         "--output-dir",
-        "${MCPORTER_DAEMON_DIR:-/tmp/.pi-mcporter-daemon}/playwright-output"
+        "${MCPORTER_DAEMON_DIR:-/tmp/.pi-mcporter-daemon}/playwright"
       ],
+      "cwd": "${MCPORTER_DAEMON_DIR:-/tmp/.pi-mcporter-daemon}/playwright",
       "lifecycle": "keep-alive"
     },
     "github-grep": {

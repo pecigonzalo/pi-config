@@ -26,7 +26,7 @@ function formatStatus(status: McpStatus): string {
 }
 
 async function showStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-	const service = createMcpService({ cwd: ctx.cwd });
+	const service = createMcpService({ cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() });
 	try {
 		const status = await service.status();
 		const text = formatStatus(status);

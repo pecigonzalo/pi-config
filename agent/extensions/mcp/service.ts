@@ -20,6 +20,7 @@ const MAX_STATUS_OUTPUT_CHARS = 8_000;
 export interface McpServiceOptions {
 	cwd: string;
 	configPath?: string;
+	sessionId?: string;
 }
 
 export interface McpServerSummary {
@@ -204,11 +205,11 @@ export class McpService {
 
 	constructor(readonly options: McpServiceOptions) {
 		this.configPath = resolveConfigPath(options.configPath);
-		applyMcpEnvironment(options.cwd);
+		applyMcpEnvironment(options.cwd, options.sessionId);
 	}
 
 	private async getRuntime(): Promise<Runtime> {
-		applyMcpEnvironment(this.options.cwd);
+		applyMcpEnvironment(this.options.cwd, this.options.sessionId);
 		if (!this.runtime) {
 			this.runtime = await createRuntime({
 				rootDir: this.options.cwd,
@@ -225,7 +226,7 @@ export class McpService {
 	}
 
 	async servers(): Promise<McpServerSummary[]> {
-		applyMcpEnvironment(this.options.cwd);
+		applyMcpEnvironment(this.options.cwd, this.options.sessionId);
 		const definitions = await loadServerDefinitions({ rootDir: this.options.cwd, configPath: this.configPath });
 		return definitions.map(summarizeServer);
 	}
@@ -259,7 +260,7 @@ export class McpService {
 	}
 
 	async status(): Promise<McpStatus> {
-		applyMcpEnvironment(this.options.cwd);
+		applyMcpEnvironment(this.options.cwd, this.options.sessionId);
 		const servers = await this.servers();
 		const daemon = await runMcporterCli(["daemon", "status"], { cwd: this.options.cwd, timeoutMs: STATUS_TIMEOUT_MS });
 		return {

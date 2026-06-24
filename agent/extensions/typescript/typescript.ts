@@ -149,6 +149,7 @@ interface BridgeRuntimeState {
 	cwd: string;
 	allowProjectAgents: boolean;
 	policy: EffectivePolicy;
+	sessionId?: string;
 	mcpService?: McpService;
 }
 
@@ -779,7 +780,7 @@ async function runTaskBridge(state: BridgeRuntimeState, args: unknown): Promise<
 }
 
 function getMcpService(state: BridgeRuntimeState): McpService {
-	state.mcpService ??= createMcpService({ cwd: state.cwd });
+	state.mcpService ??= createMcpService({ cwd: state.cwd, sessionId: state.sessionId });
 	return state.mcpService;
 }
 
@@ -1110,6 +1111,7 @@ export default function (pi: ExtensionAPI) {
 				cwd,
 				allowProjectAgents: resolvedPolicy.allowProjectAgents,
 				policy,
+				sessionId: ctx.sessionManager.getSessionId(),
 			};
 
 			const handleProtocolLine = (line: string) => {

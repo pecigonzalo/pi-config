@@ -163,12 +163,18 @@ function detectProfileName(pi: ExtensionAPI): string | undefined {
 	return undefined;
 }
 
-function getMcpDaemonDir(cwd: string): string {
-	return path.join(path.resolve(cwd), ".pi", "mcporter-daemon");
+function sanitizeMcpPathSegment(value: string): string {
+	return value.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 80) || "session";
 }
 
-function applyMcpEnvironment(cwd: string): void {
-	process.env.MCPORTER_DAEMON_DIR = getMcpDaemonDir(cwd);
+function getMcpDaemonDir(cwd: string, sessionId: string | undefined): string {
+	return path.join(path.resolve(cwd), ".pi", "mcporter-daemon", sanitizeMcpPathSegment(sessionId ?? "session"));
+}
+
+function applyMcpEnvironment(cwd: string, sessionId?: string): void {
+	const daemonDir = getMcpDaemonDir(cwd, sessionId);
+	fs.mkdirSync(daemonDir, { recursive: true });
+	process.env.MCPORTER_DAEMON_DIR = daemonDir;
 }
 
 // ─── Extension ────────────────────────────────────────────────────────────────
@@ -1307,7 +1313,7 @@ export default function (pi: ExtensionAPI) {
 	// ── Main gate ─────────────────────────────────────────────────────────────
 
 	pi.on("user_bash", async (event, ctx) => {
-		applyMcpEnvironment(ctx.cwd);
+		applyMcpEnvironment(ctx.cwd, ctx.sessionManager?.getSessionId?.());
 		agentName = detectAgentName(pi);
 		profileName = detectProfileName(pi);
 		const input: PermissionToolInput = { command: event.command };
