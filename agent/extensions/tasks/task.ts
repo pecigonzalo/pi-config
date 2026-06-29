@@ -3633,6 +3633,30 @@ const SubagentParams = Type.Object({
 	confirmProjectAgents: Type.Optional(Type.Boolean({ description: "Confirm project agents.", default: true })),
 });
 
+export const AGENT_COMPLETIONS = [
+	{ value: "clear", label: "clear: clear current agent selection" },
+] as const;
+
+export const PROFILE_COMPLETIONS = [
+	{ value: "clear", label: "clear: clear current profile selection" },
+] as const;
+
+export const EFFORT_COMPLETIONS = [
+	{ value: "clear", label: "clear: clear current effort selection" },
+] as const;
+
+export const TASKS_COMPLETIONS = [
+	{ value: "list",   label: "list: list current task runs" },
+	{ value: "show",   label: "show: show details for a task run" },
+	{ value: "view",   label: "view: open viewer for a task run" },
+	{ value: "open",   label: "open: open a task run session" },
+	{ value: "attach", label: "attach: attach to a task run terminal" },
+	{ value: "origin", label: "origin: reveal the origin of a task run" },
+	{ value: "steer",  label: "steer: send a steering message to a task run" },
+	{ value: "parent", label: "parent: open the parent session" },
+	{ value: "toggle", label: "toggle: toggle the task widget" },
+] as const;
+
 export default function (pi: ExtensionAPI) {
 	const normalizeMainAgentSelection = (value: unknown): string | undefined => {
 		if (typeof value !== "string") return undefined;
@@ -3746,6 +3770,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("agent", {
 		description: "Show or switch the main-session agent role (/agent <name>, /agent clear)",
+		getArgumentCompletions: (prefix) =>
+			AGENT_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 			const trimmed = args.trim();
@@ -3770,6 +3796,8 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.registerCommand("profile", {
 		description: "Show or switch the main-session profile (/profile <name>, /profile clear)",
+		getArgumentCompletions: (prefix) =>
+			PROFILE_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 			const trimmed = args.trim();
@@ -3790,6 +3818,8 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.registerCommand("effort", {
 		description: "Show or switch the main-session effort (/effort <name>, /effort clear)",
+		getArgumentCompletions: (prefix) =>
+			EFFORT_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 			const trimmed = args.trim();
@@ -3811,6 +3841,8 @@ export default function (pi: ExtensionAPI) {
 
 	const tasksCommand = {
 		description: `Inspect persisted task child sessions. Usage: ${TASKS_COMMAND_USAGE}`,
+		getArgumentCompletions: (prefix: string) =>
+			TASKS_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			const parsed = parseTasksCommand(args);
 			if (parsed.action === "open" || parsed.action === "parent" || parsed.action === "origin") {
@@ -4602,6 +4634,10 @@ export default function (pi: ExtensionAPI) {
 }
 
 export const __test__ = {
+	AGENT_COMPLETIONS,
+	PROFILE_COMPLETIONS,
+	EFFORT_COMPLETIONS,
+	TASKS_COMPLETIONS,
 	addTaskInlineNotice,
 	buildTaskInlineNoticeLines,
 	hasRuntimePersistOverride,

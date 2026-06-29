@@ -409,3 +409,16 @@ locals {
 		expect(text).toContain("src/index.ts:2:4-2:9");
 	});
 });
+
+test("code-intel completions list all accepted subcommands", () => {
+	expect(__test.CODE_INTEL_COMPLETIONS.map((s) => s.value)).toEqual(["status", "map", "repo-map"]);
+});
+
+test("code-intel completions filter by prefix", () => {
+	const results = __test.CODE_INTEL_COMPLETIONS.filter((s) => s.value.startsWith("re"));
+	expect(results.map((s) => s.value)).toEqual(["repo-map"]);
+});
+
+test("code-intel completions return nothing for unrecognised prefix", () => {
+	expect(__test.CODE_INTEL_COMPLETIONS.filter((s) => s.value.startsWith("xyz"))).toEqual([]);
+});

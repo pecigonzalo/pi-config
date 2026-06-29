@@ -17,7 +17,7 @@
     "github-copilot/claude-haiku-4.5"
   ],
   "defaultProvider": "github-copilot",
-  "defaultModel": "gpt-5.5",
+  "defaultModel": "gpt-5.3-codex",
   "defaultThinkingLevel": "high",
   "compaction": {
     "enabled": true

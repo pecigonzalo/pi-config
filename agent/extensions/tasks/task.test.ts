@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, test } from "bun:test";
 import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
 import * as syncFs from "node:fs";
@@ -1531,4 +1531,31 @@ describe("tasks RPC completion coordination", () => {
 		await new Promise((resolve) => setTimeout(resolve, 30));
 		expect(harness.terminateCount).toBe(1);
 	});
+});
+
+test("tasks completions list all accepted subcommands", () => {
+	expect(__test__.TASKS_COMPLETIONS.map((s) => s.value)).toEqual([
+		"list", "show", "view", "open", "attach", "origin", "steer", "parent", "toggle",
+	]);
+});
+
+test("tasks completions filter by prefix", () => {
+	const results = __test__.TASKS_COMPLETIONS.filter((s) => s.value.startsWith("st"));
+	expect(results.map((s) => s.value)).toEqual(["steer"]);
+});
+
+test("tasks completions return nothing for unrecognised prefix", () => {
+	expect(__test__.TASKS_COMPLETIONS.filter((s) => s.value.startsWith("xyz"))).toEqual([]);
+});
+
+test("agent completions list clear", () => {
+	expect(__test__.AGENT_COMPLETIONS.map((s) => s.value)).toEqual(["clear"]);
+});
+
+test("profile completions list clear", () => {
+	expect(__test__.PROFILE_COMPLETIONS.map((s) => s.value)).toEqual(["clear"]);
+});
+
+test("effort completions list clear", () => {
+	expect(__test__.EFFORT_COMPLETIONS.map((s) => s.value)).toEqual(["clear"]);
 });

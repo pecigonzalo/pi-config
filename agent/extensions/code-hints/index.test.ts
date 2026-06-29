@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, test } from "bun:test";
 import { __test__ } from "./index";
 import { LSP_MANAGER_REQUEST_EVENT } from "../lsp-manager/service";
 import type { LspFileDiagnostics, LspManagerService } from "../lsp-manager/service";
@@ -343,4 +343,19 @@ describe("code-hints service discovery", () => {
       }),
     ).toBe(false);
   });
+});
+
+test("code-hints completions list all accepted subcommands", () => {
+  expect(__test__.CODE_HINTS_COMPLETIONS.map((s) => s.value)).toEqual([
+    "status", "on", "enable", "off", "disable", "mode", "debug", "timeouts", "reset", "help",
+  ]);
+});
+
+test("code-hints completions filter by prefix", () => {
+  const results = __test__.CODE_HINTS_COMPLETIONS.filter((s) => s.value.startsWith("dis"));
+  expect(results.map((s) => s.value)).toEqual(["disable"]);
+});
+
+test("code-hints completions return nothing for unrecognised prefix", () => {
+  expect(__test__.CODE_HINTS_COMPLETIONS.filter((s) => s.value.startsWith("xyz"))).toEqual([]);
 });

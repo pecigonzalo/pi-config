@@ -24,6 +24,12 @@ import { languageForPath } from "./src/source-files";
 import { hydrateTreeSitterDefinitions, parseTreeSitterTagsOutput } from "./src/tree-sitter";
 import type { CodeIntelParams } from "./src/types";
 
+const CODE_INTEL_COMPLETIONS = [
+	{ value: "status",   label: "status: show code intelligence status" },
+	{ value: "map",      label: "map: generate repo map" },
+	{ value: "repo-map", label: "repo-map: generate repo map (alias for map)" },
+] as const;
+
 export default function codeIntelExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "code_intel",
@@ -105,6 +111,8 @@ export default function codeIntelExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("code-intel", {
 		description: "Code intelligence helpers: /code-intel status | /code-intel map [tokens]",
+		getArgumentCompletions: (prefix) =>
+			CODE_INTEL_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			const [subcommandRaw, maybeTokens] = args.trim().split(/\s+/, 2);
 			const subcommand = subcommandRaw || "status";
@@ -131,6 +139,7 @@ export default function codeIntelExtension(pi: ExtensionAPI) {
 }
 
 export const __test = {
+	CODE_INTEL_COMPLETIONS,
 	extractDefinitions,
 	matchDefinition,
 	rankDefinitions: __analysisTest.rankDefinitions,

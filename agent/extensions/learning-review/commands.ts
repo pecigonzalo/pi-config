@@ -39,17 +39,17 @@ function helpText(): string {
 		"# Learning review",
 		"",
 		"Commands:",
-		"- `/learn` — pick a user message from the current session to learn from explicitly.",
-		"- `/learn review` — scan the current session for correction/advice candidates and save them for review.",
-		"- `/learn list [pending|accepted|promoted|rejected]` — list stored candidates.",
-		"- `/learn recall <id>` — show evidence for a candidate.",
-		"- `/learn search <query>` — search stored candidates.",
-		"- `/learn classify [id|all]` — apply the current heuristic classifier to pending candidates.",
-		"- `/learn distill [id|all]` — use the active model to distill raw candidates into reusable learnings.",
-		"- `/learn route <id> <destination>` — manually set destination without applying changes.",
-		"- `/learn accept <id>` — mark a candidate accepted in the memory store.",
-		"- `/learn reject <id>` — reject a candidate.",
-		"- `/learn status` — show store status and config.",
+		"- `/learn`: pick a user message from the current session to learn from explicitly.",
+		"- `/learn review`: scan the current session for correction/advice candidates and save them for review.",
+		"- `/learn list [pending|accepted|promoted|rejected]`: list stored candidates.",
+		"- `/learn recall <id>`: show evidence for a candidate.",
+		"- `/learn search <query>`: search stored candidates.",
+		"- `/learn classify [id|all]`: apply the current heuristic classifier to pending candidates.",
+		"- `/learn distill [id|all]`: use the active model to distill raw candidates into reusable learnings.",
+		"- `/learn route <id> <destination>`: manually set destination without applying changes.",
+		"- `/learn accept <id>`: mark a candidate accepted in the memory store.",
+		"- `/learn reject <id>`: reject a candidate.",
+		"- `/learn status`: show store status and config.",
 		"",
 		"Typical flow:",
 		"1. `/learn review` to harvest candidates, or bare `/learn` to pick one explicit user message.",
@@ -344,9 +344,25 @@ async function status(pi: ExtensionAPI, ctx: ExtensionCommandContext, runtime: L
 	);
 }
 
+export const LEARN_COMPLETIONS = [
+	{ value: "review",   label: "review: interactively review candidates" },
+	{ value: "list",     label: "list: list learnings" },
+	{ value: "recall",   label: "recall: show a learning by ID" },
+	{ value: "search",   label: "search: search learnings" },
+	{ value: "classify", label: "classify: classify a candidate" },
+	{ value: "distill",  label: "distill: distill a candidate into learnings" },
+	{ value: "route",    label: "route: route a candidate to a file" },
+	{ value: "accept",   label: "accept: accept a candidate" },
+	{ value: "reject",   label: "reject: reject a candidate" },
+	{ value: "status",   label: "status: show review stats" },
+	{ value: "help",     label: "help: show usage" },
+] as const;
+
 export function registerLearnCommand(pi: ExtensionAPI, runtime: LearnRuntime): void {
 	pi.registerCommand("learn", {
 		description: "Review and manage source-backed learnings from session corrections/advice",
+		getArgumentCompletions: (prefix) =>
+			LEARN_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			const [command, ...rest] = args.trim().split(/\s+/).filter(Boolean);
 			try {

@@ -40,9 +40,15 @@ async function showStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
 	}
 }
 
+const MCP_COMPLETIONS = [
+	{ value: "status", label: "status: show MCP server status" },
+] as const;
+
 export default function mcpExtension(pi: ExtensionAPI) {
 	pi.registerCommand("mcp", {
 		description: "MCP commands: /mcp status",
+		getArgumentCompletions: (prefix) =>
+			MCP_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			const command = args.trim().toLowerCase() || "status";
 			if (command === "status") {
@@ -58,5 +64,6 @@ export default function mcpExtension(pi: ExtensionAPI) {
 }
 
 export const __test__ = {
+	MCP_COMPLETIONS,
 	formatStatus,
 };

@@ -6,8 +6,8 @@
  * policy that restricts file operations to the current project directory.
  *
  * Config file locations (both are merged; project-local wins on conflict):
- *   ~/.pi/agent/permissions.jsonc     — global
- *   .pi/permissions.jsonc             — project-local
+ *   ~/.pi/agent/permissions.jsonc    : global
+ *   .pi/permissions.jsonc            : project-local
  *
  * Agent name resolution (first match wins):
  *   1. PI_AGENT_NAME environment variable
@@ -35,9 +35,9 @@
  *     // Bash is intentionally excluded here: shell path extraction is too fragile
  *     // for reliable enforcement and should be handled by an OS sandbox backend.
  *     // Explicit "allow" rules with externalPathAction: "allow" bypass this.
- *     //   "allow"  — no restriction (default)
- *     //   "ask"    — prompt when path is outside cwd
- *     //   "block"  — block when path is outside cwd
+ *     //   "allow" : no restriction (default)
+ *     //   "ask"   : prompt when path is outside cwd
+ *     //   "block" : block when path is outside cwd
  *     "externalPath": "ask"
  *   },
  *   "agents": {
@@ -50,14 +50,14 @@
  * }
  *
  * Rule fields:
- *   tool               — tool name or "*" for any tool
- *   match              — optional matcher for command/path target:
+ *   tool              : tool name or "*" for any tool
+ *   match             : optional matcher for command/path target:
  *                        - advanced: regex (if regex metacharacters are present)
  *                        - bash shorthand: "rg" (word boundary), "rg *" (prefix)
  *                        - non-bash shorthand: case-insensitive substring
- *   action             — "allow" | "block" | "ask"
- *   reason             — optional human-readable string for prompts/notifications
- *   externalPathAction — "inherit" (default) | "allow" | "ask" | "block"
+ *   action            : "allow" | "block" | "ask"
+ *   reason            : optional human-readable string for prompts/notifications
+ *   externalPathAction: "inherit" (default) | "allow" | "ask" | "block"
  *                        Overrides the global externalPath policy for this rule.
  *                        Only meaningful for structured filesystem tools when
  *                        action is "allow". Bash ignores this for now.
@@ -67,9 +67,9 @@
  * filesystem tools, then the call is allowed.
  *
  * Per-agent profiles:
- *   inherit      — true (default): agent rules are prepended to default rules
+ *   inherit     : true (default): agent rules are prepended to default rules
  *                  false: agent rules completely replace default rules
- *   externalPath — overrides the default externalPath policy for this agent
+ *   externalPath: overrides the default externalPath policy for this agent
  *                  (structured filesystem tools only)
  */
 
@@ -178,6 +178,14 @@ function applyMcpEnvironment(cwd: string, sessionId?: string): void {
 }
 
 // ─── Extension ────────────────────────────────────────────────────────────────
+
+export const PERMISSIONS_COMPLETIONS = [
+	{ value: "help",      label: "help: show usage" },
+	{ value: "approvals", label: "approvals: show session approvals" },
+	{ value: "reset",     label: "reset: reset approvals/rules" },
+	{ value: "mode",      label: "mode: show permission mode" },
+	{ value: "sandbox",   label: "sandbox: show or manage sandbox (status|probe|repair|enable|disable)" },
+] as const;
 
 export default function (pi: ExtensionAPI) {
 	pi.registerFlag("agent-name", {
@@ -1389,7 +1397,7 @@ export default function (pi: ExtensionAPI) {
 				return askPermission(toolName, input, rule.reason, projectRoot, ctx);
 			}
 
-			// action === "allow" — still check external path unless opted out
+			// action === "allow": still check external path unless opted out
 			if (rule.action === "allow") {
 				if (toolName === "bash") {
 					if (parsedBash) {
@@ -1420,7 +1428,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		// No rule matched — check external path policy
+		// No rule matched: check external path policy
 		if (policy.externalPath !== "allow") {
 			const externalPaths = getExternalPaths(toolName, input, ctx.cwd);
 			if (externalPaths.length > 0) {
@@ -1438,6 +1446,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("permissions", {
 		description: "Show permission summary and subcommands (/permissions help)",
+		getArgumentCompletions: (prefix) =>
+			PERMISSIONS_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			agentName = detectAgentName(pi);
 			profileName = detectProfileName(pi);
@@ -1559,7 +1569,7 @@ export default function (pi: ExtensionAPI) {
 					lines.push(`  ${theme.fg("muted", "External path:")}${theme.fg(epColor, ` ${externalPath}`)}${theme.fg("dim", " (structured tools)")}`);
 					lines.push(`  ${theme.fg("muted", "Bash sandbox: ")}${theme.fg(sandboxActive ? "success" : "dim", sandboxStatus)}`);
 					lines.push(`  ${theme.fg("muted", "Bash exec:    ")}${theme.fg(sandboxActive ? "success" : "warning", bashExecutionMode)}`);
-					lines.push(`  ${theme.fg("muted", "Shell parser: ")}${theme.fg(treeSitterReady ? "success" : "warning", shellParserStatus)}${!treeSitterReady ? theme.fg("dim", " — whole-command approvals only") : ""}`);
+					lines.push(`  ${theme.fg("muted", "Shell parser: ")}${theme.fg(treeSitterReady ? "success" : "warning", shellParserStatus)}${!treeSitterReady ? theme.fg("dim", ": whole-command approvals only") : ""}`);
 					lines.push(`  ${theme.fg("muted", "Approvals:    ")}${theme.fg("warning", `${sessionApprovalCount} session`)}${theme.fg("dim", ", ")}${theme.fg("accent", `${persistentApprovals.length} saved`)}`);
 					if (sessionAllows.size > 0) {
 						lines.push(`  ${theme.fg("muted", "Session tools:")}${theme.fg("dim", ` ${[...sessionAllows].join(", ")}`)}`);
@@ -1620,7 +1630,7 @@ export default function (pi: ExtensionAPI) {
 					lines.push(`  ${theme.fg("muted", "External path:  ")}${theme.fg(epColor, externalPath)}${theme.fg("dim", " (structured tools)")}`);
 					lines.push(`  ${theme.fg("muted", "Bash sandbox:   ")}${theme.fg(sandboxActive ? "success" : "dim", sandboxStatus)}`);
 					lines.push(`  ${theme.fg("muted", "Bash exec mode: ")}${theme.fg(sandboxActive ? "success" : "warning", bashExecutionMode)}`);
-					lines.push(`  ${theme.fg("muted", "Shell parser:   ")}${theme.fg(treeSitterReady ? "success" : "warning", shellParserStatus)}${!treeSitterReady ? theme.fg("dim", " — whole-command approvals only") : ""}`);
+					lines.push(`  ${theme.fg("muted", "Shell parser:   ")}${theme.fg(treeSitterReady ? "success" : "warning", shellParserStatus)}${!treeSitterReady ? theme.fg("dim", ": whole-command approvals only") : ""}`);
 					lines.push(`  ${theme.fg("muted", "Sandbox TMPDIR: ")}${theme.fg("dim", sandboxTmpDir ?? getEffectiveSandboxTmpDir(ctx.cwd, config.sandbox))}${theme.fg("dim", sandboxTmpDirEphemeral ? " (session)" : " (shared)")}`);
 					lines.push(`  ${theme.fg("muted", "Protected read: ")}${theme.fg("warning", `${protectedResources.denyRead.length}`)}`);
 					for (const pattern of protectedResources.denyRead.slice(0, 4)) lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", pattern)}`);

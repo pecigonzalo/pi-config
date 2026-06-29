@@ -270,9 +270,20 @@ function showHelp(ctx: ExtensionCommandContext): void {
   console.log(HELP_TEXT);
 }
 
+const DEBUG_COMPLETIONS = [
+  { value: "current",  label: "current: show current system prompt (default)" },
+  { value: "last",     label: "last: show prompt captured at last agent_start" },
+  { value: "raw",      label: "raw: show raw JSON prompt" },
+  { value: "tools",    label: "tools: include tool parameter schemas" },
+  { value: "no-tools", label: "no-tools: hide tool parameter schemas" },
+  { value: "help",     label: "help: show usage" },
+] as const;
+
 function registerDebugCommand(pi: ExtensionAPI, getLastSnapshot: () => PromptSnapshot | undefined): void {
   pi.registerCommand("debug", {
     description: "Debug Pi runtime state",
+    getArgumentCompletions: (prefix) =>
+      DEBUG_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
     handler: async (args, ctx) => {
       const request = parsePromptArgs(args);
       if (request.help) {
@@ -483,6 +494,7 @@ export default function debugExtension(pi: ExtensionAPI) {
 }
 
 export const __test__ = {
+  DEBUG_COMPLETIONS,
   HELP_TEXT,
   parsePromptArgs,
   buildToolLines,

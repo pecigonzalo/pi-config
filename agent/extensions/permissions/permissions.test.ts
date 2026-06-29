@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, it, expect, mock } from "bun:test";
+import { afterAll, beforeAll, describe, it, expect, mock, test } from "bun:test";
 import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile as execFileCallback } from "node:child_process";
@@ -2237,4 +2237,21 @@ describe("tree-sitter policy integration", () => {
 		expect(unapproved).toBeDefined();
 		expect(unapproved!.name).toBe("rm");
 	});
+});
+
+import { PERMISSIONS_COMPLETIONS } from "./permissions";
+
+test("permissions completions list all accepted subcommands", () => {
+  expect(PERMISSIONS_COMPLETIONS.map((s) => s.value)).toEqual([
+    "help", "approvals", "reset", "mode", "sandbox",
+  ]);
+});
+
+test("permissions completions filter by prefix", () => {
+  const results = PERMISSIONS_COMPLETIONS.filter((s) => s.value.startsWith("ap"));
+  expect(results.map((s) => s.value)).toEqual(["approvals"]);
+});
+
+test("permissions completions return nothing for unrecognised prefix", () => {
+  expect(PERMISSIONS_COMPLETIONS.filter((s) => s.value.startsWith("xyz"))).toEqual([]);
 });

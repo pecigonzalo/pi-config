@@ -301,6 +301,19 @@ function shouldKeepInModelContext(message: unknown): boolean {
   return details?.audience === "nudge" || details?.audience === "auto-fix";
 }
 
+const CODE_HINTS_COMPLETIONS = [
+  { value: "status",   label: "status: show current mode and settings" },
+  { value: "on",       label: "on: enable code hints" },
+  { value: "enable",   label: "enable: enable code hints (alias for on)" },
+  { value: "off",      label: "off: disable code hints" },
+  { value: "disable",  label: "disable: disable code hints (alias for off)" },
+  { value: "mode",     label: "mode: show or set hints mode" },
+  { value: "debug",    label: "debug: show debug/timeout info" },
+  { value: "timeouts", label: "timeouts: show timeout config (alias for debug)" },
+  { value: "reset",    label: "reset: reset state" },
+  { value: "help",     label: "help: show usage" },
+] as const;
+
 export default function codeHintsExtension(pi: ExtensionAPI) {
   let lspService: LspManagerService | undefined;
   let generation = 0;
@@ -570,6 +583,8 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
 
   pi.registerCommand("code-hints", {
     description: "Show or configure loop-end code hints",
+    getArgumentCompletions: (prefix) =>
+      CODE_HINTS_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
     handler: async (args, ctx) => {
       const result = applyCommand(args, options, resetState, currentStatus);
       showCommandResult(result, ctx);
@@ -578,6 +593,7 @@ export default function codeHintsExtension(pi: ExtensionAPI) {
 }
 
 export const __test__ = {
+  CODE_HINTS_COMPLETIONS,
   applyCommand,
   collectErrorFingerprints,
   defaultOptions,

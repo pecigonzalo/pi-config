@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, test } from "bun:test";
 import { __test__ } from "./index";
 
 describe("debug prompt arguments", () => {
@@ -112,4 +112,19 @@ describe("debug prompt document formatting", () => {
     expect(__test__.lineStyle("- Read files")).toBe("bullet");
     expect(__test__.lineStyle("  parameters:")).toBe("toolLine");
   });
+});
+
+test("debug completions list all accepted subcommands", () => {
+  expect(__test__.DEBUG_COMPLETIONS.map((s) => s.value)).toEqual([
+    "current", "last", "raw", "tools", "no-tools", "help",
+  ]);
+});
+
+test("debug completions filter by prefix", () => {
+  const results = __test__.DEBUG_COMPLETIONS.filter((s) => s.value.startsWith("no"));
+  expect(results.map((s) => s.value)).toEqual(["no-tools"]);
+});
+
+test("debug completions return nothing for unrecognised prefix", () => {
+  expect(__test__.DEBUG_COMPLETIONS.filter((s) => s.value.startsWith("xyz"))).toEqual([]);
 });
