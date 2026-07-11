@@ -37,6 +37,13 @@ Both files are independent. When both exist, defaults are merged field-wise with
 
 Efforts are merged by name with project values overriding global ones.
 
+## Nested delegation
+
+Child workers cannot delegate with `task` by default. To allow a specific agent
+or profile to delegate, set `allowDelegation: true` in its frontmatter. The
+existing task-depth limit still applies. This policy also prevents generic
+workers from delegating.
+
 ## 2) Unified context model + persist
 
 Resolution uses the same model across agent/profile/tasks defaults:

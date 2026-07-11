@@ -46,6 +46,7 @@ export interface AgentConfig {
 	persist?: boolean;
 	inheritProjectContext?: boolean;
 	inheritSkills?: boolean;
+	allowDelegation?: boolean;
 	systemPrompt: string;
 	source: ConfigSource;
 	filePath: string;
@@ -62,6 +63,7 @@ export interface ProfileConfig {
 	persist?: boolean;
 	inheritProjectContext?: boolean;
 	inheritSkills?: boolean;
+	allowDelegation?: boolean;
 	permissionsProfile?: string;
 	systemPromptMode: SystemPromptMode;
 	systemPrompt: string;
@@ -387,6 +389,7 @@ function parseAgentConfig(
 		inheritProjectContext:
 			frontmatter.inheritProjectContext === undefined ? undefined : parseBoolean(frontmatter.inheritProjectContext, false),
 		inheritSkills: frontmatter.inheritSkills === undefined ? undefined : parseBoolean(frontmatter.inheritSkills, false),
+		allowDelegation: parseOptionalBoolean(frontmatter.allowDelegation ?? frontmatter.allow_delegation),
 		systemPrompt: body,
 		source,
 		filePath,
@@ -414,6 +417,7 @@ function parseProfileConfig(
 		inheritProjectContext:
 			frontmatter.inheritProjectContext === undefined ? undefined : parseBoolean(frontmatter.inheritProjectContext, false),
 		inheritSkills: frontmatter.inheritSkills === undefined ? undefined : parseBoolean(frontmatter.inheritSkills, false),
+		allowDelegation: parseOptionalBoolean(frontmatter.allowDelegation ?? frontmatter.allow_delegation),
 		permissionsProfile: parseString(frontmatter.permissionsProfile ?? frontmatter.permissions ?? frontmatter.permissionProfile),
 		systemPromptMode: parseSystemPromptMode(frontmatter.systemPromptMode),
 		systemPrompt: body,

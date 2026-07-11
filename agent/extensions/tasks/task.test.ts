@@ -425,6 +425,7 @@ describe("tasks extension compact schema", () => {
 		expect(result.systemPrompt).toContain("`smart` (openai-codex/gpt-5.6-sol, thinking: `high`)");
 		expect(result.systemPrompt).toContain("do not use a thinking level such as `high` as an effort");
 		expect(result.systemPrompt).toContain('omit `agent` and provide a behavioral `prompt`; do not set `agent: "generic"`');
+		expect(result.systemPrompt).toContain("Child workers cannot use `task` unless their selected agent or profile declares `allowDelegation: true`");
 	});
 
 	it("rejects bare generic task steps with actionable recovery guidance", async () => {
@@ -481,6 +482,7 @@ describe("tasks worker tool configuration", () => {
 					enabled: true,
 					availability: "task",
 					excludeTools: ["bash", "write"],
+					allowDelegation: true,
 					systemPromptMode: "append",
 					systemPrompt: "Review carefully.",
 					source: "user",
@@ -493,14 +495,49 @@ describe("tasks worker tool configuration", () => {
 
 		expect(resolved.error).toBeUndefined();
 		expect(resolved.config.excludeTools).toEqual(["bash", "write"]);
+		expect(resolved.config.allowDelegation).toBeTrue();
+	});
+
+	it("inherits the profile delegation opt-in", () => {
+		const resources = createResources({
+			profiles: [
+				{
+					name: "delegating",
+					description: "Can delegate",
+					enabled: true,
+					allowDelegation: true,
+					systemPromptMode: "append",
+					systemPrompt: "Delegate only when needed.",
+					source: "user",
+					filePath: "/tmp/delegating.md",
+				},
+			],
+		});
+
+		const resolved = __test__.resolveWorkerConfig({ profile: "delegating", task: "Plan" }, resources);
+
+		expect(resolved.error).toBeUndefined();
+		expect(resolved.config.allowDelegation).toBeTrue();
 	});
 
 	it("appends exclude-tools flags for child pi processes", () => {
 		const args: string[] = [];
 
-		__test__.appendWorkerToolFlags(args, { tools: ["read", "edit"], excludeTools: ["bash"] });
+		__test__.appendWorkerToolFlags(args, {
+			tools: ["read", "edit"],
+			excludeTools: ["bash"],
+			allowDelegation: true,
+		});
 
 		expect(args).toEqual(["--tools", "read,edit", "--exclude-tools", "bash"]);
+	});
+
+	it("disables task delegation for child workers by default", () => {
+		const args: string[] = [];
+
+		__test__.appendWorkerToolFlags(args, { tools: ["read", "task"] });
+
+		expect(args).toEqual(["--tools", "read,task", "--exclude-tools", "task"]);
 	});
 
 	it("approves project-local inputs for child pi processes when project context is requested", () => {

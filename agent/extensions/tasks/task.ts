@@ -641,6 +641,7 @@ interface ResolvedWorkerConfig {
 	persist: boolean;
 	inheritProjectContext: boolean;
 	inheritSkills: boolean;
+	allowDelegation: boolean;
 	systemPrompt: string;
 	systemPromptMode: "append" | "replace";
 	displayAgentName: string;
@@ -722,6 +723,7 @@ function formatTaskDelegationGuidance(cwd: string): string {
 		`- With \`agentScope: "project"\`, valid task agents are: ${formatTaskAgentOptions(projectResources)}. With \`agentScope: "both"\`, valid task agents are: ${formatTaskAgentOptions(combinedResources)}.`,
 		`- Valid \`effort\` presets are: ${formatTaskEffortOptions(combinedResources)}. Use these exact preset names; do not use a thinking level such as \`high\` as an effort. Omit \`effort\` to use the selected agent's default.`,
 		'- To create a generic worker, omit `agent` and provide a behavioral `prompt`; do not set `agent: "generic"`.',
+		"- Child workers cannot use `task` unless their selected agent or profile declares `allowDelegation: true`.",
 		"- An agent must be listed above for its selected scope; a main-session-only agent is not valid for `task`.",
 	].join("\n");
 }
@@ -928,6 +930,7 @@ function resolveWorkerConfig(
 
 	const inheritProjectContext = agent?.inheritProjectContext ?? profile?.inheritProjectContext ?? false;
 	const inheritSkills = agent?.inheritSkills ?? profile?.inheritSkills ?? false;
+	const allowDelegation = agent?.allowDelegation ?? profile?.allowDelegation ?? false;
 
 	if ((options.requireBehavior ?? true) && !agent && !prompt.trim()) {
 		return { error: formatGenericWorkerBehaviorError(resources) };
@@ -950,6 +953,7 @@ function resolveWorkerConfig(
 			persist: effectivePersist,
 			inheritProjectContext,
 			inheritSkills,
+			allowDelegation,
 			systemPrompt: prompt,
 			systemPromptMode,
 			displayAgentName,
@@ -1025,14 +1029,18 @@ function parseAgentModelSpec(
 	return { provider: currentModel.provider, modelId: normalized };
 }
 
-function appendWorkerToolFlags(args: string[], worker: Pick<ResolvedWorkerConfig, "tools" | "excludeTools">): void {
+function appendWorkerToolFlags(
+	args: string[],
+	worker: Pick<ResolvedWorkerConfig, "tools" | "excludeTools" | "allowDelegation">,
+): void {
 	if (worker.tools !== undefined) {
 		if (worker.tools.length > 0) args.push("--tools", worker.tools.join(","));
 		else args.push("--no-tools");
 	}
-	if (worker.excludeTools && worker.excludeTools.length > 0) {
-		args.push("--exclude-tools", worker.excludeTools.join(","));
-	}
+
+	const excludedTools = new Set(worker.excludeTools);
+	if (!worker.allowDelegation) excludedTools.add("task");
+	if (excludedTools.size > 0) args.push("--exclude-tools", [...excludedTools].join(","));
 }
 
 function appendProjectTrustFlags(
