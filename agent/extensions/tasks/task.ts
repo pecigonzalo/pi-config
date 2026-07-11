@@ -688,6 +688,44 @@ function formatEffortList(resources: ResourceDiscoveryResult): string {
 	return resources.efforts.map((effort) => `${effort.name} (${effort.source})`).join(", ") || "none";
 }
 
+function formatTaskAgentOptions(resources: ResourceDiscoveryResult): string {
+	return (
+		getTaskCallableAgents(resources)
+			.map((agent) => {
+				const defaultEffort = agent.defaultEffort ? ` (default effort: \`${agent.defaultEffort}\`)` : "";
+				return `\`${agent.name}\`${defaultEffort}`;
+			})
+			.join(", ") || "none"
+	);
+}
+
+function formatTaskEffortOptions(resources: ResourceDiscoveryResult): string {
+	return (
+		resources.efforts
+			.map((effort) => {
+				const model = effort.provider ? `${effort.provider}/${effort.model}` : effort.model;
+				const thinkingLevel = effort.thinkingLevel ? `, thinking: \`${effort.thinkingLevel}\`` : "";
+				return `\`${effort.name}\` (${model}${thinkingLevel})`;
+			})
+			.join(", ") || "none"
+	);
+}
+
+function formatTaskDelegationGuidance(cwd: string): string {
+	const userResources = discoverResources(cwd, "user");
+	const projectResources = discoverResources(cwd, "project");
+	const combinedResources = discoverResources(cwd, "both");
+
+	return [
+		"Task delegation choices for this directory:",
+		`- With the default \`agentScope: "user"\`, valid task agents are: ${formatTaskAgentOptions(userResources)}.`,
+		`- With \`agentScope: "project"\`, valid task agents are: ${formatTaskAgentOptions(projectResources)}. With \`agentScope: "both"\`, valid task agents are: ${formatTaskAgentOptions(combinedResources)}.`,
+		`- Valid \`effort\` presets are: ${formatTaskEffortOptions(combinedResources)}. Use these exact preset names; do not use a thinking level such as \`high\` as an effort. Omit \`effort\` to use the selected agent's default.`,
+		'- To create a generic worker, omit `agent` and provide a behavioral `prompt`; do not set `agent: "generic"`.',
+		"- An agent must be listed above for its selected scope; a main-session-only agent is not valid for `task`.",
+	].join("\n");
+}
+
 function composePromptLayers(...layers: string[]): string {
 	const trimmed = layers.map((layer) => layer.trim()).filter(Boolean);
 	return trimmed.join("\n\n---\n\n");
@@ -3748,7 +3786,7 @@ export default function (pi: ExtensionAPI) {
 		clearLiveTaskControllers();
 	});
 
-	pi.on("before_agent_start", async (event) => {
+	pi.on("before_agent_start", async (event, ctx) => {
 		if (startupCompositionError) {
 			return {
 				systemPrompt: [
@@ -3758,14 +3796,14 @@ export default function (pi: ExtensionAPI) {
 				].join("\n"),
 			};
 		}
+
+		const taskGuidance = formatTaskDelegationGuidance(ctx.cwd);
 		const worker = activeMainWorker;
-		if (!worker) return undefined;
-		const prompt = worker.systemPrompt.trim();
-		if (!prompt) return undefined;
-		if (worker.systemPromptMode === "replace") {
-			return { systemPrompt: prompt };
+		const workerPrompt = worker?.systemPrompt.trim() ?? "";
+		if (worker?.systemPromptMode === "replace" && workerPrompt) {
+			return { systemPrompt: composePromptLayers(workerPrompt, taskGuidance) };
 		}
-		return { systemPrompt: `${event.systemPrompt}\n\n---\n\n${prompt}` };
+		return { systemPrompt: composePromptLayers(event.systemPrompt, taskGuidance, workerPrompt) };
 	});
 
 	pi.registerCommand("agent", {
@@ -4661,6 +4699,7 @@ export const __test__ = {
 	preflightTaskRun,
 	relayTaskExtensionUiRequest,
 	resolveModelFromEffort,
+	formatTaskDelegationGuidance,
 	resolveParentSessionForCurrentSession,
 	resolvePersistedTaskSessionRoot,
 	resolveTaskOriginForBranch: (entries: readonly SessionEntry[], leafId?: string | null) =>

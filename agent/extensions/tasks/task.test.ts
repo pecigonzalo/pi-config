@@ -366,6 +366,67 @@ describe("tasks extension compact schema", () => {
 		expect(tool.parameters.properties.steps.items.properties.prompt.description).toContain("Required for generic workers");
 	});
 
+	it("injects exact task agent and effort choices into the system prompt", async () => {
+		mockResources = createResources({
+			agents: [
+				{
+					name: "implementer",
+					description: "Implementation worker",
+					enabled: true,
+					availability: "task",
+					defaultEffort: "balanced",
+					systemPromptMode: "append",
+					systemPrompt: "Implement carefully.",
+					source: "user",
+					filePath: "/tmp/implementer.md",
+				},
+				{
+					name: "orchestrator",
+					description: "Main-session worker",
+					enabled: true,
+					availability: "main",
+					systemPromptMode: "append",
+					systemPrompt: "Coordinate work.",
+					source: "user",
+					filePath: "/tmp/orchestrator.md",
+				},
+			],
+			efforts: [
+				{
+					name: "balanced",
+					description: "Balanced effort",
+					provider: "openai-codex",
+					model: "gpt-5.6-terra",
+					source: "user",
+					filePath: "/tmp/tasks.json",
+				},
+				{
+					name: "smart",
+					description: "High-thinking effort",
+					provider: "openai-codex",
+					model: "gpt-5.6-sol",
+					thinkingLevel: "high",
+					source: "user",
+					filePath: "/tmp/tasks.json",
+				},
+			],
+		});
+		const { eventHandlers } = createExtensionHarness();
+
+		const result = await eventHandlers.before_agent_start?.(
+			{ systemPrompt: "Base system prompt." },
+			{ cwd: process.cwd() },
+		);
+
+		expect(result.systemPrompt).toContain("Task delegation choices for this directory:");
+		expect(result.systemPrompt).toContain("`implementer` (default effort: `balanced`)");
+		expect(result.systemPrompt).not.toContain("`orchestrator`");
+		expect(result.systemPrompt).toContain("`balanced` (openai-codex/gpt-5.6-terra)");
+		expect(result.systemPrompt).toContain("`smart` (openai-codex/gpt-5.6-sol, thinking: `high`)");
+		expect(result.systemPrompt).toContain("do not use a thinking level such as `high` as an effort");
+		expect(result.systemPrompt).toContain('omit `agent` and provide a behavioral `prompt`; do not set `agent: "generic"`');
+	});
+
 	it("rejects bare generic task steps with actionable recovery guidance", async () => {
 		mockResources = createResources({
 			agents: [
@@ -1534,28 +1595,28 @@ describe("tasks RPC completion coordination", () => {
 });
 
 test("tasks completions list all accepted subcommands", () => {
-	expect(__test__.TASKS_COMPLETIONS.map((s) => s.value)).toEqual([
+	expect(__test__.TASKS_COMPLETIONS.map((s: { value: string }) => s.value)).toEqual([
 		"list", "show", "view", "open", "attach", "origin", "steer", "parent", "toggle",
 	]);
 });
 
 test("tasks completions filter by prefix", () => {
-	const results = __test__.TASKS_COMPLETIONS.filter((s) => s.value.startsWith("st"));
-	expect(results.map((s) => s.value)).toEqual(["steer"]);
+	const results = __test__.TASKS_COMPLETIONS.filter((s: { value: string }) => s.value.startsWith("st"));
+	expect(results.map((s: { value: string }) => s.value)).toEqual(["steer"]);
 });
 
 test("tasks completions return nothing for unrecognised prefix", () => {
-	expect(__test__.TASKS_COMPLETIONS.filter((s) => s.value.startsWith("xyz"))).toEqual([]);
+	expect(__test__.TASKS_COMPLETIONS.filter((s: { value: string }) => s.value.startsWith("xyz"))).toEqual([]);
 });
 
 test("agent completions list clear", () => {
-	expect(__test__.AGENT_COMPLETIONS.map((s) => s.value)).toEqual(["clear"]);
+	expect(__test__.AGENT_COMPLETIONS.map((s: { value: string }) => s.value)).toEqual(["clear"]);
 });
 
 test("profile completions list clear", () => {
-	expect(__test__.PROFILE_COMPLETIONS.map((s) => s.value)).toEqual(["clear"]);
+	expect(__test__.PROFILE_COMPLETIONS.map((s: { value: string }) => s.value)).toEqual(["clear"]);
 });
 
 test("effort completions list clear", () => {
-	expect(__test__.EFFORT_COMPLETIONS.map((s) => s.value)).toEqual(["clear"]);
+	expect(__test__.EFFORT_COMPLETIONS.map((s: { value: string }) => s.value)).toEqual(["clear"]);
 });
