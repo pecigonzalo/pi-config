@@ -6,7 +6,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import { approvalsCoverBash, approvalsCoverPaths, extractApprovalRecords, getApprovalsSettings } from "./approvals";
+import { APPROVAL_CLOCK_SKEW_MS, approvalsCoverBash, approvalsCoverPaths, extractApprovalRecords, getApprovalsSettings } from "./approvals";
 import { resolveCodemodePolicy } from "./codemode";
 import { GIT_METADATA_PROTECTED_RESOURCE_MATCH } from "./protected-resources";
 import { findGitRepoRoot, getFilesystemApprovalTargets, isPathOutsideCwd, ruleMatch } from "./matching";
@@ -36,7 +36,7 @@ import {
 	shouldProbeSandboxAfterIdle,
 } from "./sandbox-lifecycle";
 import { parseBashCommand, arityPrefix, isTreeSitterAvailable } from "./shell-parse";
-import type { Rule, SandboxManagerLike, SandboxRuntimeConfigLike } from "./shared";
+import type { ApprovalRecord, Rule, SandboxManagerLike, SandboxRuntimeConfigLike } from "./shared";
 
 const execFile = promisify(execFileCallback);
 const TEST_SCRATCH_DIR = path.join(process.cwd(), ".tmp", "permissions-tests");
@@ -460,6 +460,35 @@ describe("approval file parsing", () => {
 		expect(records).toHaveLength(1);
 		expect(warnings).toHaveLength(1);
 		expect(warnings[0]).toContain("Ignoring malformed approval entry #2");
+	});
+
+	it("rejects invalid tools, scopes, values, and timestamps", () => {
+		const now = 1_000_000;
+		const invalid = [
+			{ tool: "unknown", scopeType: "tool", scopeValue: "unknown", createdAt: now },
+			{ tool: "*", scopeType: "tool", scopeValue: "*", createdAt: now },
+			{ tool: "read", scopeType: "bash-prefix", scopeValue: "git", createdAt: now },
+			{ tool: "bash", scopeType: "path-prefix", scopeValue: "/tmp", createdAt: now },
+			{ tool: "read", scopeType: "tool", scopeValue: "write", createdAt: now },
+			{ tool: "read", scopeType: "path-prefix", scopeValue: "  ", createdAt: now },
+			{ tool: "bash", scopeType: "tool", scopeValue: "bash", createdAt: Number.NaN },
+			{ tool: "bash", scopeType: "tool", scopeValue: "bash", createdAt: Number.POSITIVE_INFINITY },
+			{ tool: "bash", scopeType: "tool", scopeValue: "bash", createdAt: -1 },
+			{ tool: "bash", scopeType: "tool", scopeValue: "bash", createdAt: now + APPROVAL_CLOCK_SKEW_MS + 1 },
+		];
+		const warnings: string[] = [];
+		expect(extractApprovalRecords({ approvals: invalid }, (warning) => warnings.push(warning), "test", now)).toEqual([]);
+		expect(warnings).toHaveLength(invalid.length);
+	});
+
+	it("accepts known valid combinations and timestamps within clock skew", () => {
+		const now = 1_000_000;
+		const approvals: ApprovalRecord[] = [
+			{ tool: "bash", scopeType: "bash-exact", scopeValue: "git status", createdAt: now },
+			{ tool: "read", scopeType: "path-prefix", scopeValue: "/repo", createdAt: now + APPROVAL_CLOCK_SKEW_MS },
+			{ tool: "mcp", scopeType: "tool", scopeValue: "mcp", createdAt: 0, projectRoot: "/repo", agentName: "default" },
+		];
+		expect(extractApprovalRecords({ approvals }, undefined, "test", now)).toEqual(approvals);
 	});
 });
 
@@ -1020,9 +1049,10 @@ describe("permissions extension sandbox lifecycle", () => {
 		sandboxManager: { initialize: () => Promise<void>; reset: () => Promise<void>; wrapWithSandbox: (command: string) => Promise<string> };
 		now: () => number;
 		notifications?: string[];
-		approvalSelection?: string;
+		approvalSelection?: string | ((choices: string[]) => string | undefined);
 		blockReason?: string;
 		approvalOptions?: string[][];
+		writeApprovalFile?: () => void;
 	}) {
 		await fs.mkdir(TEST_SCRATCH_DIR, { recursive: true });
 		const tmp = await fs.mkdtemp(path.join(TEST_SCRATCH_DIR, "perm-extension-probe-"));
@@ -1064,14 +1094,16 @@ describe("permissions extension sandbox lifecycle", () => {
 				notify: (message: string) => options.notifications?.push(message),
 				select: async (_title: string, choices: string[]) => {
 					options.approvalOptions?.push(choices);
-					return options.approvalSelection;
+					return typeof options.approvalSelection === "function"
+						? options.approvalSelection(choices)
+						: options.approvalSelection;
 				},
 				input: async () => options.blockReason,
 			},
 		} as unknown as ExtensionContext;
 
 		const { default: registerPermissions } = await import("./permissions");
-		registerPermissions(pi);
+		registerPermissions(pi, { writeApprovalFile: options.writeApprovalFile });
 		for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
 
 		return {
@@ -1136,6 +1168,92 @@ describe("permissions extension sandbox lifecycle", () => {
 
 		expect(result).toBeUndefined();
 		expect(approvalOptions[0]?.[0]).toBe("Allow once");
+	});
+
+	it.each([
+		{
+			name: "Bash exact permanent",
+			toolName: "bash",
+			input: { command: "permissions-save-failure-command --unique" },
+			rules: [{ tool: "bash", action: "ask" }] as Rule[],
+			pick: (choices: string[]) => choices.find((choice) => choice.startsWith("Save exact command permanently")),
+		},
+		{
+			name: "path permanent",
+			toolName: "read",
+			input: { path: "unique-save-failure.txt" },
+			rules: [{ tool: "read", action: "ask" }] as Rule[],
+			pick: (choices: string[]) => choices.find((choice) => choice.startsWith("Allow file permanently")),
+		},
+		{
+			name: "tool permanent",
+			toolName: "mcp",
+			input: { server: "unique-save-failure", tool: "call" },
+			rules: [{ tool: "mcp", action: "ask" }] as Rule[],
+			pick: (choices: string[]) => choices.find((choice) => choice === "Allow tool permanently"),
+		},
+	])("warns, suppresses success, rolls back, and prompts again for $name", async ({ toolName, input, rules, pick }) => {
+		const notifications: string[] = [];
+		const approvalOptions: string[][] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			rules,
+			now: () => 0,
+			notifications,
+			approvalOptions,
+			approvalSelection: pick,
+			writeApprovalFile: () => { throw new Error("injected save failure"); },
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			await toolCall({ toolName, input }, harness.ctx);
+			await toolCall({ toolName, input }, harness.ctx);
+
+			expect(approvalOptions).toHaveLength(2);
+			expect(notifications.filter((message) => message.includes("Failed to save approvals"))).toHaveLength(2);
+			expect(notifications.some((message) => message.includes("injected save failure"))).toBe(true);
+			expect(notifications.some((message) => message.includes("saved permanently") || message.includes("allowed permanently") || message.includes("approved permanently"))).toBe(false);
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("does not claim saved approvals were cleared when reset persistence fails", async () => {
+		const notifications: string[] = [];
+		let writes = 0;
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			rules: [{ tool: "read", action: "ask" }],
+			now: () => 0,
+			notifications,
+			approvalSelection: (choices) => choices.find((choice) => choice === "Allow tool permanently"),
+			writeApprovalFile: () => {
+				writes++;
+				if (writes > 1) throw new Error("reset save failure");
+			},
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			await toolCall({ toolName: "read", input: { path: "reset-save-failure.txt" } }, harness.ctx);
+			await harness.commands.get("permissions")?.handler("reset saved", harness.ctx);
+
+			expect(notifications.some((message) => message.includes("reset save failure"))).toBe(true);
+			expect(notifications.some((message) => message.includes("saved approvals cleared"))).toBe(false);
+		} finally {
+			await harness.restore();
+		}
 	});
 
 	it("blocks an explicit Block selection", async () => {

@@ -3,6 +3,7 @@ import type {
 	ApprovalFile,
 	ApprovalRecord,
 	ApprovalsSettings,
+	KnownToolName,
 	PermissionToolName,
 	PermissionsConfig,
 	ResolvedApprovalsSettings,
@@ -24,7 +25,7 @@ function approvalScopeMatch(
 	agentName: string,
 	settings: ResolvedApprovalsSettings,
 ): boolean {
-	if (approval.tool !== toolName && approval.tool !== "*") return false;
+	if (approval.tool !== toolName) return false;
 	if (settings.scopeByProject && approval.projectRoot !== projectRoot) return false;
 	if (settings.scopeByAgent && approval.agentName !== agentName) return false;
 	if (approval.scopeType !== "path-prefix") return false;
@@ -78,7 +79,7 @@ function bashApprovalMatches(
 	agentName: string,
 	settings: ResolvedApprovalsSettings,
 ): boolean {
-	if (approval.tool !== "bash" && approval.tool !== "*") return false;
+	if (approval.tool !== "bash") return false;
 	if (settings.scopeByProject && approval.projectRoot !== projectRoot) return false;
 	if (settings.scopeByAgent && approval.agentName !== agentName) return false;
 	if (approval.scopeType === "bash-exact") return approval.scopeValue === command;
@@ -95,28 +96,35 @@ export function approvalsCoverTool(
 ): boolean {
 	return approvals.some((a) => {
 		if (a.scopeType !== "tool") return false;
-		if (a.tool !== toolName && a.tool !== "*") return false;
+		if (a.tool !== toolName) return false;
 		if (settings.scopeByProject && a.projectRoot !== projectRoot) return false;
 		if (settings.scopeByAgent && a.agentName !== agentName) return false;
 		return true;
 	});
 }
 
+export const APPROVAL_CLOCK_SKEW_MS = 5 * 60 * 1000;
+const KNOWN_APPROVAL_TOOLS = new Set<KnownToolName>(["bash", "mcp", "read", "write", "edit", "grep", "find", "ls"]);
+const FILESYSTEM_APPROVAL_TOOLS = new Set<KnownToolName>(["read", "write", "edit", "grep", "find", "ls"]);
+
 function isApprovalScopeType(value: unknown): value is ApprovalRecord["scopeType"] {
 	return value === "path-prefix" || value === "tool" || value === "bash-exact" || value === "bash-prefix";
 }
 
-function toApprovalRecord(candidate: unknown): ApprovalRecord | undefined {
+function toApprovalRecord(candidate: unknown, now: number): ApprovalRecord | undefined {
 	if (!candidate || typeof candidate !== "object") return undefined;
 	const value = candidate as Partial<ApprovalRecord>;
-	if (typeof value.tool !== "string") return undefined;
+	if (typeof value.tool !== "string" || !KNOWN_APPROVAL_TOOLS.has(value.tool as KnownToolName)) return undefined;
 	if (!isApprovalScopeType(value.scopeType)) return undefined;
 	if (typeof value.scopeValue !== "string" || value.scopeValue.trim().length === 0) return undefined;
-	if (typeof value.createdAt !== "number" || !Number.isFinite(value.createdAt)) return undefined;
+	if (value.scopeType === "tool" && value.scopeValue !== value.tool) return undefined;
+	if ((value.scopeType === "bash-exact" || value.scopeType === "bash-prefix") && value.tool !== "bash") return undefined;
+	if (value.scopeType === "path-prefix" && !FILESYSTEM_APPROVAL_TOOLS.has(value.tool as KnownToolName)) return undefined;
+	if (typeof value.createdAt !== "number" || !Number.isFinite(value.createdAt) || value.createdAt < 0 || value.createdAt > now + APPROVAL_CLOCK_SKEW_MS) return undefined;
 	if (value.projectRoot !== undefined && typeof value.projectRoot !== "string") return undefined;
 	if (value.agentName !== undefined && typeof value.agentName !== "string") return undefined;
 	return {
-		tool: value.tool,
+		tool: value.tool as KnownToolName,
 		scopeType: value.scopeType,
 		scopeValue: value.scopeValue,
 		projectRoot: value.projectRoot,
@@ -129,6 +137,7 @@ export function extractApprovalRecords(
 	raw: unknown,
 	onWarning?: (message: string) => void,
 	filePath = "approvals file",
+	now = Date.now(),
 ): ApprovalRecord[] {
 	if (raw === undefined) return [];
 	if (!raw || typeof raw !== "object") {
@@ -144,7 +153,7 @@ export function extractApprovalRecords(
 
 	const result: ApprovalRecord[] = [];
 	for (let i = 0; i < file.approvals.length; i++) {
-		const parsed = toApprovalRecord(file.approvals[i]);
+		const parsed = toApprovalRecord(file.approvals[i], now);
 		if (!parsed) {
 			onWarning?.(`Ignoring malformed approval entry #${i + 1} in ${filePath}`);
 			continue;

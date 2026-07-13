@@ -85,6 +85,7 @@ import {
 	readJsonFile,
 	resolveProtectedResources,
 } from "./config";
+import { writeApprovalFileAtomic } from "./approval-store";
 import {
 	approvalsCoverBash,
 	approvalsCoverPaths,
@@ -203,7 +204,12 @@ export const PERMISSIONS_COMPLETIONS = [
 	{ value: "sandbox",   label: "sandbox: show or manage sandbox (status|probe|repair|enable|disable)" },
 ] as const;
 
-export default function (pi: ExtensionAPI) {
+export interface PermissionsExtensionDependencies {
+	writeApprovalFile?: typeof writeApprovalFileAtomic;
+}
+
+export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDependencies = {}) {
+	const writeApprovalFile = dependencies.writeApprovalFile ?? writeApprovalFileAtomic;
 	pi.registerFlag("agent-name", {
 		description: "Agent profile name to use for permissions (overrides PI_AGENT_NAME env var)",
 		type: "string",
@@ -397,9 +403,15 @@ export default function (pi: ExtensionAPI) {
 		persistentApprovals = dedupeApprovals(pruneExpiredApprovals(loaded, approvalsSettings));
 	};
 
-	const saveApprovals = () => {
+	const saveApprovals = (ctx?: ExtensionContext): boolean => {
 		const data = { approvals: dedupeApprovals(pruneExpiredApprovals(persistentApprovals, approvalsSettings)) };
-		fs.writeFileSync(approvalsFile, JSON.stringify(data, null, 2) + "\n", "utf-8");
+		try {
+			writeApprovalFile(approvalsFile, data);
+			return true;
+		} catch (error) {
+			warnPermissionIssue(ctx, `Failed to save approvals at ${approvalsFile}: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
+		}
 	};
 
 	const reload = (ctx: ExtensionContext) => {
@@ -425,12 +437,15 @@ export default function (pi: ExtensionAPI) {
 		sessionPathApprovals.push(...dedupeStrings(scopeValues).map((scopeValue) => createPathApproval(toolName, scopeValue, projectRoot)));
 	};
 
-	const savePathApprovals = (toolName: PermissionToolName, scopeValues: string[], projectRoot: string) => {
+	const savePathApprovals = (toolName: PermissionToolName, scopeValues: string[], projectRoot: string, ctx: ExtensionContext): boolean => {
+		const previousApprovals = persistentApprovals;
 		persistentApprovals = dedupeApprovals([
 			...persistentApprovals,
 			...dedupeStrings(scopeValues).map((scopeValue) => createPathApproval(toolName, scopeValue, projectRoot)),
 		]);
-		saveApprovals();
+		if (saveApprovals(ctx)) return true;
+		persistentApprovals = previousApprovals;
+		return false;
 	};
 
 	async function resetSandboxRuntime(ctx?: ExtensionContext, reason?: string) {
@@ -955,6 +970,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (choice === saveExactLabel) {
+				const previousApprovals = persistentApprovals;
 				persistentApprovals = dedupeApprovals([
 					...persistentApprovals,
 					{
@@ -966,14 +982,18 @@ export default function (pi: ExtensionAPI) {
 						createdAt: Date.now(),
 					},
 				]);
-				saveApprovals();
-				ctx.ui.notify(`✓ Bash command saved permanently: bash-exact:${approvalTarget}`, "info");
+				if (saveApprovals(ctx)) {
+					ctx.ui.notify(`✓ Bash command saved permanently: bash-exact:${approvalTarget}`, "info");
+				} else {
+					persistentApprovals = previousApprovals;
+				}
 			}
 
 			const selectedPrefix = typeof choice === "string" ? prefixOptionToValue.get(choice) : undefined;
 			if (selectedPrefix) {
 				const isPermanent = prefixPermanentToValue.has(choice as string);
 				if (isPermanent) {
+					const previousApprovals = persistentApprovals;
 					persistentApprovals = dedupeApprovals([
 						...persistentApprovals,
 						{
@@ -985,8 +1005,11 @@ export default function (pi: ExtensionAPI) {
 							createdAt: Date.now(),
 						},
 					]);
-					saveApprovals();
-					ctx.ui.notify(`✓ Bash prefix saved permanently: bash-prefix:${selectedPrefix} (matches: ${selectedPrefix} *)`, "info");
+					if (saveApprovals(ctx)) {
+						ctx.ui.notify(`✓ Bash prefix saved permanently: bash-prefix:${selectedPrefix} (matches: ${selectedPrefix} *)`, "info");
+					} else {
+						persistentApprovals = previousApprovals;
+					}
 				} else {
 					sessionBashApprovals.push({
 						tool: "bash",
@@ -1052,6 +1075,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (choice === "Allow tool permanently") {
+			const previousApprovals = persistentApprovals;
 			persistentApprovals = dedupeApprovals([
 				...persistentApprovals,
 				{
@@ -1063,8 +1087,11 @@ export default function (pi: ExtensionAPI) {
 					createdAt: Date.now(),
 				},
 			]);
-			saveApprovals();
-			ctx.ui.notify(`✓ ${toolName} allowed permanently`, "info");
+			if (saveApprovals(ctx)) {
+				ctx.ui.notify(`✓ ${toolName} allowed permanently`, "info");
+			} else {
+				persistentApprovals = previousApprovals;
+			}
 		}
 
 		if (approvalTargets && choice === allowTargetSessionLabel) {
@@ -1073,8 +1100,8 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (approvalTargets && choice === allowTargetPermanentLabel) {
-			savePathApprovals(toolName, [approvalTargets.targetPath], projectRoot);
-			ctx.ui.notify(`✓ ${approvalTargets.targetKind === "folder" ? "Folder" : "File"} approved permanently: ${approvalTargets.targetPath}`, "info");
+			if (savePathApprovals(toolName, [approvalTargets.targetPath], projectRoot, ctx))
+				ctx.ui.notify(`✓ ${approvalTargets.targetKind === "folder" ? "Folder" : "File"} approved permanently: ${approvalTargets.targetPath}`, "info");
 		}
 
 		if (approvalTargets?.parentFolderPath && choice === allowParentFolderSessionLabel) {
@@ -1083,8 +1110,8 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (approvalTargets?.parentFolderPath && choice === allowParentFolderPermanentLabel) {
-			savePathApprovals(toolName, [approvalTargets.parentFolderPath], projectRoot);
-			ctx.ui.notify(`✓ Parent folder approved permanently: ${approvalTargets.parentFolderPath}`, "info");
+			if (savePathApprovals(toolName, [approvalTargets.parentFolderPath], projectRoot, ctx))
+				ctx.ui.notify(`✓ Parent folder approved permanently: ${approvalTargets.parentFolderPath}`, "info");
 		}
 
 		if (approvalTargets?.gitRepoPath && choice === allowGitRepoSessionLabel) {
@@ -1093,8 +1120,8 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (approvalTargets?.gitRepoPath && choice === allowGitRepoPermanentLabel) {
-			savePathApprovals(toolName, [approvalTargets.gitRepoPath], projectRoot);
-			ctx.ui.notify(`✓ Git repo approved permanently: ${approvalTargets.gitRepoPath}`, "info");
+			if (savePathApprovals(toolName, [approvalTargets.gitRepoPath], projectRoot, ctx))
+				ctx.ui.notify(`✓ Git repo approved permanently: ${approvalTargets.gitRepoPath}`, "info");
 		}
 
 		return decision;
@@ -1182,8 +1209,12 @@ export default function (pi: ExtensionAPI) {
 			);
 		}
 
-		if (choice === allowPathPermanentLabel) {
-			savePathApprovals(toolName, approvalTargets ? [approvalTargets.targetPath] : externalPaths, projectRoot);
+		if (choice === allowPathPermanentLabel && savePathApprovals(
+			toolName,
+			approvalTargets ? [approvalTargets.targetPath] : externalPaths,
+			projectRoot,
+			ctx,
+		)) {
 			ctx.ui.notify(
 				approvalTargets
 					? `✓ ${approvalTargets.targetKind === "folder" ? "Folder" : "File"} approved permanently: ${approvalTargets.targetPath}`
@@ -1198,8 +1229,8 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (approvalTargets?.parentFolderPath && choice === allowParentFolderPermanentLabel) {
-			savePathApprovals(toolName, [approvalTargets.parentFolderPath], projectRoot);
-			ctx.ui.notify(`✓ Parent folder approved permanently: ${approvalTargets.parentFolderPath}`, "info");
+			if (savePathApprovals(toolName, [approvalTargets.parentFolderPath], projectRoot, ctx))
+				ctx.ui.notify(`✓ Parent folder approved permanently: ${approvalTargets.parentFolderPath}`, "info");
 		}
 
 		if (approvalTargets?.gitRepoPath && choice === allowGitRepoSessionLabel) {
@@ -1208,8 +1239,8 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (approvalTargets?.gitRepoPath && choice === allowGitRepoPermanentLabel) {
-			savePathApprovals(toolName, [approvalTargets.gitRepoPath], projectRoot);
-			ctx.ui.notify(`✓ Git repo approved permanently: ${approvalTargets.gitRepoPath}`, "info");
+			if (savePathApprovals(toolName, [approvalTargets.gitRepoPath], projectRoot, ctx))
+				ctx.ui.notify(`✓ Git repo approved permanently: ${approvalTargets.gitRepoPath}`, "info");
 		}
 
 		return decision;
@@ -1841,31 +1872,33 @@ export default function (pi: ExtensionAPI) {
 			sessionBashApprovals.length = 0;
 		}
 
-		if (resetSaved) {
-			persistentApprovals = [];
-			saveApprovals();
-		}
+		const previousApprovals = persistentApprovals;
+		if (resetSaved) persistentApprovals = [];
 
 		if (resetProject) {
 			sessionPathApprovals.splice(0, sessionPathApprovals.length, ...sessionPathApprovals.filter((a) => a.projectRoot !== projectRoot));
 			sessionBashApprovals.splice(0, sessionBashApprovals.length, ...sessionBashApprovals.filter((a) => a.projectRoot !== projectRoot));
 			persistentApprovals = persistentApprovals.filter((a) => a.projectRoot !== projectRoot);
-			saveApprovals();
 		}
 
 		if (resetAgent) {
 			sessionPathApprovals.splice(0, sessionPathApprovals.length, ...sessionPathApprovals.filter((a) => a.agentName !== agentName));
 			sessionBashApprovals.splice(0, sessionBashApprovals.length, ...sessionBashApprovals.filter((a) => a.agentName !== agentName));
 			persistentApprovals = persistentApprovals.filter((a) => a.agentName !== agentName);
-			saveApprovals();
 		}
+
+		const resetPersistent = resetSaved || resetProject || resetAgent;
+		const saved = !resetPersistent || saveApprovals(ctx);
+		if (!saved) persistentApprovals = previousApprovals;
 
 		const parts: string[] = [];
 		if (resetSession) parts.push("session approvals cleared");
-		if (resetSaved) parts.push("saved approvals cleared");
-		if (resetProject) parts.push(`project approvals cleared (${projectRoot})`);
-		if (resetAgent) parts.push(`agent approvals cleared (${agentName})`);
-		ctx.ui.notify(`Permissions reset: ${parts.join(", ")}`, "info");
+		if (saved && resetSaved) parts.push("saved approvals cleared");
+		if (resetProject) parts.push(`project session approvals cleared (${projectRoot})`);
+		if (saved && resetProject) parts.push(`project saved approvals cleared (${projectRoot})`);
+		if (resetAgent) parts.push(`agent session approvals cleared (${agentName})`);
+		if (saved && resetAgent) parts.push(`agent saved approvals cleared (${agentName})`);
+		if (parts.length > 0) ctx.ui.notify(`Permissions reset: ${parts.join(", ")}`, "info");
 	}
 
 	function showPermissionsMode(ctx: ExtensionContext) {
