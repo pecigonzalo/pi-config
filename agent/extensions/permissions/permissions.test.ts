@@ -2253,11 +2253,11 @@ describe("permissions extension sandbox lifecycle", () => {
 			) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
 			if (!result?.operations) throw new Error("sandboxed user bash operations were not returned");
 
-			const execution = result.operations.exec("true", harness.cwd, { onData: () => {} });
 			for (const handler of harness.handlers.get("session_shutdown") ?? []) {
 				await handler({}, harness.ctx);
 			}
 
+			const execution = result.operations.exec("true", harness.cwd, { onData: () => {} });
 			await expect(execution).rejects.toThrow("blocked local fallback");
 		} finally {
 			await harness.restore();

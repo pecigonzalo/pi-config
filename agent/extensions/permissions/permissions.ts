@@ -1358,7 +1358,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 				const healthRuntime = sandboxRuntime;
 				const healthExecution = active?.execution;
 				if (!healthRuntime || !healthExecution) {
-					return createLocalBashOperations().exec(command, cwd, options);
+					throw new Error("Bash sandbox changed or became unavailable before command execution; blocked local fallback");
 				}
 				const bypassMatch = await sandboxBypassMatch(command, healthExecution);
 				if (bypassMatch) {
