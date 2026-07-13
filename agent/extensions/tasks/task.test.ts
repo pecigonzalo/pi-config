@@ -11,6 +11,10 @@ let __test__: any;
 let testAgentDir: string;
 let sessionCounter = 0;
 let mockResources: any;
+let mockHasProjectTaskResources = false;
+let mockHasCoreProjectResources = false;
+let mockSavedProjectTrust: boolean | null = null;
+let lastDiscoveryProjectTrusted: boolean | undefined;
 
 beforeAll(async () => {
 	testAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tasks-ext-test-"));
@@ -53,6 +57,15 @@ beforeAll(async () => {
 
 	mock.module("@earendil-works/pi-coding-agent", () => ({
 		...piCodingAgent,
+		hasTrustRequiringProjectResources: () => mockHasCoreProjectResources,
+		ProjectTrustStore: class {
+			get() {
+				return mockSavedProjectTrust;
+			}
+			set(_cwd: string, trusted: boolean) {
+				mockSavedProjectTrust = trusted;
+			}
+		},
 		getAgentDir: () => testAgentDir,
 		getMarkdownTheme: () => ({}),
 		keyHint: (_binding: string, description: string) => `Ctrl+O ${description}`,
@@ -98,7 +111,11 @@ beforeAll(async () => {
 	}));
 
 	mock.module("./agents.js", () => ({
-		discoverResources: () => mockResources ?? createResources(),
+		discoverResources: (_cwd: string, _scope: string, projectTrusted?: boolean) => {
+			lastDiscoveryProjectTrusted = projectTrusted;
+			return mockResources ?? createResources();
+		},
+		hasProjectTaskResources: () => mockHasProjectTaskResources,
 		resolveSkillPaths: () => ({ paths: [], missing: [] }),
 	}));
 
@@ -282,6 +299,124 @@ describe("tasks extension UI chrome", () => {
 		expect(widgetCalls[1]).toEqual(["tasks.runs", undefined]);
 		expect(statusCalls[1]).toEqual(["tasks.runs", undefined]);
 		expect(notifications[1]).toEqual({ message: "Tasks widget hidden for this session.", level: "info" });
+	});
+});
+
+describe("tasks project trust integration", () => {
+	it("requires explicit trust for task-specific project resources", async () => {
+		mockHasProjectTaskResources = true;
+		try {
+			const { eventHandlers } = createExtensionHarness();
+			const trusted = await eventHandlers.project_trust?.(
+				{ cwd: process.cwd() },
+				{ hasUI: true, ui: { confirm: async () => true } },
+			);
+			const untrustedHeadless = await eventHandlers.project_trust?.(
+				{ cwd: process.cwd() },
+				{ hasUI: false, ui: { confirm: async () => true } },
+			);
+
+			expect(trusted).toEqual({ trusted: "yes", remember: true });
+			expect(untrustedHeadless).toEqual({ trusted: "no" });
+		} finally {
+			mockHasProjectTaskResources = false;
+		}
+	});
+
+	it("defers to Pi trust resolution when core project resources are present", async () => {
+		mockHasProjectTaskResources = true;
+		mockHasCoreProjectResources = true;
+		try {
+			const { eventHandlers } = createExtensionHarness();
+			const result = await eventHandlers.project_trust?.(
+				{ cwd: process.cwd() },
+				{ hasUI: false, ui: { confirm: async () => false } },
+			);
+
+			expect(result).toEqual({ trusted: "undecided" });
+		} finally {
+			mockHasProjectTaskResources = false;
+			mockHasCoreProjectResources = false;
+		}
+	});
+
+	it("fails closed when Pi implicitly trusts a task-only project in headless mode", async () => {
+		mockHasProjectTaskResources = true;
+		mockHasCoreProjectResources = false;
+		mockSavedProjectTrust = null;
+		lastDiscoveryProjectTrusted = undefined;
+		try {
+			const { eventHandlers } = createExtensionHarness();
+			const ctx = {
+				cwd: process.cwd(),
+				hasUI: false,
+				isProjectTrusted: () => true,
+				ui: {
+					confirm: async () => true,
+					notify: () => {},
+					setStatus: () => {},
+					setWidget: () => {},
+				},
+				model: { provider: "test", id: "model" },
+				sessionManager: {
+					getSessionFile: () => undefined,
+					getSessionId: () => "trust-session",
+					getBranch: () => [],
+				},
+			};
+
+			await eventHandlers.session_start?.({ reason: "startup" }, ctx);
+			await eventHandlers.before_agent_start?.({ systemPrompt: "base" }, ctx);
+
+			expect(lastDiscoveryProjectTrusted as boolean | undefined).toEqual(false);
+		} finally {
+			mockHasProjectTaskResources = false;
+			mockHasCoreProjectResources = false;
+			mockSavedProjectTrust = null;
+		}
+	});
+
+	it("fails closed when task resources appear after trust resolution", async () => {
+		mockHasProjectTaskResources = false;
+		mockHasCoreProjectResources = false;
+		lastDiscoveryProjectTrusted = undefined;
+		const { eventHandlers } = createExtensionHarness();
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			isProjectTrusted: () => true,
+			ui: {
+				confirm: async () => true,
+				notify: () => {},
+				setStatus: () => {},
+				setWidget: () => {},
+			},
+			model: { provider: "test", id: "model" },
+			sessionManager: {
+				getSessionFile: () => undefined,
+				getSessionId: () => "dynamic-trust-session",
+				getBranch: () => [],
+			},
+		};
+
+		await eventHandlers.session_start?.({ reason: "startup" }, ctx);
+		mockHasProjectTaskResources = true;
+		try {
+			await eventHandlers.before_agent_start?.({ systemPrompt: "base" }, ctx);
+			expect(lastDiscoveryProjectTrusted as boolean | undefined).toEqual(false);
+		} finally {
+			mockHasProjectTaskResources = false;
+		}
+	});
+
+	it("defers to Pi when no task-specific project resources exist", async () => {
+		const { eventHandlers } = createExtensionHarness();
+		const result = await eventHandlers.project_trust?.(
+			{ cwd: process.cwd() },
+			{ hasUI: false, ui: { confirm: async () => false } },
+		);
+
+		expect(result).toEqual({ trusted: "undecided" });
 	});
 });
 
@@ -543,21 +678,44 @@ describe("tasks worker tool configuration", () => {
 	it("approves project-local inputs for child pi processes when project context is requested", () => {
 		const args: string[] = [];
 
-		__test__.appendProjectTrustFlags(args, {
-			context: { mode: "fresh", project: true, skills: false },
-			inheritProjectContext: false,
-		});
+		__test__.appendProjectTrustFlags(
+			args,
+			{
+				context: { mode: "fresh", project: true, skills: false },
+				inheritProjectContext: false,
+			},
+			true,
+		);
 
 		expect(args).toEqual(["--approve"]);
+	});
+
+	it("does not approve project-local inputs when the launch directory is untrusted", () => {
+		const args: string[] = [];
+
+		__test__.appendProjectTrustFlags(
+			args,
+			{
+				context: { mode: "fresh", project: true, skills: false },
+				inheritProjectContext: true,
+			},
+			false,
+		);
+
+		expect(args).toEqual(["--no-approve"]);
 	});
 
 	it("does not approve project-local inputs when project context is not requested", () => {
 		const args: string[] = [];
 
-		__test__.appendProjectTrustFlags(args, {
-			context: { mode: "fresh", project: false, skills: false },
-			inheritProjectContext: false,
-		});
+		__test__.appendProjectTrustFlags(
+			args,
+			{
+				context: { mode: "fresh", project: false, skills: false },
+				inheritProjectContext: false,
+			},
+			true,
+		);
 
 		expect(args).toEqual([]);
 	});
@@ -592,6 +750,53 @@ describe("tasks extension persisted-session guardrails", () => {
 				},
 			),
 		).rejects.toThrow("Runtime persist overrides are not supported");
+	});
+
+	it("does not transfer project trust to an overridden launch directory", async () => {
+		const launchCwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-task-untrusted-cwd-"));
+		try {
+			const preflight = await __test__.preflightTaskRun(
+				"single",
+				[{ task: "Do work", prompt: "Worker prompt", cwd: launchCwd }],
+				createResources({
+					globalTasksConfig: {
+						context: { project: true },
+						persist: false,
+						source: "user",
+						filePath: "/tmp/tasks.json",
+					},
+				}) as any,
+				process.cwd(),
+				{ getSessionFile: () => undefined, getBranch: () => [] },
+				true,
+			);
+
+			expect(preflight.error).toBeUndefined();
+			expect(preflight.prepared?.steps[0]?.projectTrusted).toBe(false);
+		} finally {
+			await fs.rm(launchCwd, { recursive: true, force: true });
+		}
+	});
+
+	it("does not transfer project trust through an explicit cwd alias", async () => {
+		const preflight = await __test__.preflightTaskRun(
+			"single",
+			[{ task: "Do work", prompt: "Worker prompt", cwd: process.cwd() }],
+			createResources({
+				globalTasksConfig: {
+					context: { project: true },
+					persist: false,
+					source: "user",
+					filePath: "/tmp/tasks.json",
+				},
+			}) as any,
+			process.cwd(),
+			{ getSessionFile: () => undefined, getBranch: () => [] },
+			true,
+		);
+
+		expect(preflight.error).toBeUndefined();
+		expect(preflight.prepared?.steps[0]?.projectTrusted).toBe(false);
 	});
 
 	it("fails preflight for fork context when effective persist is false", async () => {

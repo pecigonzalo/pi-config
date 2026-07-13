@@ -202,11 +202,41 @@ function isFile(p: string): boolean {
 	}
 }
 
+function isSymbolicLink(candidate: string): boolean {
+	try {
+		return fs.lstatSync(candidate).isSymbolicLink();
+	} catch {
+		return false;
+	}
+}
+
+function hasSymbolicPathComponent(baseDir: string, parts: string[]): boolean {
+	return parts.some((_part, index) => isSymbolicLink(path.join(baseDir, ...parts.slice(0, index + 1))));
+}
+
+function isContainedPath(baseDir: string, candidate: string): boolean {
+	const relative = path.relative(baseDir, candidate);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function hasSymbolicPathBetween(baseDir: string, candidate: string): boolean {
+	const absoluteBase = path.resolve(baseDir);
+	const absoluteCandidate = path.resolve(candidate);
+	if (!isContainedPath(absoluteBase, absoluteCandidate)) return true;
+	const relativeSegments = path.relative(absoluteBase, absoluteCandidate).split(path.sep).filter(Boolean);
+	let current = fs.realpathSync(absoluteBase);
+	for (const segment of relativeSegments) {
+		current = path.join(current, segment);
+		if (isSymbolicLink(current)) return true;
+	}
+	return false;
+}
+
 function findNearestProjectDir(cwd: string, parts: string[]): string | null {
 	let currentDir = cwd;
 	while (true) {
 		const candidate = path.join(currentDir, ...parts);
-		if (isDirectory(candidate) || isFile(candidate)) return candidate;
+		if (!hasSymbolicPathComponent(currentDir, parts) && (isDirectory(candidate) || isFile(candidate))) return candidate;
 		const parentDir = path.dirname(currentDir);
 		if (parentDir === currentDir) return null;
 		currentDir = parentDir;
@@ -233,7 +263,7 @@ function findAncestorDirs(cwd: string, parts: string[]): string[] {
 	let currentDir = cwd;
 	while (true) {
 		const candidate = path.join(currentDir, ...parts);
-		if (isDirectory(candidate)) dirs.push(candidate);
+		if (!hasSymbolicPathComponent(currentDir, parts) && isDirectory(candidate)) dirs.push(candidate);
 		const parentDir = path.dirname(currentDir);
 		if (parentDir === currentDir) break;
 		currentDir = parentDir;
@@ -247,8 +277,8 @@ function expandHome(inputPath: string): string {
 	return inputPath;
 }
 
-function readSettingsSkillPaths(settingsPath: string): string[] {
-	if (!isFile(settingsPath)) return [];
+function readSettingsSkillPaths(settingsPath: string, allowedRoot?: string): string[] {
+	if (!isFile(settingsPath) || isSymbolicLink(settingsPath)) return [];
 	try {
 		const raw = fs.readFileSync(settingsPath, "utf-8");
 		const parsed = JSON.parse(raw) as { skills?: unknown };
@@ -257,21 +287,22 @@ function readSettingsSkillPaths(settingsPath: string): string[] {
 		return parsed.skills
 			.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
 			.map((entry) => expandHome(entry))
-			.map((entry) => (path.isAbsolute(entry) ? entry : path.resolve(baseDir, entry)));
+			.map((entry) => (path.isAbsolute(entry) ? entry : path.resolve(baseDir, entry)))
+			.filter((entry) => !allowedRoot || !hasSymbolicPathBetween(allowedRoot, entry));
 	} catch {
 		return [];
 	}
 }
 
-function getConfiguredSkillPaths(cwd: string): string[] {
-	const paths: string[] = [];
-	const globalSettings = path.join(getAgentDir(), "settings.json");
-	paths.push(...readSettingsSkillPaths(globalSettings));
+function getConfiguredSkillPaths(cwd: string, projectTrusted: boolean): string[] {
+	const paths = readSettingsSkillPaths(path.join(getAgentDir(), "settings.json"));
+	if (!projectTrusted) return Array.from(new Set(paths));
 
 	let currentDir = cwd;
 	while (true) {
-		const candidate = path.join(currentDir, ".pi", "settings.json");
-		paths.push(...readSettingsSkillPaths(candidate));
+		if (!hasSymbolicPathComponent(currentDir, [".pi", "settings.json"])) {
+			paths.push(...readSettingsSkillPaths(path.join(currentDir, ".pi", "settings.json"), currentDir));
+		}
 		const parentDir = path.dirname(currentDir);
 		if (parentDir === currentDir) break;
 		currentDir = parentDir;
@@ -280,47 +311,74 @@ function getConfiguredSkillPaths(cwd: string): string[] {
 	return Array.from(new Set(paths));
 }
 
-function getSkillRoots(cwd: string): string[] {
+function getSkillRoots(cwd: string, projectTrusted: boolean): string[] {
 	const roots = [
 		path.join(getAgentDir(), "skills"),
 		path.join(os.homedir(), ".agents", "skills"),
-		...findAncestorDirs(cwd, [".pi", "skills"]),
-		...findAncestorDirs(cwd, [".agents", "skills"]),
-		...getConfiguredSkillPaths(cwd),
+		...(projectTrusted ? findAncestorDirs(cwd, [".pi", "skills"]) : []),
+		...(projectTrusted ? findAncestorDirs(cwd, [".agents", "skills"]) : []),
+		...getConfiguredSkillPaths(cwd, projectTrusted),
 	];
-	return Array.from(new Set(roots.filter((root) => isDirectory(root) || isFile(root))));
+	return Array.from(new Set(roots.filter((root) => (isDirectory(root) || isFile(root)) && !isSymbolicLink(root))));
+}
+
+function isSkillIdentifier(skillName: string): boolean {
+	return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(skillName) && skillName !== "." && skillName !== "..";
+}
+
+function resolveContainedPath(root: string, candidate: string): string | null {
+	try {
+		const realRoot = fs.realpathSync(root);
+		const realCandidate = fs.realpathSync(candidate);
+		if (isFile(realRoot)) return realCandidate === realRoot ? realCandidate : null;
+		const relative = path.relative(realRoot, realCandidate);
+		return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)) ? realCandidate : null;
+	} catch {
+		return null;
+	}
+}
+
+function resolveContainedSkillDirectory(root: string, candidate: string): string | null {
+	const resolvedDirectory = resolveContainedPath(root, candidate);
+	if (!resolvedDirectory || !resolveContainedPath(root, path.join(resolvedDirectory, "SKILL.md"))) return null;
+	return resolvedDirectory;
 }
 
 function findSkillInDirectory(root: string, skillName: string): string | null {
 	const directDir = path.join(root, skillName);
 	if (isDirectory(directDir) && isFile(path.join(directDir, "SKILL.md"))) {
-		return directDir;
+		return resolveContainedSkillDirectory(root, directDir);
 	}
 
 	const directFile = path.join(root, `${skillName}.md`);
-	if (isFile(directFile)) return directFile;
+	if (isFile(directFile)) return resolveContainedPath(root, directFile);
 
 	const stack = [root];
 	const visited = new Set<string>();
 	while (stack.length > 0) {
 		const current = stack.pop()!;
-		if (visited.has(current)) continue;
-		visited.add(current);
+		const realCurrent = resolveContainedPath(root, current);
+		if (!realCurrent || visited.has(realCurrent)) continue;
+		visited.add(realCurrent);
 
 		let entries: fs.Dirent[];
 		try {
-			entries = fs.readdirSync(current, { withFileTypes: true });
+			entries = fs.readdirSync(realCurrent, { withFileTypes: true });
 		} catch {
 			continue;
 		}
 
 		for (const entry of entries) {
-			const entryPath = path.join(current, entry.name);
+			const entryPath = path.join(realCurrent, entry.name);
 			if (entry.isDirectory()) {
-				if (entry.name === skillName && isFile(path.join(entryPath, "SKILL.md"))) return entryPath;
+				if (entry.name === skillName && isFile(path.join(entryPath, "SKILL.md"))) {
+					const resolved = resolveContainedSkillDirectory(root, entryPath);
+					if (resolved) return resolved;
+				}
 				stack.push(entryPath);
 			} else if (entry.isFile() && entry.name === `${skillName}.md`) {
-				return entryPath;
+				const resolved = resolveContainedPath(root, entryPath);
+				if (resolved) return resolved;
 			}
 		}
 	}
@@ -345,7 +403,7 @@ function loadMarkdownConfigs<TConfig>(
 
 	for (const entry of entries) {
 		if (!entry.name.endsWith(".md")) continue;
-		if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+		if (!entry.isFile()) continue;
 		const filePath = path.join(dir, entry.name);
 		let content: string;
 		try {
@@ -508,12 +566,16 @@ function mergeByName<T extends { name: string }>(items: T[]): T[] {
 	return Array.from(map.values());
 }
 
-export function resolveSkillPaths(skillNames: string[], cwd: string): { paths: string[]; missing: string[] } {
-	const roots = getSkillRoots(cwd);
+export function resolveSkillPaths(skillNames: string[], cwd: string, projectTrusted = false): { paths: string[]; missing: string[] } {
+	const roots = getSkillRoots(cwd, projectTrusted);
 	const resolvedPaths: string[] = [];
 	const missing: string[] = [];
 
 	for (const skillName of skillNames) {
+		if (!isSkillIdentifier(skillName)) {
+			missing.push(skillName);
+			continue;
+		}
 		let resolved: string | null = null;
 		for (const root of roots) {
 			if (isFile(root)) {
@@ -533,7 +595,11 @@ export function resolveSkillPaths(skillNames: string[], cwd: string): { paths: s
 	return { paths: Array.from(new Set(resolvedPaths)), missing };
 }
 
-export function discoverResources(cwd: string, scope: AgentScope): ResourceDiscoveryResult {
+export function hasProjectTaskResources(cwd: string): boolean {
+	return Boolean(findNearestProjectAgentsDir(cwd) || findNearestProjectProfilesDir(cwd) || findNearestProjectTasksFile(cwd));
+}
+
+export function discoverResources(cwd: string, scope: AgentScope, projectTrusted = false): ResourceDiscoveryResult {
 	const userAgentsDir = path.join(getAgentDir(), "agents");
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 	const userProfilesDir = path.join(getAgentDir(), "profiles");
@@ -542,18 +608,21 @@ export function discoverResources(cwd: string, scope: AgentScope): ResourceDisco
 	const projectTasksFile = findNearestProjectTasksFile(cwd);
 
 	const includeUser = scope !== "project";
-	const includeProject = scope !== "user";
+	const includeProject = scope !== "user" && projectTrusted;
 
 	const userAgents = includeUser ? loadAgentsFromDir(userAgentsDir, "user") : [];
 	const projectAgents = includeProject && projectAgentsDir ? loadAgentsFromDir(projectAgentsDir, "project") : [];
 	const userProfiles = includeUser ? loadProfilesFromDir(userProfilesDir, "user") : [];
 	const projectProfiles = includeProject && projectProfilesDir ? loadProfilesFromDir(projectProfilesDir, "project") : [];
 	const globalTasksConfig = loadTasksConfigFromFile(globalTasksFile, "user");
-	const projectTasksConfig = projectTasksFile ? loadTasksConfigFromFile(projectTasksFile, "project") : null;
+	const projectTasksConfig = includeProject && projectTasksFile ? loadTasksConfigFromFile(projectTasksFile, "project") : null;
 
 	const agents = scope === "both" ? mergeByName([...userAgents, ...projectAgents]) : mergeByName([...(scope === "user" ? userAgents : projectAgents)]);
 	const profiles = scope === "both" ? mergeByName([...userProfiles, ...projectProfiles]) : mergeByName([...(scope === "user" ? userProfiles : projectProfiles)]);
-	const efforts = mergeByName([...(globalTasksConfig?.efforts ?? []), ...(projectTasksConfig?.efforts ?? [])]);
+	const efforts = mergeByName([
+		...(includeUser ? (globalTasksConfig?.efforts ?? []) : []),
+		...(includeProject ? (projectTasksConfig?.efforts ?? []) : []),
+	]);
 
 	return {
 		agents,
@@ -568,18 +637,18 @@ export function discoverResources(cwd: string, scope: AgentScope): ResourceDisco
 	};
 }
 
-export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
-	const resources = discoverResources(cwd, scope);
+export function discoverAgents(cwd: string, scope: AgentScope, projectTrusted = false): AgentDiscoveryResult {
+	const resources = discoverResources(cwd, scope, projectTrusted);
 	return { agents: resources.agents, projectAgentsDir: resources.projectAgentsDir };
 }
 
-export function discoverProfiles(cwd: string, scope: AgentScope): ProfileDiscoveryResult {
-	const resources = discoverResources(cwd, scope);
+export function discoverProfiles(cwd: string, scope: AgentScope, projectTrusted = false): ProfileDiscoveryResult {
+	const resources = discoverResources(cwd, scope, projectTrusted);
 	return { profiles: resources.profiles, projectProfilesDir: resources.projectProfilesDir };
 }
 
-export function discoverEfforts(cwd: string, scope: AgentScope): EffortDiscoveryResult {
-	const resources = discoverResources(cwd, scope);
+export function discoverEfforts(cwd: string, scope: AgentScope, projectTrusted = false): EffortDiscoveryResult {
+	const resources = discoverResources(cwd, scope, projectTrusted);
 	return { efforts: resources.efforts, projectTasksFile: resources.projectTasksFile };
 }
 

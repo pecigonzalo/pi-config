@@ -24,7 +24,9 @@ import {
 	type ExtensionAPI,
 	type SessionEntry,
 	SessionManager,
+	ProjectTrustStore,
 	getAgentDir,
+	hasTrustRequiringProjectResources,
 	keyHint,
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
@@ -39,6 +41,7 @@ import {
 	type ProfileConfig,
 	type ResourceDiscoveryResult,
 	discoverResources,
+	hasProjectTaskResources,
 	resolveSkillPaths,
 } from "./agents.js";
 import { parseTasksCommand, resolveTaskSelector, type TasksScope } from "./task-command-utils.js";
@@ -277,7 +280,6 @@ interface TaskToolParams {
 	mode?: TaskExecutionMode;
 	steps?: TaskStepConfig[];
 	agentScope?: AgentScope;
-	confirmProjectAgents?: boolean;
 }
 
 interface PreparedTaskToolParams extends TaskToolParams {
@@ -709,10 +711,10 @@ function formatTaskEffortOptions(resources: ResourceDiscoveryResult): string {
 	);
 }
 
-function formatTaskDelegationGuidance(cwd: string): string {
-	const userResources = discoverResources(cwd, "user");
-	const projectResources = discoverResources(cwd, "project");
-	const combinedResources = discoverResources(cwd, "both");
+function formatTaskDelegationGuidance(cwd: string, projectTrusted = false): string {
+	const userResources = discoverResources(cwd, "user", projectTrusted);
+	const projectResources = discoverResources(cwd, "project", projectTrusted);
+	const combinedResources = discoverResources(cwd, "both", projectTrusted);
 
 	return [
 		"Task delegation choices for this directory:",
@@ -975,6 +977,51 @@ interface PersistedMainAgentState {
 let mainSessionBaseline: MainSessionBaseline | undefined;
 let activeMainWorker: ResolvedWorkerConfig | undefined;
 let startupCompositionError: string | undefined;
+let taskProjectTrusted = false;
+let taskProjectResourcesPresentAtTrustResolution = false;
+
+function getProjectTrustOverride(): boolean | undefined {
+	let override: boolean | undefined;
+	for (const argument of process.argv) {
+		if (argument === "--approve" || argument === "-a") override = true;
+		if (argument === "--no-approve" || argument === "-na") override = false;
+	}
+	return override;
+}
+
+async function resolveTaskProjectTrust(ctx: {
+	cwd: string;
+	hasUI: boolean;
+	isProjectTrusted?: () => boolean;
+	ui: { confirm(title: string, message: string): Promise<boolean> };
+}): Promise<boolean> {
+	const coreTrusted = ctx.isProjectTrusted?.() === true;
+	if (!hasProjectTaskResources(ctx.cwd)) return coreTrusted;
+	if (hasTrustRequiringProjectResources(ctx.cwd)) return coreTrusted;
+
+	const override = getProjectTrustOverride();
+	if (override !== undefined) return override;
+	const trustStore = new ProjectTrustStore(getAgentDir());
+	const saved = trustStore.get(ctx.cwd);
+	if (saved !== null) return saved;
+	if (!ctx.hasUI) return false;
+
+	const trusted = await ctx.ui.confirm(
+		"Trust project configuration?",
+		[
+			`Task agents, profiles, or defaults were found for ${ctx.cwd}.`,
+			"Project configuration is repository-controlled and can change worker prompts, tools, models, and context access.",
+			"Trust all project-local configuration in this directory?",
+		].join("\n\n"),
+	);
+	trustStore.set(ctx.cwd, trusted);
+	return trusted;
+}
+
+function isTaskProjectTrusted(ctx: { cwd: string; isProjectTrusted?: () => boolean }): boolean {
+	if (!hasProjectTaskResources(ctx.cwd)) return ctx.isProjectTrusted?.() === true;
+	return taskProjectResourcesPresentAtTrustResolution && taskProjectTrusted;
+}
 
 function isMainSessionCallableAgent(agent: AgentConfig): boolean {
 	return agent.enabled && (agent.availability === "main" || agent.availability === "both");
@@ -1043,7 +1090,12 @@ function appendWorkerToolFlags(
 function appendProjectTrustFlags(
 	args: string[],
 	worker: Pick<ResolvedWorkerConfig, "context" | "inheritProjectContext">,
+	projectTrusted = false,
 ): void {
+	if (!projectTrusted) {
+		args.push("--no-approve");
+		return;
+	}
 	if (worker.context.project || worker.inheritProjectContext) args.push("--approve");
 }
 
@@ -1127,13 +1179,14 @@ async function applyMainSessionAgentSelection(
 		model?: { provider: string; id: string };
 		modelRegistry: { find(provider: string, modelId: string): unknown };
 		sessionManager: { getSessionId(): string; getBranch(): SessionEntry[]; appendCustomEntry?: (customType: string, data?: unknown) => string };
+		isProjectTrusted?: () => boolean;
 	},
 	piApi: Pick<ExtensionAPI, "getAllTools" | "getActiveTools" | "getFlag" | "getThinkingLevel" | "setActiveTools" | "setModel" | "setThinkingLevel">,
 	selection: { agent?: string; profile?: string; effort?: string },
-	options: { persist?: boolean; notify?: boolean; confirmProjectAgent?: boolean } = {},
+	options: { persist?: boolean; notify?: boolean } = {},
 ): Promise<{ ok: true; worker?: ResolvedWorkerConfig } | { ok: false; error: string }> {
 	ensureMainSessionBaseline(ctx, piApi);
-	const resources = discoverResources(ctx.cwd, "both");
+	const resources = discoverResources(ctx.cwd, "both", isTaskProjectTrusted(ctx));
 
 	if (selection.agent) {
 		const role = resources.agents.find((candidate) => candidate.name === selection.agent);
@@ -1142,13 +1195,6 @@ async function applyMainSessionAgentSelection(
 		}
 		if (!role.enabled) return { ok: false, error: `Agent "${selection.agent}" is disabled.` };
 		if (role.availability === "task") return { ok: false, error: `Agent "${selection.agent}" is not main-session callable (availability: task).` };
-		if (options.confirmProjectAgent && role.source === "project" && ctx.hasUI) {
-			const ok = await ctx.ui.confirm(
-				"Switch to project-local agent?",
-				`Agent: ${role.name}\nSource: ${role.filePath}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
-			);
-			if (!ok) return { ok: false, error: "Canceled: project-local agent not approved." };
-		}
 	}
 
 	if (!selection.agent && !selection.profile && !selection.effort) {
@@ -1228,6 +1274,7 @@ interface PreparedTaskStep {
 	rawStep: TaskStepConfig;
 	worker: ResolvedWorkerConfig;
 	launchCwd: string;
+	projectTrusted: boolean;
 	session: {
 		mode: ContextMode;
 		persist: boolean;
@@ -1520,6 +1567,7 @@ async function preflightTaskRun(
 		getSessionId?: () => string;
 		getBranch(): SessionEntry[];
 	},
+	projectTrusted = false,
 ): Promise<{ prepared?: PreparedTaskRun; error?: string }> {
 	const preparedSteps: PreparedTaskStep[] = [];
 	for (let i = 0; i < steps.length; i++) {
@@ -1548,6 +1596,7 @@ async function preflightTaskRun(
 			rawStep: step,
 			worker,
 			launchCwd: step.cwd ?? defaultCwd,
+			projectTrusted: projectTrusted && step.cwd === undefined,
 			session: {
 				mode: worker.context.mode,
 				persist: worker.persist,
@@ -1666,11 +1715,11 @@ async function runSingleAgentViaJson(
 	if (agentModel) args.push("--model", agentModel);
 	if (worker.effort?.thinkingLevel) args.push("--thinking", worker.effort.thinkingLevel);
 	appendWorkerToolFlags(args, worker);
-	appendProjectTrustFlags(args, worker);
+	appendProjectTrustFlags(args, worker, preparedStep.projectTrusted);
 	if (!worker.inheritProjectContext) args.push("--no-context-files");
 
 	if (worker.skills && worker.skills.length > 0) {
-		const { paths, missing } = resolveSkillPaths(worker.skills, preparedStep.launchCwd);
+		const { paths, missing } = resolveSkillPaths(worker.skills, preparedStep.launchCwd, preparedStep.projectTrusted);
 		if (missing.length > 0) {
 			return {
 				agent: worker.displayAgentName,
@@ -1891,10 +1940,10 @@ async function runSingleAgentViaRpc(
 	if (agentModel) args.push("--model", agentModel);
 	if (worker.effort?.thinkingLevel) args.push("--thinking", worker.effort.thinkingLevel);
 	appendWorkerToolFlags(args, worker);
-	appendProjectTrustFlags(args, worker);
+	appendProjectTrustFlags(args, worker, preparedStep.projectTrusted);
 	if (!worker.inheritProjectContext) args.push("--no-context-files");
 	if (worker.skills && worker.skills.length > 0) {
-		const { paths, missing } = resolveSkillPaths(worker.skills, preparedStep.launchCwd);
+		const { paths, missing } = resolveSkillPaths(worker.skills, preparedStep.launchCwd, preparedStep.projectTrusted);
 		if (missing.length > 0) {
 			return {
 				agent: worker.displayAgentName,
@@ -3544,7 +3593,6 @@ const SubagentParams = Type.Object({
 	mode: Type.Optional(TaskModeSchema),
 	steps: Type.Array(TaskStep, { description: "Task step(s). Single mode uses one step." }),
 	agentScope: Type.Optional(AgentScopeSchema),
-	confirmProjectAgents: Type.Optional(Type.Boolean({ description: "Confirm project agents.", default: true })),
 });
 
 export const AGENT_COMPLETIONS = [
@@ -3572,6 +3620,22 @@ export const TASKS_COMPLETIONS = [
 ] as const;
 
 export default function (pi: ExtensionAPI) {
+	pi.on("project_trust", async (event, ctx) => {
+		if (!hasProjectTaskResources(event.cwd) || hasTrustRequiringProjectResources(event.cwd)) {
+			return { trusted: "undecided" as const };
+		}
+		if (!ctx.hasUI) return { trusted: "no" as const };
+		const trusted = await ctx.ui.confirm(
+			"Trust project configuration?",
+			[
+				`Task agents, profiles, or defaults were found for ${event.cwd}.`,
+				"Project configuration is repository-controlled and can change worker prompts, tools, models, and context access.",
+				"Trust all project-local configuration in this directory?",
+			].join("\n\n"),
+		);
+		return { trusted: trusted ? ("yes" as const) : ("no" as const), remember: true };
+	});
+
 	const normalizeMainAgentSelection = (value: unknown): string | undefined => {
 		if (typeof value !== "string") return undefined;
 		const trimmed = value.trim();
@@ -3602,6 +3666,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		taskProjectResourcesPresentAtTrustResolution = hasProjectTaskResources(ctx.cwd);
+		taskProjectTrusted = await resolveTaskProjectTrust(ctx);
 		ensureMainSessionBaseline(ctx, pi);
 		syncTaskUiChrome(ctx);
 		startupCompositionError = undefined;
@@ -3625,7 +3691,6 @@ export default function (pi: ExtensionAPI) {
 					persisted.profile !== cliSelection.profile ||
 					persisted.effort !== cliSelection.effort,
 				notify: false,
-				confirmProjectAgent: false,
 			});
 			if (result.ok) return;
 			activeMainWorker = undefined;
@@ -3639,7 +3704,6 @@ export default function (pi: ExtensionAPI) {
 			const result = await applyMainSessionAgentSelection(ctx, pi, persisted, {
 				persist: false,
 				notify: false,
-				confirmProjectAgent: false,
 			});
 			if (result.ok) return;
 			activeMainWorker = undefined;
@@ -3673,7 +3737,7 @@ export default function (pi: ExtensionAPI) {
 			};
 		}
 
-		const taskGuidance = formatTaskDelegationGuidance(ctx.cwd);
+		const taskGuidance = formatTaskDelegationGuidance(ctx.cwd, isTaskProjectTrusted(ctx));
 		const worker = activeMainWorker;
 		const workerPrompt = worker?.systemPrompt.trim() ?? "";
 		if (worker?.systemPromptMode === "replace" && workerPrompt) {
@@ -3690,7 +3754,7 @@ export default function (pi: ExtensionAPI) {
 			await ctx.waitForIdle();
 			const trimmed = args.trim();
 			if (!trimmed) {
-				const discovery = discoverResources(ctx.cwd, "both");
+				const discovery = discoverResources(ctx.cwd, "both", isTaskProjectTrusted(ctx));
 				const current = activeMainWorker?.agent?.name ?? "default";
 				ctx.ui.notify(
 					`Main-session agent: ${current}. Available main-session agents: ${formatMainSessionAgentList(discovery.agents)}.`,
@@ -3702,7 +3766,7 @@ export default function (pi: ExtensionAPI) {
 				ctx,
 				pi,
 				{ agent: normalizeMainAgentSelection(trimmed), profile: activeMainWorker?.profile?.name, effort: activeMainWorker?.effort?.name },
-				{ persist: true, notify: true, confirmProjectAgent: true },
+				{ persist: true, notify: true },
 			);
 			if (result.ok) return;
 			ctx.ui.notify(result.error, "error");
@@ -3724,7 +3788,7 @@ export default function (pi: ExtensionAPI) {
 				ctx,
 				pi,
 				{ agent: activeMainWorker?.agent?.name, profile: normalizeMainAgentSelection(trimmed), effort: activeMainWorker?.effort?.name },
-				{ persist: true, notify: true, confirmProjectAgent: false },
+				{ persist: true, notify: true },
 			);
 			if (result.ok) return;
 			ctx.ui.notify(result.error, "error");
@@ -3746,7 +3810,7 @@ export default function (pi: ExtensionAPI) {
 				ctx,
 				pi,
 				{ agent: activeMainWorker?.agent?.name, profile: activeMainWorker?.profile?.name, effort: normalizeMainAgentSelection(trimmed) },
-				{ persist: true, notify: true, confirmProjectAgent: false },
+				{ persist: true, notify: true },
 			);
 			if (result.ok) return;
 			ctx.ui.notify(result.error, "error");
@@ -3947,8 +4011,8 @@ export default function (pi: ExtensionAPI) {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const normalizedParams = normalizeTaskToolParams(params as unknown);
 			const agentScope: AgentScope = normalizedParams.agentScope ?? "user";
-			const discovery = discoverResources(ctx.cwd, agentScope);
-			const confirmProjectAgents = normalizedParams.confirmProjectAgents ?? true;
+			const projectTrusted = isTaskProjectTrusted(ctx);
+			const discovery = discoverResources(ctx.cwd, agentScope, projectTrusted);
 			const callableAgents = getTaskCallableAgents(discovery);
 			const stepsToRun = normalizedParams.steps ?? [];
 			const requestedMode = normalizedParams.mode;
@@ -4036,30 +4100,7 @@ export default function (pi: ExtensionAPI) {
 
 			let preparedSteps: PreparedTaskStep[] = [];
 
-			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
-				const requestedAgentNames = new Set<string>();
-				for (const step of stepsToRun) if (step.agent) requestedAgentNames.add(step.agent);
-
-				const projectAgentsRequested = Array.from(requestedAgentNames)
-					.map((name) => discovery.agents.find((a) => a.name === name))
-					.filter((a): a is AgentConfig => a?.source === "project" && isTaskCallableAgent(a));
-
-				if (projectAgentsRequested.length > 0) {
-					const names = projectAgentsRequested.map((a) => a.name).join(", ");
-					const dir = discovery.projectAgentsDir ?? "(unknown)";
-					const ok = await ctx.ui.confirm(
-						"Run project-local agents?",
-						`Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
-					);
-					if (!ok)
-						return {
-							content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
-							details: makeDetails(mode)([]),
-						};
-				}
-			}
-
-			const preflight = await preflightTaskRun(mode, stepsToRun, discovery, ctx.cwd, ctx.sessionManager);
+			const preflight = await preflightTaskRun(mode, stepsToRun, discovery, ctx.cwd, ctx.sessionManager, projectTrusted);
 			if (preflight.error || !preflight.prepared) {
 				throwTaskError(preflight.error ?? "Failed to prepare task run.", makeDetails(mode)([]));
 			}
