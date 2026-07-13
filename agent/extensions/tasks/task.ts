@@ -1125,6 +1125,38 @@ function appendProjectTrustFlags(
 	if (worker.context.project || worker.inheritProjectContext) args.push("--approve");
 }
 
+function appendWorkerSkillFlags(
+	args: string[],
+	worker: Pick<ResolvedWorkerConfig, "displayAgentName" | "skills" | "context">,
+	launchCwd: string,
+	projectTrusted: boolean,
+): string | undefined {
+	if (worker.skills !== undefined) {
+		args.push("--no-skills");
+		if (worker.skills.length === 0) return undefined;
+		const { paths, missing } = resolveSkillPaths(worker.skills, launchCwd, projectTrusted);
+		if (missing.length > 0) {
+			return `Failed to resolve required skills for worker "${worker.displayAgentName}": ${missing.join(", ")}.`;
+		}
+		for (const skillPath of paths) args.push("--skill", skillPath);
+		return undefined;
+	}
+	if (!worker.context.skills) args.push("--no-skills");
+	return undefined;
+}
+
+function getWorkerProcessEnv(worker: Pick<ResolvedWorkerConfig, "agent" | "profile">): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = {
+		...process.env,
+		...getSubagentDepthEnv(),
+	};
+	if (worker.agent) env.PI_AGENT_NAME = worker.agent.name;
+	else delete env.PI_AGENT_NAME;
+	if (worker.profile) env.PI_PROFILE_NAME = worker.profile.permissionsProfile ?? worker.profile.name;
+	else delete env.PI_PROFILE_NAME;
+	return env;
+}
+
 function getPersistedMainAgentState(entries: SessionEntry[]): PersistedMainAgentState {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
@@ -1270,9 +1302,7 @@ async function applyMainSessionAgentSelection(
 		if (restoreError) return { ok: false, error: restoreError };
 	}
 
-	if (worker.effort?.thinkingLevel) {
-		piApi.setThinkingLevel(worker.effort.thinkingLevel);
-	}
+	piApi.setThinkingLevel(worker.effort?.thinkingLevel ?? mainSessionBaseline?.thinkingLevel ?? "off");
 	let activeTools: string[] | undefined;
 	if (worker.tools !== undefined) activeTools = [...worker.tools];
 	else if (worker.excludeTools !== undefined) activeTools = [...allToolNames];
@@ -1571,12 +1601,21 @@ async function createManagedForkedTaskSession(params: {
 
 	const timestamp = new Date().toISOString();
 	const leafId = manager.getLeafId();
+	const compositionResetId = createSessionEntryId();
 	const sessionInfoId = createSessionEntryId();
 	await appendRawSessionEntries(sessionFile, [
 		{
+			type: "custom",
+			id: compositionResetId,
+			parentId: leafId ?? null,
+			timestamp,
+			customType: MAIN_SESSION_AGENT_CUSTOM_TYPE,
+			data: { agent: null, profile: null, effort: null },
+		},
+		{
 			type: "session_info",
 			id: sessionInfoId,
-			parentId: leafId ?? null,
+			parentId: compositionResetId,
 			timestamp,
 			name: params.sessionName,
 		},
@@ -1650,6 +1689,13 @@ async function preflightTaskRun(
 		parentSessionFile = sessionManager.getSessionFile?.();
 		parentBranch = sessionManager.getBranch();
 		parentSessionId = sessionManager.getSessionId?.() ?? readSessionHeaderId(parentBranch);
+		if (!parentSessionId && parentSessionFile) {
+			try {
+				parentSessionId = readSessionHeaderId(readSessionEntriesFromFile(parentSessionFile));
+			} catch {
+				// Session creation can continue without optional parent identity metadata.
+			}
+		}
 	}
 	if (needsFork) {
 		if (!parentSessionFile) {
@@ -1754,32 +1800,26 @@ async function runSingleAgentViaJson(
 	appendProjectTrustFlags(args, worker, preparedStep.projectTrusted);
 	if (!worker.inheritProjectContext) args.push("--no-context-files");
 
-	if (worker.skills && worker.skills.length > 0) {
-		const { paths, missing } = resolveSkillPaths(worker.skills, preparedStep.launchCwd, preparedStep.projectTrusted);
-		if (missing.length > 0) {
-			return {
-				agent: worker.displayAgentName,
-				agentSource: agent?.source ?? "unknown",
-				profile: worker.profile?.name,
-				effort: worker.effort?.name,
-				skills: worker.skills,
-				task,
-				exitCode: 1,
-				messages: [],
-				stderr: `Failed to resolve required skills for worker "${worker.displayAgentName}": ${missing.join(", ")}.`,
-				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-				model: agentModel,
-				step,
-				sessionMode: preparedStep.session.mode,
-				sessionPersist: preparedStep.session.persist,
-				sessionFile: preparedStep.session.sessionFile,
-				childSession: initialChildSession ? { ...initialChildSession } : undefined,
-			};
-		}
-		args.push("--no-skills");
-		for (const skillPath of paths) args.push("--skill", skillPath);
-	} else if (!worker.inheritSkills) {
-		args.push("--no-skills");
+	const skillError = appendWorkerSkillFlags(args, worker, preparedStep.launchCwd, preparedStep.projectTrusted);
+	if (skillError) {
+		return {
+			agent: worker.displayAgentName,
+			agentSource: agent?.source ?? "unknown",
+			profile: worker.profile?.name,
+			effort: worker.effort?.name,
+			skills: worker.skills,
+			task,
+			exitCode: 1,
+			messages: [],
+			stderr: skillError,
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			model: agentModel,
+			step,
+			sessionMode: preparedStep.session.mode,
+			sessionPersist: preparedStep.session.persist,
+			sessionFile: preparedStep.session.sessionFile,
+			childSession: initialChildSession ? { ...initialChildSession } : undefined,
+		};
 	}
 
 	let tmpPromptDir: string | null = null;
@@ -1833,12 +1873,7 @@ async function runSingleAgentViaJson(
 				cwd: preparedStep.launchCwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
-				env: {
-					...process.env,
-					...getSubagentDepthEnv(),
-					...(agent ? { PI_AGENT_NAME: agent.name } : {}),
-					...(worker.profile ? { PI_PROFILE_NAME: worker.profile.permissionsProfile ?? worker.profile.name } : {}),
-				},
+				env: getWorkerProcessEnv(worker),
 			});
 			let buffer = "";
 			let procClosed = false;
@@ -1978,32 +2013,26 @@ async function runSingleAgentViaRpc(
 	appendWorkerToolFlags(args, worker);
 	appendProjectTrustFlags(args, worker, preparedStep.projectTrusted);
 	if (!worker.inheritProjectContext) args.push("--no-context-files");
-	if (worker.skills && worker.skills.length > 0) {
-		const { paths, missing } = resolveSkillPaths(worker.skills, preparedStep.launchCwd, preparedStep.projectTrusted);
-		if (missing.length > 0) {
-			return {
-				agent: worker.displayAgentName,
-				agentSource: agent?.source ?? "unknown",
-				profile: worker.profile?.name,
-				effort: worker.effort?.name,
-				skills: worker.skills,
-				task,
-				exitCode: 1,
-				messages: [],
-				stderr: `Failed to resolve required skills for worker "${worker.displayAgentName}": ${missing.join(", ")}.`,
-				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-				model: agentModel,
-				step,
-				sessionMode: preparedStep.session.mode,
-				sessionPersist: preparedStep.session.persist,
-				sessionFile: preparedStep.session.sessionFile,
-				childSession: { ...initialChildSession },
-			};
-		}
-		args.push("--no-skills");
-		for (const skillPath of paths) args.push("--skill", skillPath);
-	} else if (!worker.inheritSkills) {
-		args.push("--no-skills");
+	const skillError = appendWorkerSkillFlags(args, worker, preparedStep.launchCwd, preparedStep.projectTrusted);
+	if (skillError) {
+		return {
+			agent: worker.displayAgentName,
+			agentSource: agent?.source ?? "unknown",
+			profile: worker.profile?.name,
+			effort: worker.effort?.name,
+			skills: worker.skills,
+			task,
+			exitCode: 1,
+			messages: [],
+			stderr: skillError,
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			model: agentModel,
+			step,
+			sessionMode: preparedStep.session.mode,
+			sessionPersist: preparedStep.session.persist,
+			sessionFile: preparedStep.session.sessionFile,
+			childSession: { ...initialChildSession },
+		};
 	}
 
 	let tmpPromptDir: string | null = null;
@@ -2050,12 +2079,7 @@ async function runSingleAgentViaRpc(
 			cwd: preparedStep.launchCwd,
 			shell: false,
 			stdio: ["pipe", "pipe", "pipe"],
-			env: {
-				...process.env,
-				...getSubagentDepthEnv(),
-				...(agent ? { PI_AGENT_NAME: agent.name } : {}),
-				...(worker.profile ? { PI_PROFILE_NAME: worker.profile.permissionsProfile ?? worker.profile.name } : {}),
-			},
+			env: getWorkerProcessEnv(worker),
 		});
 		const controllerKey = makeTaskRunStepKey(initialChildSession.runId, step ?? initialChildSession.step);
 		const relayedStatusKeys = new Set<string>();
@@ -3761,6 +3785,27 @@ export default function (pi: ExtensionAPI) {
 		syncRuntimeEnv(pi, {});
 	});
 
+	pi.on("session_tree", async (_event, ctx) => {
+		const persisted = getPersistedMainAgentState(ctx.sessionManager.getBranch());
+		const result = await applyMainSessionAgentSelection(
+			ctx,
+			pi,
+			persisted.found
+				? { agent: persisted.agent, profile: persisted.profile, effort: persisted.effort }
+				: {},
+			{ persist: false, notify: false },
+		);
+		if (result.ok) {
+			startupCompositionError = undefined;
+			return;
+		}
+		activeMainWorker = undefined;
+		startupCompositionError = result.error;
+		syncRuntimeEnv(pi, {});
+		if (ctx.hasUI) ctx.ui.notify(result.error, "error");
+		else console.error(result.error);
+	});
+
 	pi.on("session_shutdown", async (_event, ctx) => {
 		taskProjectTrustState = undefined;
 		setTaskWidgetEnabled(ctx, false);
@@ -3813,7 +3858,10 @@ export default function (pi: ExtensionAPI) {
 				{ agent: normalizeMainAgentSelection(trimmed), profile: activeMainWorker?.profile?.name, effort: activeMainWorker?.effort?.name },
 				{ persist: true, notify: true },
 			);
-			if (result.ok) return;
+			if (result.ok) {
+				startupCompositionError = undefined;
+				return;
+			}
 			ctx.ui.notify(result.error, "error");
 		},
 	});
@@ -3835,7 +3883,10 @@ export default function (pi: ExtensionAPI) {
 				{ agent: activeMainWorker?.agent?.name, profile: normalizeMainAgentSelection(trimmed), effort: activeMainWorker?.effort?.name },
 				{ persist: true, notify: true },
 			);
-			if (result.ok) return;
+			if (result.ok) {
+				startupCompositionError = undefined;
+				return;
+			}
 			ctx.ui.notify(result.error, "error");
 		},
 	});
@@ -3857,7 +3908,10 @@ export default function (pi: ExtensionAPI) {
 				{ agent: activeMainWorker?.agent?.name, profile: activeMainWorker?.profile?.name, effort: normalizeMainAgentSelection(trimmed) },
 				{ persist: true, notify: true },
 			);
-			if (result.ok) return;
+			if (result.ok) {
+				startupCompositionError = undefined;
+				return;
+			}
 			ctx.ui.notify(result.error, "error");
 		},
 	});
@@ -4652,7 +4706,10 @@ export const __test__ = {
 	buildTaskWidgetLines,
 	normalizeChildSessionSnapshot: (data: unknown) => normalizeChildSessionSnapshot(data, TASK_CHILD_SESSION_METADATA_VERSION),
 	appendProjectTrustFlags,
+	appendWorkerSkillFlags,
 	appendWorkerToolFlags,
+	getPersistedMainAgentState,
+	getWorkerProcessEnv,
 	parseTaskTerminalBackendPreference,
 	parseTasksCommand,
 	preflightTaskRun,

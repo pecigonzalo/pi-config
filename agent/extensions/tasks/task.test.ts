@@ -841,6 +841,60 @@ describe("tasks worker tool configuration", () => {
 
 		expect(args).toEqual([]);
 	});
+
+	it("uses resolved context.skills as the canonical launch inheritance decision", () => {
+		const inheritedArgs: string[] = [];
+		__test__.appendWorkerSkillFlags(
+			inheritedArgs,
+			{ displayAgentName: "worker", context: { mode: "fork", project: false, skills: true } },
+			process.cwd(),
+			false,
+		);
+
+		const isolatedArgs: string[] = [];
+		__test__.appendWorkerSkillFlags(
+			isolatedArgs,
+			{ displayAgentName: "worker", context: { mode: "fresh", project: false, skills: false } },
+			process.cwd(),
+			false,
+		);
+
+		const explicitEmptyArgs: string[] = [];
+		__test__.appendWorkerSkillFlags(
+			explicitEmptyArgs,
+			{ skills: [], displayAgentName: "worker", context: { mode: "fork", project: false, skills: true } },
+			process.cwd(),
+			false,
+		);
+
+		expect(inheritedArgs).toEqual([]);
+		expect(isolatedArgs).toEqual(["--no-skills"]);
+		expect(explicitEmptyArgs).toEqual(["--no-skills"]);
+	});
+
+	it("clears inherited main worker environment while preserving explicit task worker config", () => {
+		const previousAgent = process.env.PI_AGENT_NAME;
+		const previousProfile = process.env.PI_PROFILE_NAME;
+		process.env.PI_AGENT_NAME = "main-agent";
+		process.env.PI_PROFILE_NAME = "main-profile";
+		try {
+			const genericEnv = __test__.getWorkerProcessEnv({});
+			const explicitEnv = __test__.getWorkerProcessEnv({
+				agent: { name: "task-agent" },
+				profile: { name: "task-profile", permissionsProfile: "task-permissions" },
+			});
+
+			expect(genericEnv.PI_AGENT_NAME).toBeUndefined();
+			expect(genericEnv.PI_PROFILE_NAME).toBeUndefined();
+			expect(explicitEnv.PI_AGENT_NAME).toBe("task-agent");
+			expect(explicitEnv.PI_PROFILE_NAME).toBe("task-permissions");
+		} finally {
+			if (previousAgent === undefined) delete process.env.PI_AGENT_NAME;
+			else process.env.PI_AGENT_NAME = previousAgent;
+			if (previousProfile === undefined) delete process.env.PI_PROFILE_NAME;
+			else process.env.PI_PROFILE_NAME = previousProfile;
+		}
+	});
 });
 
 describe("tasks project resource execution guardrails", () => {
@@ -1058,13 +1112,21 @@ describe("tasks extension persisted-session guardrails", () => {
 		expect(preflight.error).toContain('context.mode="fork" requires a parent session file');
 	});
 
-	it("forks persisted parent context when getBranch excludes the session header", async () => {
+	it("forks conversation while resetting inherited main-session composition", async () => {
 		const parentSessionId = "persisted-parent-id";
 		const parentSessionFile = path.join(testAgentDir, "sessions", "workspace", "parent.jsonl");
+		const inheritedComposition = {
+			type: "custom",
+			id: "main-composition",
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			customType: "tasks.main-agent",
+			data: { agent: "orchestrator", profile: "full", effort: "high" },
+		};
 		const parentMessage = {
 			type: "message",
 			id: "parent-message",
-			parentId: null,
+			parentId: inheritedComposition.id,
 			timestamp: new Date().toISOString(),
 			message: { role: "user", content: "retained fork context", timestamp: Date.now() },
 		};
@@ -1079,6 +1141,7 @@ describe("tasks extension persisted-session guardrails", () => {
 					timestamp: new Date().toISOString(),
 					cwd: process.cwd(),
 				},
+				inheritedComposition,
 				parentMessage,
 			].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
 			"utf-8",
@@ -1086,8 +1149,21 @@ describe("tasks extension persisted-session guardrails", () => {
 
 		const preflight = await __test__.preflightTaskRun(
 			"single",
-			[{ task: "Do work", prompt: "Worker prompt", context: "fork" }],
-			createResources() as any,
+			[{ agent: "task-worker", task: "Do work", context: "fork" }],
+			createResources({
+				agents: [
+					{
+						name: "task-worker",
+						description: "Explicit task worker",
+						enabled: true,
+						availability: "task",
+						systemPromptMode: "append",
+						systemPrompt: "TASK WORKER PROMPT",
+						source: "user",
+						filePath: "/tmp/task-worker.md",
+					},
+				],
+			}) as any,
 			process.cwd(),
 			{
 				getSessionFile: () => parentSessionFile,
@@ -1098,12 +1174,45 @@ describe("tasks extension persisted-session guardrails", () => {
 
 		expect(preflight.error).toBeUndefined();
 		expect(preflight.prepared?.steps[0]?.session.parentSessionId).toBe(parentSessionId);
+		expect(preflight.prepared?.steps[0]?.worker.agent?.name).toBe("task-worker");
+		expect(preflight.prepared?.steps[0]?.worker.systemPrompt).toBe("TASK WORKER PROMPT");
 		const childSessionFile = preflight.prepared?.steps[0]?.session.sessionFile;
 		expect(childSessionFile).toBeTruthy();
 		const childRaw = await fs.readFile(childSessionFile!, "utf-8");
 		const childEntries = childRaw.trim().split("\n").map((line) => JSON.parse(line));
 		expect(childEntries[0]).toMatchObject({ type: "session", parentSession: parentSessionFile });
+		expect(childEntries).toContainEqual(inheritedComposition);
 		expect(childEntries).toContainEqual(parentMessage);
+		const childComposition = __test__.getPersistedMainAgentState(childEntries);
+		expect(childComposition.found).toBe(true);
+		expect(childComposition.agent).toBeUndefined();
+		expect(childComposition.profile).toBeUndefined();
+		expect(childComposition.effort).toBeUndefined();
+	});
+
+	it("reads parentSessionId from the persisted header when runtime identity is unavailable", async () => {
+		const parentSessionId = "parent-id-from-file";
+		const parentSessionFile = path.join(testAgentDir, "sessions", "workspace", "header-only-parent.jsonl");
+		await fs.mkdir(path.dirname(parentSessionFile), { recursive: true });
+		await fs.writeFile(
+			parentSessionFile,
+			JSON.stringify({ type: "session", version: 3, id: parentSessionId, timestamp: new Date().toISOString(), cwd: process.cwd() }) + "\n",
+			"utf-8",
+		);
+
+		const preflight = await __test__.preflightTaskRun(
+			"single",
+			[{ task: "Do work", prompt: "Worker prompt", context: "fresh" }],
+			createResources() as any,
+			process.cwd(),
+			{
+				getSessionFile: () => parentSessionFile,
+				getBranch: () => [],
+			},
+		);
+
+		expect(preflight.error).toBeUndefined();
+		expect(preflight.prepared?.steps[0]?.session.parentSessionId).toBe(parentSessionId);
 	});
 
 	it("stores persisted child sessions as normal Pi sessions with parentSession headers", async () => {
@@ -1314,6 +1423,169 @@ describe("main-session effort command", () => {
 		expect(models).toEqual([{ provider: "github-copilot", id: "gpt-5.4" }]);
 		expect(thinkingLevels).toContain("high");
 	});
+
+	it("resets thinking to the session baseline when the selected effort has no thinking level", async () => {
+		mockResources = createResources({
+			efforts: [
+				{
+					name: "smart",
+					provider: "github-copilot",
+					model: "gpt-5.4",
+					thinkingLevel: "high",
+					source: "user",
+					filePath: "/tmp/tasks.json",
+				},
+				{
+					name: "plain",
+					provider: "github-copilot",
+					model: "gpt-5.4-mini",
+					source: "user",
+					filePath: "/tmp/tasks.json",
+				},
+			],
+		});
+		const { commandHandlers, pi } = createExtensionHarness();
+		const thinkingLevels: string[] = [];
+		(pi as any).getThinkingLevel = () => "medium";
+		(pi as any).setThinkingLevel = (level: string) => {
+			thinkingLevels.push(level);
+		};
+
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: true,
+			waitForIdle: async () => {},
+			ui: { confirm: async () => true, notify: () => {} },
+			model: { provider: "github-copilot", id: "gpt-5-mini" },
+			modelRegistry: {
+				find: (provider: string, modelId: string) => ({ provider, id: modelId }),
+			},
+			sessionManager: {
+				getSessionId: () => "session-effort-baseline",
+				getBranch: () => [],
+				appendCustomEntry: () => "entry-id",
+			},
+		};
+
+		await commandHandlers.effort.handler("smart", ctx);
+		await commandHandlers.effort.handler("plain", ctx);
+
+		expect(thinkingLevels).toEqual(["high", "medium"]);
+	});
+});
+
+describe("main-session composition recovery", () => {
+	beforeEach(() => {
+		mockResources = createResources({
+			agents: [
+				{
+					name: "role-a",
+					description: "Role A",
+					enabled: true,
+					availability: "main",
+					systemPromptMode: "append",
+					systemPrompt: "ROLE A PROMPT",
+					source: "user",
+					filePath: "/tmp/role-a.md",
+				},
+				{
+					name: "role-b",
+					description: "Role B",
+					enabled: true,
+					availability: "main",
+					systemPromptMode: "append",
+					systemPrompt: "ROLE B PROMPT",
+					source: "user",
+					filePath: "/tmp/role-b.md",
+				},
+			],
+			profiles: [
+				{
+					name: "safe-profile",
+					description: "Safe profile",
+					enabled: true,
+					systemPromptMode: "append",
+					systemPrompt: "SAFE PROFILE PROMPT",
+					source: "user",
+					filePath: "/tmp/safe-profile.md",
+				},
+			],
+			efforts: [
+				{
+					name: "safe-effort",
+					provider: "test",
+					model: "safe-model",
+					source: "user",
+					filePath: "/tmp/tasks.json",
+				},
+			],
+		});
+	});
+
+	function mainCompositionEntry(data: Record<string, unknown>): any {
+		return { type: "custom", customType: "tasks.main-agent", data };
+	}
+
+	function createMainContext(sessionId: string, getBranch: () => any[]) {
+		return {
+			cwd: process.cwd(),
+			hasUI: true,
+			waitForIdle: async () => {},
+			ui: {
+				confirm: async () => true,
+				notify: () => {},
+				setStatus: () => {},
+				setWidget: () => {},
+			},
+			model: { provider: "test", id: "baseline-model" },
+			modelRegistry: {
+				find: (provider: string, modelId: string) => ({ provider, id: modelId }),
+			},
+			sessionManager: {
+				getSessionId: () => sessionId,
+				getSessionFile: () => undefined,
+				getBranch,
+				appendCustomEntry: () => "entry-id",
+			},
+		};
+	}
+
+	it("reapplies the branch-local composition after session tree navigation", async () => {
+		const { eventHandlers } = createExtensionHarness();
+		let branch = [mainCompositionEntry({ agent: "role-a", profile: null, effort: null })];
+		const ctx = createMainContext("session-tree-composition", () => branch);
+
+		await eventHandlers.session_start?.({ reason: "startup" }, ctx);
+		const beforeTree = await eventHandlers.before_agent_start?.({ systemPrompt: "BASE" }, ctx);
+		branch = [mainCompositionEntry({ agent: "role-b", profile: null, effort: null })];
+		await eventHandlers.session_tree?.({ newLeafId: "role-b" }, ctx);
+		const afterTree = await eventHandlers.before_agent_start?.({ systemPrompt: "BASE" }, ctx);
+
+		expect(beforeTree.systemPrompt).toContain("ROLE A PROMPT");
+		expect(afterTree.systemPrompt).toContain("ROLE B PROMPT");
+		expect(afterTree.systemPrompt).not.toContain("ROLE A PROMPT");
+	});
+
+	for (const recovery of [
+		{ command: "agent", invalid: { agent: "missing-agent" }, valid: "role-a" },
+		{ command: "profile", invalid: { profile: "missing-profile" }, valid: "safe-profile" },
+		{ command: "effort", invalid: { effort: "missing-effort" }, valid: "safe-effort" },
+	] as const) {
+		it(`clears the startup composition error after successful /${recovery.command} recovery`, async () => {
+			const { commandHandlers, eventHandlers } = createExtensionHarness();
+			const branch = [mainCompositionEntry(recovery.invalid)];
+			const ctx = createMainContext(`session-recovery-${recovery.command}`, () => branch);
+
+			await eventHandlers.session_start?.({ reason: "startup" }, ctx);
+			const blocked = await eventHandlers.before_agent_start?.({ systemPrompt: "BASE" }, ctx);
+			expect(blocked.systemPrompt).toContain("Startup composition error.");
+
+			await commandHandlers[recovery.command].handler(recovery.valid, ctx);
+			const recovered = await eventHandlers.before_agent_start?.({ systemPrompt: "BASE" }, ctx);
+			expect(recovered.systemPrompt).not.toContain("Startup composition error.");
+			expect(recovered.systemPrompt).toContain("Task delegation choices");
+		});
+	}
 });
 
 describe("tasks extension RPC UI relay", () => {
