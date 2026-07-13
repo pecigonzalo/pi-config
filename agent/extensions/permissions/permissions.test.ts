@@ -357,6 +357,36 @@ describe("external path canonicalization", () => {
 		}
 	});
 
+	it("resolves multi-hop symlinks that ultimately target a missing path", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-test-"));
+		const cwd = path.join(tmp, "cwd");
+		const links = path.join(tmp, "links");
+		const outside = path.join(tmp, "outside");
+		await fs.mkdir(cwd, { recursive: true });
+		await fs.mkdir(links, { recursive: true });
+		await fs.mkdir(outside, { recursive: true });
+
+		try {
+			try {
+				await fs.symlink(path.join("..", "outside", "missing-target"), path.join(links, "second"), "dir");
+				await fs.symlink(path.join("..", "links", "second"), path.join(cwd, "first"), "dir");
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (["EPERM", "EACCES", "ENOTSUP"].includes(code ?? "")) return;
+				throw error;
+			}
+
+			const expectedTarget = path.join(await fs.realpath(outside), "missing-target");
+			expect(canonicalizePathToken("first", cwd)).toBe(expectedTarget);
+			expect(canonicalizePathToken("first/unresolved/child.txt", cwd)).toBe(
+				path.join(expectedTarget, "unresolved", "child.txt"),
+			);
+			expect(isPathOutsideCwd("first/unresolved/child.txt", cwd)).toBe(true);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("resolves dangling absolute symlinks to missing external targets", async () => {
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-test-"));
 		const cwd = path.join(tmp, "cwd");

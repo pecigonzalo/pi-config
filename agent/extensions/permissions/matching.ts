@@ -124,6 +124,13 @@ export function resolveToken(token: string, cwd: string): string {
 	return path.isAbsolute(clean) ? path.resolve(clean) : path.resolve(cwd, clean);
 }
 
+function hasErrno(error: unknown, ...codes: string[]): error is NodeJS.ErrnoException {
+	return typeof error === "object"
+		&& error !== null
+		&& "code" in error
+		&& codes.includes(String(error.code));
+}
+
 function canonicalizeThroughExistingAncestor(
 	inputPath: string,
 	visitedSymlinks: Set<string> = new Set(),
@@ -135,12 +142,17 @@ function canonicalizeThroughExistingAncestor(
 	while (true) {
 		try {
 			return path.join(fs.realpathSync.native(current), ...unresolved);
-		} catch {
+		} catch (realpathError) {
+			if (!hasErrno(realpathError, "ENOENT", "ELOOP")) throw realpathError;
+
 			let isSymlink = false;
 			try {
 				isSymlink = fs.lstatSync(current).isSymbolicLink();
-			} catch {
-				// Missing components are handled through their longest existing ancestor.
+			} catch (lstatError) {
+				const isCycleWalk = hasErrno(realpathError, "ELOOP") && hasErrno(lstatError, "ELOOP");
+				if (!hasErrno(lstatError, "ENOENT") && !isCycleWalk) throw lstatError;
+				// ENOENT walks to the longest existing ancestor. ELOOP walks to the
+				// symlink responsible for the cycle so it can fail closed below.
 			}
 
 			if (isSymlink) {
