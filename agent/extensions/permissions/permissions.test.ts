@@ -1463,8 +1463,10 @@ describe("permissions extension sandbox lifecycle", () => {
 			const toolCall = harness.handlers.get("tool_call")?.[0];
 			if (!toolCall) throw new Error("tool_call handler was not registered");
 			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
-			expect(approvalTitles[0]).toContain(`Full command:\n${command}`);
-			expect(approvalTitles[0]).toContain(`Approval target:\n${dangerousSuffix}`);
+			expect(approvalTitles[0]).toContain(`Command:\n  ${command}`);
+			expect(approvalTitles[0]).toContain(`Unapproved segment:\n  ${dangerousSuffix}`);
+			expect(approvalTitles[0]).not.toContain("Note:\n  Unapproved shell segment:");
+			expect(approvalTitles[0]).toContain("Reusable prefix:\n  rm *\n\nProfile: default");
 			expect(approvalOptions[0]?.[0]).toBe("Allow once");
 		} finally {
 			await harness.restore();
@@ -1490,12 +1492,12 @@ describe("permissions extension sandbox lifecycle", () => {
 			if (!toolCall) throw new Error("tool_call handler was not registered");
 			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
 			const title = approvalTitles[0] ?? "";
-			expect(title).toContain("Full command:\n");
+			expect(title).toContain("Command:\n");
 			expect(title).toContain("[Preview shortened: omitted");
-			expect(title).toContain(`${target}\nApproval target:\n${target}`);
+			expect(title).toContain(`&& ${target}\n\nUnapproved segment:\n  ${target}`);
 			expect(title.length).toBeLessThan(2_000);
 			expect(approvalOptions[0]?.[0]).toBe("Allow once");
-			expect(approvalOptions[0]).toContain("Allow exact Approval target for this session");
+			expect(approvalOptions[0]).toContain("Allow this exact segment for this session");
 		} finally {
 			await harness.restore();
 		}
@@ -1518,8 +1520,8 @@ describe("permissions extension sandbox lifecycle", () => {
 			if (!toolCall) throw new Error("tool_call handler was not registered");
 			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
 			const title = approvalTitles[0] ?? "";
-			expect(title).toContain(`\n${finalLine}\nApproval target:\nprintf `);
-			expect(title).toContain("'\nProfile: default");
+			expect(title).toContain(`\n  ${finalLine}\n\nUnapproved segment:\n  printf `);
+			expect(title).toContain("\n\nProfile: default");
 			expect(title).toContain("[Preview shortened: omitted");
 			expect(title.length).toBeLessThan(3_000);
 		} finally {
@@ -1527,7 +1529,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 	});
 
-	it("bounds multiline prefix candidates and uses stable numbered option labels", async () => {
+	it("bounds multiline reusable prefixes and includes their value in option labels", async () => {
 		const approvalTitles: string[] = [];
 		const approvalOptions: string[][] = [];
 		const notifications: string[] = [];
@@ -1537,7 +1539,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			mode: "full-access",
 			rules: [{ tool: "bash", action: "ask" }],
 			now: () => 0,
-			approvalSelection: (choices) => choices.find((choice) => choice === "Allow prefix 1 for this session"),
+			approvalSelection: (choices) => choices.find((choice) => choice.startsWith("Allow `tool-")),
 			approvalOptions,
 			approvalTitles,
 			notifications,
@@ -1549,11 +1551,11 @@ describe("permissions extension sandbox lifecycle", () => {
 			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
 			const title = approvalTitles[0] ?? "";
 			const options = approvalOptions[0] ?? [];
-			expect(title).toContain("Prefix candidate 1:\n");
+			expect(title).toContain("Reusable prefix:\n  ");
 			expect(title).toContain("[Preview shortened: omitted");
 			expect(options[0]).toBe("Allow once");
-			expect(options).toContain("Allow prefix 1 for this session");
-			expect(options).toContain("Save prefix 1 permanently");
+			expect(options.some((option) => option.startsWith("Allow `tool-") && option.endsWith("` for this session"))).toBe(true);
+			expect(options.some((option) => option.startsWith("Save `tool-") && option.endsWith("` permanently"))).toBe(true);
 			expect(Math.max(...options.map((option) => option.length))).toBeLessThan(80);
 			const prefixNotification = notifications.find((message) => message.includes("bash-prefix:"));
 			expect(prefixNotification).toContain("tool-");
@@ -1591,7 +1593,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			toolName: "bash",
 			input: { command: "permissions-save-failure-command --unique" },
 			rules: [{ tool: "bash", action: "ask" }] as Rule[],
-			pick: (choices: string[]) => choices.find((choice) => choice === "Save exact Full command permanently"),
+			pick: (choices: string[]) => choices.find((choice) => choice === "Save this exact command permanently"),
 		},
 		{
 			name: "path permanent",

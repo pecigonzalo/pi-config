@@ -165,6 +165,16 @@ function toToolCallResult(decision: PermissionDecision): { block: true; reason: 
 		: undefined;
 }
 
+function formatPrefixOptionValue(candidate: string): string {
+	const normalized = `${candidate} *`.replace(/\s+/g, " ").replaceAll("`", "'").trim();
+	const characters = Array.from(normalized);
+	return characters.length <= 40 ? normalized : `${characters.slice(0, 39).join("")}…`;
+}
+
+function indentPermissionPreview(preview: string): string {
+	return preview.split("\n").map((line) => `  ${line}`).join("\n");
+}
+
 // ─── Agent name detection ─────────────────────────────────────────────────────
 
 function detectAgentName(pi: ExtensionAPI): string {
@@ -920,37 +930,45 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			const uniquePrefixCandidates = parsedFocusCommand
 				? dedupeStrings([parsedFocusCommand.prefixTokens.join(" ")].filter(Boolean))
 				: dedupeStrings([approvalTarget.trim().split(/\s+/)[0]].filter((value): value is string => Boolean(value)));
-			const segmentNote = approvalTarget !== command ? `Unapproved shell segment: ${approvalTarget}` : undefined;
+			const segmentNote = `Unapproved shell segment: ${approvalTarget}`;
 			const displayNote = note && note !== segmentNote ? note : undefined;
 
 			const bashLines = [
-				"Full command:",
-				formatPermissionPreview(command, { preserveEnd: true }),
+				"Command:",
+				indentPermissionPreview(formatPermissionPreview(command, { preserveEnd: true })),
 			];
 			if (approvalTarget !== command) {
-				bashLines.push("Approval target:", formatPermissionPreview(approvalTarget, { preserveEnd: true }));
+				bashLines.push(
+					"",
+					"Unapproved segment:",
+					indentPermissionPreview(formatPermissionPreview(approvalTarget, { preserveEnd: true })),
+				);
 			}
-			if (displayNote) bashLines.push("Note:", formatPermissionPreview(displayNote));
-			bashLines.push(`Profile: ${agentName}`);
+			if (displayNote) {
+				bashLines.push("", "Note:", indentPermissionPreview(formatPermissionPreview(displayNote)));
+			}
 
 			const prefixSessionToValue = new Map<string, string>();
 			const prefixPermanentToValue = new Map<string, string>();
-			for (const [index, candidate] of uniquePrefixCandidates.entries()) {
-				const candidateNumber = index + 1;
+			for (const candidate of uniquePrefixCandidates) {
+				const prefix = `${candidate} *`;
 				bashLines.push(
-					`Prefix candidate ${candidateNumber}:`,
-					formatPermissionPreview(`${candidate} *`, { maxLines: 4, maxChars: 240, preserveEnd: true }),
+					"",
+					"Reusable prefix:",
+					indentPermissionPreview(formatPermissionPreview(prefix, { maxLines: 4, maxChars: 240, preserveEnd: true })),
 				);
-				prefixSessionToValue.set(`Allow prefix ${candidateNumber} for this session`, candidate);
-				prefixPermanentToValue.set(`Save prefix ${candidateNumber} permanently`, candidate);
+				const optionValue = formatPrefixOptionValue(candidate);
+				prefixSessionToValue.set(`Allow \`${optionValue}\` for this session`, candidate);
+				prefixPermanentToValue.set(`Save \`${optionValue}\` permanently`, candidate);
 			}
+			bashLines.push("", `Profile: ${agentName}`);
 			const prefixOptionToValue = new Map([...prefixSessionToValue, ...prefixPermanentToValue]);
 			const allowExactLabel = approvalTarget === command
-				? "Allow exact Full command for this session"
-				: "Allow exact Approval target for this session";
+				? "Allow this exact command for this session"
+				: "Allow this exact segment for this session";
 			const saveExactLabel = approvalTarget === command
-				? "Save exact Full command permanently"
-				: "Save exact Approval target permanently";
+				? "Save this exact command permanently"
+				: "Save this exact segment permanently";
 			const allowChoices = [
 				allowOnceOption,
 				allowExactLabel,
