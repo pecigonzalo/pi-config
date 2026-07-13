@@ -376,6 +376,74 @@ describe("tasks project trust integration", () => {
 		}
 	});
 
+	it("does not discover project resources when ExtensionContext reports the project as untrusted", async () => {
+		mockHasProjectTaskResources = true;
+		mockSavedProjectTrust = true;
+		lastDiscoveryProjectTrusted = undefined;
+		try {
+			const { eventHandlers } = createExtensionHarness();
+			const ctx = {
+				cwd: process.cwd(),
+				hasUI: false,
+				isProjectTrusted: () => false,
+				ui: {
+					confirm: async () => true,
+					notify: () => {},
+					setStatus: () => {},
+					setWidget: () => {},
+				},
+				model: { provider: "test", id: "model" },
+				sessionManager: {
+					getSessionFile: () => undefined,
+					getSessionId: () => "extension-context-untrusted-session",
+					getBranch: () => [],
+				},
+			};
+
+			await eventHandlers.session_start?.({ reason: "startup" }, ctx);
+			await eventHandlers.before_agent_start?.({ systemPrompt: "base" }, ctx);
+
+			expect(lastDiscoveryProjectTrusted as boolean | undefined).toBe(false);
+		} finally {
+			mockHasProjectTaskResources = false;
+			mockSavedProjectTrust = null;
+		}
+	});
+
+	it("discovers project resources when ExtensionContext and task trust agree", async () => {
+		mockHasProjectTaskResources = true;
+		mockSavedProjectTrust = true;
+		lastDiscoveryProjectTrusted = undefined;
+		try {
+			const { eventHandlers } = createExtensionHarness();
+			const ctx = {
+				cwd: process.cwd(),
+				hasUI: false,
+				isProjectTrusted: () => true,
+				ui: {
+					confirm: async () => true,
+					notify: () => {},
+					setStatus: () => {},
+					setWidget: () => {},
+				},
+				model: { provider: "test", id: "model" },
+				sessionManager: {
+					getSessionFile: () => undefined,
+					getSessionId: () => "extension-context-trusted-session",
+					getBranch: () => [],
+				},
+			};
+
+			await eventHandlers.session_start?.({ reason: "startup" }, ctx);
+			await eventHandlers.before_agent_start?.({ systemPrompt: "base" }, ctx);
+
+			expect(lastDiscoveryProjectTrusted as boolean | undefined).toBe(true);
+		} finally {
+			mockHasProjectTaskResources = false;
+			mockSavedProjectTrust = null;
+		}
+	});
+
 	it("fails closed when task resources appear after trust resolution", async () => {
 		mockHasProjectTaskResources = false;
 		mockHasCoreProjectResources = false;

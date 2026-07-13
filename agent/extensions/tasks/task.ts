@@ -1019,7 +1019,8 @@ async function resolveTaskProjectTrust(ctx: {
 }
 
 function isTaskProjectTrusted(ctx: { cwd: string; isProjectTrusted?: () => boolean }): boolean {
-	if (!hasProjectTaskResources(ctx.cwd)) return ctx.isProjectTrusted?.() === true;
+	if (ctx.isProjectTrusted?.() !== true) return false;
+	if (!hasProjectTaskResources(ctx.cwd)) return true;
 	return taskProjectResourcesPresentAtTrustResolution && taskProjectTrusted;
 }
 
