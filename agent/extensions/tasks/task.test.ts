@@ -643,20 +643,57 @@ describe("tasks extension persisted-session guardrails", () => {
 		expect(preflight.error).toContain('context.mode="fork" requires a parent session file');
 	});
 
+	it("forks persisted parent context when getBranch excludes the session header", async () => {
+		const parentSessionId = "persisted-parent-id";
+		const parentSessionFile = path.join(testAgentDir, "sessions", "workspace", "parent.jsonl");
+		const parentMessage = {
+			type: "message",
+			id: "parent-message",
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			message: { role: "user", content: "retained fork context", timestamp: Date.now() },
+		};
+		await fs.mkdir(path.dirname(parentSessionFile), { recursive: true });
+		await fs.writeFile(
+			parentSessionFile,
+			`${[
+				{
+					type: "session",
+					version: 3,
+					id: parentSessionId,
+					timestamp: new Date().toISOString(),
+					cwd: process.cwd(),
+				},
+				parentMessage,
+			].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+			"utf-8",
+		);
+
+		const preflight = await __test__.preflightTaskRun(
+			"single",
+			[{ task: "Do work", prompt: "Worker prompt", context: "fork" }],
+			createResources() as any,
+			process.cwd(),
+			{
+				getSessionFile: () => parentSessionFile,
+				getSessionId: () => parentSessionId,
+				getBranch: () => [parentMessage] as any,
+			},
+		);
+
+		expect(preflight.error).toBeUndefined();
+		expect(preflight.prepared?.steps[0]?.session.parentSessionId).toBe(parentSessionId);
+		const childSessionFile = preflight.prepared?.steps[0]?.session.sessionFile;
+		expect(childSessionFile).toBeTruthy();
+		const childRaw = await fs.readFile(childSessionFile!, "utf-8");
+		const childEntries = childRaw.trim().split("\n").map((line) => JSON.parse(line));
+		expect(childEntries[0]).toMatchObject({ type: "session", parentSession: parentSessionFile });
+		expect(childEntries).toContainEqual(parentMessage);
+	});
+
 	it("stores persisted child sessions as normal Pi sessions with parentSession headers", async () => {
 		const parentSessionId = "parent-session-id";
 		const parentSessionFile = path.join(testAgentDir, "sessions", "workspace", "main", "parent-session.jsonl");
-		const expectedRunRoot = path.join(
-			testAgentDir,
-			"sessions",
-			"workspace",
-			"main",
-			"task-runs",
-			"parent-session-id--parent-session",
-		);
-
-		expect(__test__.resolvePersistedTaskSessionRoot(parentSessionFile, parentSessionId)).toBe(expectedRunRoot);
-
 		const preflight = await __test__.preflightTaskRun(
 			"single",
 			[{ task: "Do work", prompt: "Worker prompt", context: "fresh" }],
@@ -669,10 +706,8 @@ describe("tasks extension persisted-session guardrails", () => {
 		);
 
 		expect(preflight.error).toBeUndefined();
-		expect(preflight.prepared?.sessionRunRoot).toStartWith(`${expectedRunRoot}${path.sep}`);
 		const childSessionFile = preflight.prepared?.steps[0]?.session.sessionFile;
 		expect(childSessionFile).toBeTruthy();
-		expect(childSessionFile).not.toStartWith(preflight.prepared?.sessionRunRoot ?? "");
 		expect(childSessionFile).toContain(`${path.sep}sessions${path.sep}`);
 
 		const raw = await fs.readFile(childSessionFile!, "utf-8");

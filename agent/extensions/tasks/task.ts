@@ -122,8 +122,6 @@ const TASK_SESSION_VERSION_FALLBACK = 3;
 const TASK_CHILD_SESSION_CUSTOM_TYPE = "tasks.child-session";
 const TASK_CHILD_SESSION_METADATA_VERSION = 1;
 const TASKS_PARENT_SESSION_ROOT = path.join(getAgentDir(), "sessions");
-const TASKS_CHILD_SESSION_RUNS_DIR = "task-runs";
-const TASKS_CHILD_SESSION_FALLBACK_PARENT = "detached";
 const TASKS_NO_CURRENT_RUNS_MESSAGE = "No task runs in current session.";
 const TASKS_BROWSER_SHORTCUT = "ctrl+shift+t";
 const TASKS_COMMAND_USAGE = [
@@ -314,7 +312,6 @@ interface TaskDetails {
 	projectAgentsDir: string | null;
 	results: SingleResult[];
 	sessionRunId?: string;
-	sessionRunRoot?: string;
 	toolCallId?: string;
 	childSessions?: ChildSessionSnapshot[];
 }
@@ -1239,7 +1236,6 @@ interface PreparedTaskStep {
 		sessionName?: string;
 		parentSessionFile?: string;
 		parentSessionId?: string;
-		stepDir?: string;
 	};
 }
 
@@ -1247,7 +1243,6 @@ interface PreparedTaskRun {
 	mode: TaskExecutionMode;
 	steps: PreparedTaskStep[];
 	sessionRunId?: string;
-	sessionRunRoot?: string;
 }
 
 function isTaskExecutionMode(value: unknown): value is TaskExecutionMode {
@@ -1321,15 +1316,6 @@ function hasPreviousPlaceholder(task: string): boolean {
 	return /\{previous\}/.test(task);
 }
 
-function sanitizeStepLabel(step: TaskStepConfig, index: number): string {
-	const base = (step.agent ?? step.profile ?? "generic")
-		.toLowerCase()
-		.replace(/[^a-z0-9_-]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 32) || "generic";
-	return `${String(index + 1).padStart(2, "0")}-${base}`;
-}
-
 function createTaskRunId(): string {
 	const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 	return `${timestamp}_${randomUUID().slice(0, 8)}`;
@@ -1356,38 +1342,6 @@ function buildTaskSessionWorkspaceName(run: TaskRunView, preferredStep?: TaskRun
 	);
 	if (!readableSource || readableSource === stableId) return `pi-${stableId}`;
 	return `pi-${stableId}-${readableSource}`.slice(0, 80);
-}
-
-function getSessionFileStem(sessionFile: string | undefined): string | undefined {
-	if (!sessionFile) return undefined;
-	const parsed = path.parse(sessionFile);
-	return parsed.name || undefined;
-}
-
-function resolveParentSessionBaseDir(parentSessionFile: string | undefined): string {
-	if (!parentSessionFile) return TASKS_PARENT_SESSION_ROOT;
-	const resolvedRoot = path.resolve(TASKS_PARENT_SESSION_ROOT);
-	const resolvedParentDir = path.resolve(path.dirname(parentSessionFile));
-	const relative = path.relative(resolvedRoot, resolvedParentDir);
-	if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
-		return path.join(resolvedRoot, relative);
-	}
-	return TASKS_PARENT_SESSION_ROOT;
-}
-
-function buildParentSessionFolderName(parentSessionFile: string | undefined, parentSessionId: string | undefined): string {
-	const fileStem = getSessionFileStem(parentSessionFile);
-	const stableId = sanitizePathSegment(parentSessionId ?? fileStem, TASKS_CHILD_SESSION_FALLBACK_PARENT);
-	if (!fileStem) return stableId;
-	const readableStem = sanitizePathSegment(fileStem, "");
-	if (!readableStem || readableStem === stableId) return stableId;
-	return `${stableId}--${readableStem}`;
-}
-
-function resolvePersistedTaskSessionRoot(parentSessionFile: string | undefined, parentSessionId: string | undefined): string {
-	const parentBaseDir = resolveParentSessionBaseDir(parentSessionFile);
-	const parentFolder = buildParentSessionFolderName(parentSessionFile, parentSessionId);
-	return path.join(parentBaseDir, TASKS_CHILD_SESSION_RUNS_DIR, parentFolder);
 }
 
 function readSessionHeaderStringField(entries: readonly SessionEntry[], field: "id" | "parentSession"): string | undefined {
@@ -1453,12 +1407,6 @@ async function resolveParentSessionForCurrentSession(
 			? `Current session has no parentSession header in memory, and the session file could not be read: ${fileReadError}`
 			: "Current session has no parentSession header, so a parent session cannot be resolved automatically.",
 	};
-}
-
-async function writeJsonFile(filePath: string, data: unknown): Promise<void> {
-	await withFileMutationQueue(filePath, async () => {
-		await fs.promises.writeFile(filePath, `${JSON.stringify(data, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
-	});
 }
 
 function createSessionEntryId(): string {
@@ -1567,7 +1515,11 @@ async function preflightTaskRun(
 	steps: TaskStepConfig[],
 	resources: ResourceDiscoveryResult,
 	defaultCwd: string,
-	sessionManager: { getSessionFile?: () => string | undefined; getBranch(): SessionEntry[] },
+	sessionManager: {
+		getSessionFile?: () => string | undefined;
+		getSessionId?: () => string;
+		getBranch(): SessionEntry[];
+	},
 ): Promise<{ prepared?: PreparedTaskRun; error?: string }> {
 	const preparedSteps: PreparedTaskStep[] = [];
 	for (let i = 0; i < steps.length; i++) {
@@ -1612,84 +1564,20 @@ async function preflightTaskRun(
 	if (needsPersistedSessions || needsFork) {
 		parentSessionFile = sessionManager.getSessionFile?.();
 		parentBranch = sessionManager.getBranch();
-		parentSessionId = readSessionHeaderId(parentBranch);
+		parentSessionId = sessionManager.getSessionId?.() ?? readSessionHeaderId(parentBranch);
 	}
 	if (needsFork) {
 		if (!parentSessionFile) {
 			return { error: "context.mode=\"fork\" requires a parent session file, but the current session is unavailable." };
 		}
-		if (!parentBranch || !parentBranch.some((entry) => (entry as { type?: unknown }).type === "session")) {
-			return { error: "context.mode=\"fork\" requires a valid parent session snapshot, but none was found." };
-		}
 	}
 
-	let sessionRunId: string | undefined;
-	let sessionRunRoot: string | undefined;
-	let sessionStepsRoot: string | undefined;
-
-	if (needsPersistedSessions) {
-		sessionRunId = createTaskRunId();
-		const persistedSessionRoot = resolvePersistedTaskSessionRoot(parentSessionFile, parentSessionId);
-		sessionRunRoot = path.join(persistedSessionRoot, sessionRunId);
-		sessionStepsRoot = path.join(sessionRunRoot, "steps");
-		try {
-			await fs.promises.mkdir(sessionStepsRoot, { recursive: true });
-			await writeJsonFile(path.join(sessionRunRoot, "run.json"), {
-				runId: sessionRunId,
-				createdAt: new Date().toISOString(),
-				mode,
-				stepCount: preparedSteps.length,
-				persistedStepCount: preparedSteps.filter((step) => step.session.persist).length,
-				parentSessionFile: parentSessionFile ?? null,
-				parentSessionId: parentSessionId ?? null,
-				sessionStorageRoot: persistedSessionRoot,
-			});
-		} catch (error) {
-			return {
-				error: `Failed to create task session root at ${sessionRunRoot}: ${error instanceof Error ? error.message : String(error)}`,
-			};
-		}
-	}
+	const sessionRunId = needsPersistedSessions ? createTaskRunId() : undefined;
 
 	for (let i = 0; i < preparedSteps.length; i++) {
 		const preparedStep = preparedSteps[i];
 		if (!preparedStep) return { error: `Internal error: missing prepared step ${i + 1}.` };
-		const stepLabel = sanitizeStepLabel(preparedStep.rawStep, i);
-		if (sessionStepsRoot) {
-			preparedStep.session.stepDir = path.join(sessionStepsRoot, stepLabel);
-			try {
-				await fs.promises.mkdir(preparedStep.session.stepDir, { recursive: true });
-			} catch (error) {
-				return {
-					error: `Failed to create session directory for step ${i + 1}: ${error instanceof Error ? error.message : String(error)}`,
-				};
-			}
-		}
-
-		if (!preparedStep.session.persist) {
-			if (preparedStep.session.stepDir) {
-				try {
-					await writeJsonFile(path.join(preparedStep.session.stepDir, "step.json"), {
-						step: i + 1,
-						mode: preparedStep.session.mode,
-						persist: false,
-						cwd: preparedStep.launchCwd,
-						agent: preparedStep.worker.agent?.name ?? null,
-						profile: preparedStep.worker.profile?.name ?? null,
-						sessionFile: null,
-					});
-				} catch (error) {
-					return {
-						error: `Failed to write step metadata for step ${i + 1}: ${error instanceof Error ? error.message : String(error)}`,
-					};
-				}
-			}
-			continue;
-		}
-
-		if (!preparedStep.session.stepDir) {
-			return { error: `Internal error: missing step directory for persisted step ${i + 1}.` };
-		}
+		if (!preparedStep.session.persist) continue;
 
 		const sessionName = buildTaskChildSessionName(preparedStep.worker.displayAgentName, preparedStep.rawStep.task);
 		let sessionId: string;
@@ -1725,25 +1613,6 @@ async function preflightTaskRun(
 		preparedStep.session.sessionName = sessionName;
 		preparedStep.session.parentSessionFile = parentSessionFile;
 		preparedStep.session.parentSessionId = parentSessionId;
-		try {
-			await writeJsonFile(path.join(preparedStep.session.stepDir, "step.json"), {
-				step: i + 1,
-				mode: preparedStep.session.mode,
-				persist: true,
-				cwd: preparedStep.launchCwd,
-				agent: preparedStep.worker.agent?.name ?? null,
-				profile: preparedStep.worker.profile?.name ?? null,
-				sessionId,
-				sessionFile,
-				sessionName,
-				parentSessionFile: parentSessionFile ?? null,
-				parentSessionId: parentSessionId ?? null,
-			});
-		} catch (error) {
-			return {
-				error: `Failed to write step metadata for step ${i + 1}: ${error instanceof Error ? error.message : String(error)}`,
-			};
-		}
 	}
 
 	return {
@@ -1751,7 +1620,6 @@ async function preflightTaskRun(
 			mode,
 			steps: preparedSteps,
 			sessionRunId,
-			sessionRunRoot,
 		},
 	};
 }
@@ -4088,7 +3956,6 @@ export default function (pi: ExtensionAPI) {
 			const detailMode: TaskExecutionMode = isTaskExecutionMode(mode) ? mode : "single";
 
 			let sessionRunId: string | undefined;
-			let sessionRunRoot: string | undefined;
 			let childMetadataRunId: string | undefined;
 			const makeDetails =
 				(mode: TaskExecutionMode) =>
@@ -4100,7 +3967,6 @@ export default function (pi: ExtensionAPI) {
 						projectAgentsDir: discovery.projectAgentsDir,
 						results,
 						sessionRunId,
-						sessionRunRoot,
 						toolCallId,
 						childSessions: childSessions.length > 0 ? childSessions : undefined,
 					};
@@ -4199,7 +4065,6 @@ export default function (pi: ExtensionAPI) {
 			}
 			const preparedRun = preflight.prepared!;
 			sessionRunId = preparedRun.sessionRunId;
-			sessionRunRoot = preparedRun.sessionRunRoot;
 			preparedSteps = preparedRun.steps;
 			childMetadataRunId = sessionRunId ?? `${toolCallId}-run`;
 
@@ -4709,7 +4574,6 @@ export const __test__ = {
 	resolveModelFromEffort,
 	formatTaskDelegationGuidance,
 	resolveParentSessionForCurrentSession,
-	resolvePersistedTaskSessionRoot,
 	resolveTaskOriginForBranch: (entries: readonly SessionEntry[], leafId?: string | null) =>
 		resolveTaskOriginForBranch(entries, createTaskPreview, leafId),
 	resolveWorkerConfig,
