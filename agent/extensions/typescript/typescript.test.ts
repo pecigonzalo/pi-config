@@ -55,6 +55,13 @@ beforeAll(async () => {
 	}));
 	const mockAgentsModule = () => ({
 		discoverAgents: () => ({ agents: [], errors: [] }),
+		discoverProfiles: () => ({
+			profiles: [
+				{ name: "read-only", description: "Read-only analysis", enabled: true, permissionsProfile: "read-only" },
+				{ name: "read-write", description: "Implementation access", enabled: true, permissionsProfile: "default" },
+			],
+			projectProfilesDir: null,
+		}),
 	});
 	mock.module("../tasks/agents.js", mockAgentsModule);
 
@@ -64,19 +71,35 @@ beforeAll(async () => {
 });
 
 describe("typescript tool helpers", () => {
-	it("names the typescript tool in every prompt guideline", () => {
-		let registeredTool: { promptGuidelines?: string[] } | undefined;
+	it("describes CodeMode modes and permissions profiles", () => {
+		let registeredTool: { promptGuidelines?: string[]; parameters?: any } | undefined;
 		extensionFactory({
-			registerTool(tool: { promptGuidelines?: string[] }) {
+			registerTool(tool: { promptGuidelines?: string[]; parameters?: any }) {
 				registeredTool = tool;
 			},
 		});
 
+		expect(registeredTool?.parameters?.properties.mode.enum).toEqual(["analysis", "orchestrator"]);
+		expect(registeredTool?.parameters?.properties.profile.description).toContain("permissions profile");
+		expect(registeredTool?.parameters?.properties.profile.description).toContain("read-only (Read-only analysis)");
 		expect(registeredTool?.promptGuidelines?.length).toBeGreaterThan(0);
+		expect(registeredTool?.promptGuidelines?.join("\n")).toContain("mode \"analysis\"");
+		expect(registeredTool?.promptGuidelines?.join("\n")).toContain("profile parameter");
 		for (const guideline of registeredTool!.promptGuidelines!) {
 			expect(guideline).toContain("typescript");
 			expect(guideline.toLowerCase()).not.toContain("this tool");
 		}
+	});
+
+	it("resolves requested capability profiles to permissions profiles", () => {
+		const profiles = [
+			{ name: "read-write", enabled: true, permissionsProfile: "default" },
+			{ name: "read-only", enabled: true, permissionsProfile: "read-only" },
+		];
+
+		expect(__test__.resolvePermissionsProfileName("read-write", "isolated", profiles)).toBe("default");
+		expect(__test__.resolvePermissionsProfileName(undefined, "isolated", profiles)).toBe("isolated");
+		expect(() => __test__.resolvePermissionsProfileName("missing", undefined, profiles)).toThrow("Available profiles: read-write, read-only");
 	});
 
 	it("parses protocol output lines", () => {

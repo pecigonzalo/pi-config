@@ -24,7 +24,8 @@ This is useful for tasks like:
 ```ts
 {
   code: string;
-  profile?: "analysis" | "orchestrator";
+  mode?: "analysis" | "orchestrator";
+  profile?: string; // existing capability profile; inherits the session when omitted
   timeout?: number; // 1..120, default 30
   cwd?: string;     // relative to current cwd unless absolute
 }
@@ -53,9 +54,11 @@ return entries;
 Note: `export` statements are not meaningful since the code runs as a function body.
 Use `return` to surface a result.
 
-## Profiles
+## Modes and profiles
 
-### `analysis`
+`mode` controls CodeMode host bridge capabilities. `profile` selects an existing capability profile and applies its referenced permissions profile as an additional sandbox constraint. A tool call cannot use `profile` to gain access beyond the current session. When `profile` is omitted, CodeMode inherits the current session permissions profile.
+
+### `analysis` mode
 
 Use for:
 
@@ -77,7 +80,7 @@ Blocked:
 - `host.task.run()`
 - `host.todo.*`
 
-### `orchestrator`
+### `orchestrator` mode
 
 Use for:
 
@@ -99,7 +102,7 @@ The runtime exposes a small `host` object.
 
 ### `host.capabilities()`
 
-Returns the active capability names for the current profile.
+Returns the active capability names for the current mode.
 
 ### `host.help()`
 
@@ -134,7 +137,7 @@ Returns metadata like:
 
 ### `host.mcp.*`
 
-Host-mediated MCP access is available in `analysis` and `orchestrator` profiles. The sandbox still does not get arbitrary network access; MCP calls go through the host bridge and are permission-gated by target such as `server.tool`.
+Host-mediated MCP access is available in `analysis` and `orchestrator` modes. Direct network access follows the selected or inherited permissions profile and sandbox configuration. MCP calls go through the host bridge and are permission-gated by target such as `server.tool`.
 
 ```ts
 const tools = await host.mcp.listTools({ server: "context7" });
@@ -167,7 +170,7 @@ const result = await host.task.run({
 
 Notes:
 
-- available only in `orchestrator`
+- available only in `orchestrator` mode
 - intended for focused delegation to user agents
 - project-local agents are not enabled in the MVP bridge path
 
@@ -228,9 +231,9 @@ return {
 
 ## Sandbox behavior
 
-The tool always uses a dedicated sandbox for code execution. It does not infer sandbox coverage from session environment variables, and it does not fall back to unsandboxed execution.
+The tool always uses a dedicated sandbox for code execution. The selected capability profile resolves to its permissions profile through the existing permissions system and is intersected with the current session policy; when omitted, the current session permissions profile is inherited. CodeMode does not override that policy with its own access mode.
 
-If dedicated sandboxing is disabled or cannot be initialized, the tool fails closed.
+If the effective policy disables dedicated sandboxing or the sandbox cannot be initialized, the tool fails closed.
 
 ## Audit trail
 
@@ -247,7 +250,7 @@ Tool results include structured details for:
 
 The custom renderer shows:
 
-- a call preview with profile/timeout/code preview
+- a call preview with mode/profile/timeout/code preview
 - result summary
 - artifacts
 - bridge calls with durations
@@ -272,7 +275,8 @@ It should **not** be preferred for trivial one-step tasks where direct tools are
 Implemented:
 
 - one-shot Bun execution
-- `analysis` and `orchestrator` profiles
+- `analysis` and `orchestrator` modes
+- existing capability profile resolution for sandbox permissions
 - dedicated sandboxed execution
 - `host.message.*`
 - `host.artifact.write()`

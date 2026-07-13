@@ -49,11 +49,11 @@ export interface EffectivePolicy {
 	protectedResources: ResolvedProtectedResources;
 }
 
-export type CodemodeProfileName = "analysis" | "orchestrator";
+export type CodemodeMode = "analysis" | "orchestrator";
 export type CodemodeCapability = "message" | "artifact" | "task" | "todo" | "mcp";
 
 export interface CodemodeEffectivePolicy {
-	profile: CodemodeProfileName;
+	codeMode: CodemodeMode;
 	mode: PermissionMode;
 	capabilities: CodemodeCapability[];
 	allowProjectAgents: boolean;

@@ -2,54 +2,59 @@ import { compileSandboxConfig } from "./sandbox";
 import {
 	type CodemodeCapability,
 	type CodemodeEffectivePolicy,
-	type CodemodeProfileName,
+	type CodemodeMode,
 	type EffectivePolicy,
 	type SandboxSettings,
 } from "./shared";
 
-const PROFILE_CAPABILITIES: Record<CodemodeProfileName, CodemodeCapability[]> = {
+const MODE_CAPABILITIES: Record<CodemodeMode, CodemodeCapability[]> = {
 	analysis: ["message", "artifact", "mcp"],
 	orchestrator: ["message", "artifact", "task", "todo", "mcp"],
 };
 
-function codemodeSandboxSettingsFor(
-	profile: CodemodeProfileName,
-	sandboxSettings: SandboxSettings | undefined,
-): SandboxSettings | undefined {
-	if (profile === "analysis") {
-		return { ...sandboxSettings, network: false };
-	}
-	return sandboxSettings;
-}
+const MODE_RESTRICTION = {
+	plan: 0,
+	"workspace-write": 1,
+	"full-access": 2,
+} as const;
 
-function codemodePermissionModeFor(
+const EXTERNAL_PATH_RESTRICTION = {
+	block: 0,
+	ask: 1,
+	allow: 2,
+} as const;
+
+export function constrainCodemodePolicy(
 	activePolicy: EffectivePolicy,
-	profile: CodemodeProfileName,
-): EffectivePolicy["mode"] {
-	if (profile === "analysis") return "plan";
-	if (activePolicy.mode === "full-access") return "workspace-write";
-	return activePolicy.mode;
+	selectedPolicy: EffectivePolicy,
+): EffectivePolicy {
+	const mode = MODE_RESTRICTION[activePolicy.mode] <= MODE_RESTRICTION[selectedPolicy.mode]
+		? activePolicy.mode
+		: selectedPolicy.mode;
+	const externalPath = EXTERNAL_PATH_RESTRICTION[activePolicy.externalPath] <= EXTERNAL_PATH_RESTRICTION[selectedPolicy.externalPath]
+		? activePolicy.externalPath
+		: selectedPolicy.externalPath;
+	return {
+		mode,
+		externalPath,
+		rules: [...activePolicy.rules, ...selectedPolicy.rules],
+		protectedResources: activePolicy.protectedResources,
+	};
 }
 
 export function resolveCodemodePolicy(
 	activePolicy: EffectivePolicy,
 	cwd: string,
 	sandboxSettings: SandboxSettings | undefined,
-	profile: CodemodeProfileName = "analysis",
+	codeMode: CodemodeMode = "analysis",
 	runtimeTmpDir?: string,
 ): CodemodeEffectivePolicy {
-	const mode = codemodePermissionModeFor(activePolicy, profile);
-	const sandbox = compileSandboxConfig(
-		{ ...activePolicy, mode },
-		cwd,
-		codemodeSandboxSettingsFor(profile, sandboxSettings),
-		runtimeTmpDir,
-	);
+	const sandbox = compileSandboxConfig(activePolicy, cwd, sandboxSettings, runtimeTmpDir);
 
 	return {
-		profile,
-		mode,
-		capabilities: PROFILE_CAPABILITIES[profile],
+		codeMode,
+		mode: activePolicy.mode,
+		capabilities: MODE_CAPABILITIES[codeMode],
 		allowProjectAgents: false,
 		sandbox,
 	};

@@ -14,7 +14,7 @@ import {
 	extractApprovalRecords,
 	getApprovalsSettings,
 } from "./approvals";
-import { resolveCodemodePolicy } from "./codemode";
+import { constrainCodemodePolicy, resolveCodemodePolicy } from "./codemode";
 import { GIT_METADATA_PROTECTED_RESOURCE_MATCH } from "./protected-resources";
 import {
 	canonicalizePath,
@@ -793,23 +793,61 @@ describe("codemode policy", () => {
 		protectedResources: { denyRead: [], denyWrite: [] },
 	};
 
-	it("maps analysis profile to plan mode with limited capabilities", () => {
-		const resolved = resolveCodemodePolicy(basePolicy, "/repo", { enabled: true, network: true }, "analysis");
-		expect(resolved.mode).toBe("plan");
+	it("keeps the active permissions policy separate from analysis capabilities", () => {
+		const resolved = resolveCodemodePolicy(
+			basePolicy,
+			"/repo",
+			{ enabled: true, network: true, allowedDomains: ["api.example.com"] },
+			"analysis",
+		);
+		expect(resolved.codeMode).toBe("analysis");
+		expect(resolved.mode).toBe("workspace-write");
 		expect(resolved.capabilities).toEqual(["message", "artifact", "mcp"]);
 		expect(resolved.allowProjectAgents).toBe(false);
 		expect(resolved.sandbox.enabled).toBe(true);
-		expect(resolved.sandbox.config.network?.allowedDomains).toEqual([]);
+		expect(resolved.sandbox.config.network?.allowedDomains).toEqual(["api.example.com"]);
 	});
 
-	it("keeps orchestrator constrained even when outer mode is full-access", () => {
+	it("applies a selected permissions profile before resolving CodeMode capabilities", () => {
+		const profilePolicy = configModule.activePolicy(
+			{
+				default: { mode: "workspace-write" },
+				profiles: { "read-only": { inherit: true, mode: "plan" } },
+			},
+			"default",
+			"read-only",
+		);
+		const resolved = resolveCodemodePolicy(profilePolicy, "/repo", { enabled: true }, "analysis");
+
+		expect(resolved.mode).toBe("plan");
+		expect(resolved.sandbox.config.filesystem?.allowWrite).not.toContain("/repo");
+	});
+
+	it("does not let a selected profile escalate the active session policy", () => {
+		const current = configModule.activePolicy(
+			{
+				default: { mode: "workspace-write" },
+				profiles: { "read-only": { inherit: true, mode: "plan" } },
+			},
+			"default",
+			"read-only",
+		);
+		const requested = configModule.activePolicy({ default: { mode: "workspace-write" } }, "default", "default");
+		const constrained = constrainCodemodePolicy(current, requested);
+
+		expect(constrained.mode).toBe("plan");
+		expect(constrained.externalPath).toBe("block");
+	});
+
+	it("keeps the active permissions policy separate from orchestrator capabilities", () => {
 		const resolved = resolveCodemodePolicy(
 			{ ...basePolicy, mode: "full-access" },
 			"/repo",
 			{ enabled: true, network: true },
 			"orchestrator",
 		);
-		expect(resolved.mode).toBe("workspace-write");
+		expect(resolved.codeMode).toBe("orchestrator");
+		expect(resolved.mode).toBe("full-access");
 		expect(resolved.capabilities).toEqual(["message", "artifact", "task", "todo", "mcp"]);
 		expect(resolved.sandbox.enabled).toBe(true);
 	});
@@ -1177,7 +1215,7 @@ describe("sandboxed command runner", () => {
 		expect(firstResult.exitCode).toBe(0);
 		expect(secondResult.exitCode).toBe(0);
 		expect(spawnTimes).toHaveLength(2);
-		expect(spawnTimes[1] - spawnTimes[0]).toBeGreaterThanOrEqual(200);
+		expect(spawnTimes[1]! - spawnTimes[0]!).toBeGreaterThanOrEqual(200);
 	});
 
 	it("detects when an idle gap should trigger a sandbox health probe", () => {

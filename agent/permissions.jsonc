@@ -370,6 +370,7 @@
   "profiles": {
     "read-only": {
       "inherit": true,
+      "mode": "plan",
       "rules": [
         {
           "tool": "task",
@@ -395,6 +396,7 @@
     },
     "isolated": {
       "inherit": false,
+      "mode": "plan",
       "rules": [
         {
           "tool": "task",

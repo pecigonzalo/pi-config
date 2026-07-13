@@ -15,10 +15,10 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { createMcpService, type McpService } from "../mcp/service";
 import { activePolicy, loadConfig } from "../permissions/config";
-import { resolveCodemodePolicy } from "../permissions/codemode";
+import { constrainCodemodePolicy, resolveCodemodePolicy } from "../permissions/codemode";
 import { matchRule } from "../permissions/matching";
 import { getEffectiveSandboxTmpDir, SandboxRuntimeAdapter } from "../permissions/sandbox";
-import type { CodemodeCapability, CodemodeProfileName, EffectivePolicy, SandboxManagerLike } from "../permissions/shared";
+import type { CodemodeCapability, CodemodeMode, EffectivePolicy, SandboxManagerLike } from "../permissions/shared";
 import * as taskAgents from "../tasks/agents.js";
 import type { AgentScope } from "../tasks/agents.js";
 
@@ -117,7 +117,8 @@ type CodemodeBridgeCall = {
 };
 
 type CodemodeDetails = {
-	profile: CodemodeProfileName;
+	codeMode: CodemodeMode;
+	profile?: string;
 	cwd: string;
 	timeout: number;
 	code: string;
@@ -148,16 +149,34 @@ interface BridgeRuntimeState {
 	signal?: AbortSignal;
 	cwd: string;
 	allowProjectAgents: boolean;
-	policy: EffectivePolicy;
+	policies: EffectivePolicy[];
 	sessionId?: string;
 	mcpService?: McpService;
 }
 
+function describeAvailableCapabilityProfiles(): string {
+	try {
+		const profiles = taskAgents.discoverProfiles(process.cwd(), "user").profiles.filter((profile) => profile.enabled);
+		const listed = profiles.map((profile) => `${profile.name} (${profile.description})`).join("; ") || "none";
+		return ` Available user profiles: ${listed}. Trusted project profiles are also accepted.`;
+	} catch {
+		return "";
+	}
+}
+
 const CodemodeParams = Type.Object({
 	code: Type.String({ description: "TypeScript code to execute inside the CodeMode runtime" }),
-	profile: Type.Optional(
+	mode: Type.Optional(
 		StringEnum(["analysis", "orchestrator"] as const, {
-			description: "Execution profile controlling sandboxing and future bridge capabilities",
+			description:
+				'CodeMode capability mode. "analysis" exposes message/artifact/MCP bridges. "orchestrator" additionally exposes task/todo bridges.',
+		}),
+	),
+	profile: Type.Optional(
+		Type.String({
+			description:
+				"Existing capability profile whose permissions profile further constrains the sandbox. It cannot grant access beyond the current session profile. Omit to inherit the current session permissions profile." +
+				describeAvailableCapabilityProfiles(),
 		}),
 	),
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (1..120, default 30)" })),
@@ -176,6 +195,20 @@ function detectProfileName(pi: ExtensionAPI): string | undefined {
 	const flagValue = pi.getFlag("profile-name");
 	if (typeof flagValue === "string" && flagValue.length > 0) return flagValue;
 	return undefined;
+}
+
+function resolvePermissionsProfileName(
+	requestedProfile: string | undefined,
+	inheritedPermissionsProfile: string | undefined,
+	profiles: taskAgents.ProfileConfig[],
+): string | undefined {
+	if (!requestedProfile) return inheritedPermissionsProfile;
+	const profile = profiles.find((candidate) => candidate.enabled && candidate.name === requestedProfile);
+	if (!profile) {
+		const available = profiles.filter((candidate) => candidate.enabled).map((candidate) => candidate.name).join(", ") || "none";
+		throw new Error(`Unknown CodeMode profile: "${requestedProfile}". Available profiles: ${available}.`);
+	}
+	return profile.permissionsProfile ?? profile.name;
 }
 
 function clampTimeout(value: number | undefined): number {
@@ -817,9 +850,11 @@ function optionalArgsField(input: Record<string, unknown>): Record<string, unkno
 }
 
 function assertMcpAllowed(state: BridgeRuntimeState, target: string): void {
-	const rule = matchRule(state.policy.rules, "mcp", { command: target });
-	if (rule?.action === "block") throw new Error(rule.reason || `MCP access blocked: ${target}`);
-	if (rule?.action === "ask") throw new Error(rule.reason || `MCP access requires approval: ${target}`);
+	for (const policy of state.policies) {
+		const rule = matchRule(policy.rules, "mcp", { command: target });
+		if (rule?.action === "block") throw new Error(rule.reason || `MCP access blocked: ${target}`);
+		if (rule?.action === "ask") throw new Error(rule.reason || `MCP access requires approval: ${target}`);
+	}
 }
 
 async function executeBridgeRequest(state: BridgeRuntimeState, request: BridgeRequest): Promise<unknown> {
@@ -970,18 +1005,20 @@ export default function (pi: ExtensionAPI) {
 			"Use the typescript tool when the task benefits from batching multiple local operations into one scripted execution instead of many step-by-step tool calls.",
 			"Prefer the typescript tool for codebase analysis, structured extraction, summarization over many inputs, and artifact generation.",
 			"Do not use the typescript tool for trivial single-step actions when direct tools are simpler.",
-			"Use the typescript tool with profile \"analysis\" for read/analyze/report tasks and profile \"orchestrator\" only when host bridge operations like task delegation are needed.",
+			"Use the typescript tool with mode \"analysis\" for read/analyze/report tasks and mode \"orchestrator\" only when task/todo host bridges are needed.",
+			"Use the typescript tool's profile parameter to select an existing capability profile as an additional permission constraint; it cannot grant access beyond the current session profile. Omit profile to inherit the current session permissions profile.",
 			"Use the typescript tool's host.mcp methods for batched programmatic MCP workflows once the relevant server or tool is known.",
 			"When using the typescript tool, return a compact result and use artifact writing for larger outputs.",
 		],
 		parameters: CodemodeParams,
 		renderCall(args, theme, context) {
-			const profile = (args.profile ?? "analysis") as CodemodeProfileName;
+			const codeMode = (args.mode ?? "analysis") as CodemodeMode;
 			const code = typeof args.code === "string" ? args.code : "";
 			const preview = formatCodePreview(code, context.expanded);
 			let text =
 				theme.fg("toolTitle", theme.bold("typescript ")) +
-				theme.fg("accent", profile) +
+				theme.fg("accent", codeMode) +
+				(args.profile ? theme.fg("muted", ` profile=${args.profile}`) : "") +
 				theme.fg("muted", ` timeout=${clampTimeout(args.timeout)}s`);
 			if (args.cwd) text += theme.fg("dim", ` cwd=${args.cwd}`);
 			if (preview) {
@@ -999,7 +1036,8 @@ export default function (pi: ExtensionAPI) {
 
 			const icon = details.ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
 			const sandboxLabel = `${details.sandbox.mode}${details.sandbox.enabled ? " sandbox" : " unsandboxed"}`;
-			let text = `${icon} ${theme.fg("toolTitle", theme.bold("TypeScript"))} ${theme.fg("muted", `[${details.profile}] [${sandboxLabel}]`)}`;
+			const profileLabel = details.profile ? ` profile=${details.profile}` : " inherited-profile";
+			let text = `${icon} ${theme.fg("toolTitle", theme.bold("TypeScript"))} ${theme.fg("muted", `[${details.codeMode}] [${sandboxLabel}]${profileLabel}`)}`;
 			if (!details.ok && details.error) {
 				text += `\n${theme.fg("error", `${details.error.phase}: ${details.error.message}`)}`;
 			}
@@ -1065,22 +1103,35 @@ export default function (pi: ExtensionAPI) {
 		},
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const timeout = clampTimeout(params.timeout);
-			const profile = (params.profile ?? "analysis") as CodemodeProfileName;
+			const codeMode = (params.mode ?? "analysis") as CodemodeMode;
 			const cwd = await resolveExecutionCwd(ctx.cwd, params.cwd);
 			const config = loadConfig(cwd);
-			const policy = activePolicy(config, detectAgentName(pi), detectProfileName(pi));
+			const profileScope: AgentScope = ctx.isProjectTrusted() ? "both" : "user";
+			const discoveredProfiles = taskAgents.discoverProfiles(cwd, profileScope, ctx.isProjectTrusted()).profiles;
+			const agentName = detectAgentName(pi);
+			const inheritedPermissionsProfile = detectProfileName(pi);
+			const permissionsProfile = resolvePermissionsProfileName(params.profile, inheritedPermissionsProfile, discoveredProfiles);
+			if (params.profile) {
+				if (!permissionsProfile) throw new Error(`CodeMode profile "${params.profile}" does not resolve to a permissions profile.`);
+				if (permissionsProfile !== "default" && !(permissionsProfile in (config.profiles ?? {}))) {
+					throw new Error(`CodeMode profile "${params.profile}" references unknown permissions profile "${permissionsProfile}".`);
+				}
+			}
+			const inheritedPolicy = activePolicy(config, agentName, inheritedPermissionsProfile);
+			const selectedPolicy = activePolicy(config, agentName, permissionsProfile);
+			const policy = params.profile ? constrainCodemodePolicy(inheritedPolicy, selectedPolicy) : inheritedPolicy;
 			const tmpBase = getEffectiveSandboxTmpDir(cwd, config.sandbox);
 			await fs.mkdir(tmpBase, { recursive: true });
 			const runtimeDir = await fs.mkdtemp(path.join(tmpBase, "codemode-"));
 			const artifactsDir = path.join(runtimeDir, "artifacts");
-			const resolvedPolicy = resolveCodemodePolicy(policy, cwd, config.sandbox, profile, runtimeDir);
+			const resolvedPolicy = resolveCodemodePolicy(policy, cwd, config.sandbox, codeMode, runtimeDir);
 
 			if (!resolvedPolicy.sandbox.enabled) {
 				await fs.rm(runtimeDir, { recursive: true, force: true }).catch(() => {});
 				throw new Error(`TypeScript requires sandboxing, but sandboxing is disabled: ${resolvedPolicy.sandbox.reason}`);
 			}
 
-			onUpdate?.({ content: [{ type: "text", text: `Starting TypeScript (${profile})...` }], details: {} });
+			onUpdate?.({ content: [{ type: "text", text: `Starting TypeScript (${codeMode}${params.profile ? `, profile=${params.profile}` : ""})...` }], details: {} });
 
 			let exitCode: number | null = null;
 			const rawOutputState = createRawOutputCaptureState();
@@ -1093,7 +1144,9 @@ export default function (pi: ExtensionAPI) {
 				...process.env,
 				TMPDIR: runtimeDir,
 				CLAUDE_TMPDIR: runtimeDir,
-				PI_CODEMODE_PROFILE: profile,
+				PI_CODEMODE_MODE: codeMode,
+				PI_CODEMODE_PROFILE: params.profile ?? "",
+				PI_CODEMODE_PERMISSIONS_PROFILE: permissionsProfile ?? "",
 				PI_CODEMODE_CWD: cwd,
 			};
 			const { entryFile } = await createRuntimeFiles(runtimeDir, params.code, resolvedPolicy.capabilities);
@@ -1110,7 +1163,7 @@ export default function (pi: ExtensionAPI) {
 				signal,
 				cwd,
 				allowProjectAgents: resolvedPolicy.allowProjectAgents,
-				policy,
+				policies: params.profile ? [inheritedPolicy, selectedPolicy] : [inheritedPolicy],
 				sessionId: ctx.sessionManager.getSessionId(),
 			};
 
@@ -1224,7 +1277,8 @@ export default function (pi: ExtensionAPI) {
 				const logs = [...logState.lines];
 				const logNotice = formatLogNotice(logState);
 				const details: CodemodeDetails = {
-					profile,
+					codeMode,
+					profile: params.profile,
 					cwd,
 					timeout,
 					code: params.code,
@@ -1265,7 +1319,8 @@ export default function (pi: ExtensionAPI) {
 			const logs = [...logState.lines];
 			const logNotice = formatLogNotice(logState);
 			const details: CodemodeDetails = {
-				profile,
+				codeMode,
+				profile: params.profile,
 				cwd,
 				timeout,
 				code: params.code,
@@ -1311,6 +1366,7 @@ export const __test__ = {
 	splitImportsAndBody,
 	buildUserModule,
 	resolveExecutionCwd,
+	resolvePermissionsProfileName,
 	clampTimeout,
 	sanitizeArtifactName,
 	terminateProcessWithEscalation,
