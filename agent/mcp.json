@@ -19,6 +19,9 @@
     },
     "deep-wiki": {
       "baseUrl": "https://mcp.deepwiki.com/mcp"
+    },
+    "linear": {
+      "baseUrl": "https://mcp.linear.app/mcp"
     }
   },
   "imports": []

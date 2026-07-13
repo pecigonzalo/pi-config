@@ -1,14 +1,34 @@
 ---
 name: mcp
 description: Discover, configure, and call MCP (Model Context Protocol) servers. Use this when interacting with MCP tools/resources, inspecting schemas, authenticating MCP servers, trying ad-hoc MCP endpoints, or generating typed MCP clients/CLIs.
-allowed-tools: Bash(bunx mcporter:*), Bash(npx -y mcporter:*), Read, Grep
+allowed-tools: TypeScript, Bash(bunx mcporter:*), Bash(npx -y mcporter:*), Read, Grep
 ---
 
-# MCP via mcporter
+# MCP
+
+For normal MCP tool calls, prefer the `typescript` tool and its `host.mcp` bridge. It makes filtering, pagination, batching, and further processing straightforward. Use `mcporter` only for discovery, configuration, authentication, diagnostics, or one-off ad-hoc calls.
+
+## TypeScript workflows
+
+Once the relevant server and tool are known, call it through `host.mcp`:
+
+```ts
+const result = await host.mcp.call({
+  server: "linear",
+  tool: "list_issues",
+  args: { assignee: "me", limit: 50 },
+});
+
+const { issues } = JSON.parse(result.text!);
+return issues;
+```
+
+Use `result.text` as the tool response. Parse it only when the tool returns JSON.
+Use `host.mcp.listTools({ server })` to inspect a known server when necessary.
+
+## mcporter discovery and administration
 
 Use Pi's MCP config at `~/.pi/agent/mcp.json` so CLI calls match `/mcp status` and `host.mcp`.
-
-Prefer:
 
 ```bash
 bunx mcporter --config ~/.pi/agent/mcp.json <command>
@@ -16,7 +36,7 @@ bunx mcporter --config ~/.pi/agent/mcp.json <command>
 
 If Bun is unavailable, use `npx -y mcporter --config ~/.pi/agent/mcp.json <command>`.
 
-## Discovery
+### Discovery
 
 Start by listing configured servers:
 
@@ -38,9 +58,9 @@ bunx mcporter --config ~/.pi/agent/mcp.json list <server> --schema
 bunx mcporter --config ~/.pi/agent/mcp.json list <server.tool> --schema
 ```
 
-## Calling tools
+## Ad-hoc CLI calls
 
-Use shell-friendly key/value arguments for simple calls:
+Use the CLI only for manual or one-off calls. Use shell-friendly key/value arguments for simple calls:
 
 ```bash
 bunx mcporter --config ~/.pi/agent/mcp.json call <server.tool> query="React hooks docs" limit:5
@@ -53,22 +73,6 @@ bunx mcporter --config ~/.pi/agent/mcp.json call 'server.tool(name: "value", opt
 ```
 
 For file-backed text arguments, use `key=@path`.
-
-## TypeScript workflows
-
-For batched or programmatic MCP workflows, prefer the `typescript` tool's `host.mcp` bridge once the relevant server or tool is known:
-
-```ts
-const tools = await host.mcp.listTools({ server: "deep-wiki" });
-const result = await host.mcp.call({
-  server: "deep-wiki",
-  tool: "read_wiki_contents",
-  args: { repoName: "owner/repo" },
-});
-return result.text ?? result.raw;
-```
-
-Use the mcporter CLI for discovery, config, auth, and ad-hoc exploration; use `host.mcp` for composed workflows inside TypeScript.
 
 ## Resources
 
