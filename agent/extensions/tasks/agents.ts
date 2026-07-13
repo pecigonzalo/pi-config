@@ -580,8 +580,8 @@ export function resolveSkillPaths(skillNames: string[], cwd: string, projectTrus
 		for (const root of roots) {
 			if (isFile(root)) {
 				if (path.basename(root) === `${skillName}.md` || path.basename(path.dirname(root)) === skillName) {
-					resolved = root;
-					break;
+					resolved = resolveContainedPath(root, root);
+					if (resolved) break;
 				}
 				continue;
 			}

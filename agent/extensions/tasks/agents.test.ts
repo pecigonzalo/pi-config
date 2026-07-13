@@ -117,16 +117,17 @@ describe("task resource project trust", () => {
 });
 
 describe("task skill path security", () => {
-	it("rejects traversal skill names", async () => {
+	it("rejects traversal, absolute, separator, and dot skill names", async () => {
 		const cwd = await makeProject();
 		const outside = path.join(cwd, "outside");
 		await fs.mkdir(outside);
 		await fs.writeFile(path.join(outside, "SKILL.md"), "outside");
+		const invalidNames = ["../outside", "..", ".", "/absolute", "nested/skill", "nested\\skill"];
 
-		const result = resolveSkillPaths(["../outside", "..", "/absolute"], cwd, true);
+		const result = resolveSkillPaths(invalidNames, cwd, true);
 
 		expect(result.paths).toEqual([]);
-		expect(result.missing).toEqual(["../outside", "..", "/absolute"]);
+		expect(result.missing).toEqual(invalidNames);
 	});
 
 	it("rejects a project skill symlink that escapes its root", async () => {
@@ -189,6 +190,19 @@ describe("task skill path security", () => {
 		const result = resolveSkillPaths(["configured"], cwd, true);
 
 		expect(result).toEqual({ paths: [], missing: ["configured"] });
+	});
+
+	it("loads a project skill symlink whose target remains inside its root", async () => {
+		const cwd = await makeProject();
+		const skillsRoot = path.join(cwd, ".pi", "skills");
+		const target = path.join(skillsRoot, "target");
+		await fs.mkdir(target, { recursive: true });
+		await fs.writeFile(path.join(target, "SKILL.md"), "safe");
+		await fs.symlink(target, path.join(skillsRoot, "alias"));
+
+		const result = resolveSkillPaths(["alias"], cwd, true);
+
+		expect(result).toEqual({ paths: [await fs.realpath(target)], missing: [] });
 	});
 
 	it("loads valid project skills only after trust is granted", async () => {
