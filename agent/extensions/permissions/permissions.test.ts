@@ -9,7 +9,14 @@ import { promisify } from "node:util";
 import { APPROVAL_CLOCK_SKEW_MS, approvalsCoverBash, approvalsCoverPaths, extractApprovalRecords, getApprovalsSettings } from "./approvals";
 import { resolveCodemodePolicy } from "./codemode";
 import { GIT_METADATA_PROTECTED_RESOURCE_MATCH } from "./protected-resources";
-import { findGitRepoRoot, getFilesystemApprovalTargets, isPathOutsideCwd, ruleMatch } from "./matching";
+import {
+	canonicalizePath,
+	canonicalizePathToken,
+	findGitRepoRoot,
+	getFilesystemApprovalTargets,
+	isPathOutsideCwd,
+	ruleMatch,
+} from "./matching";
 import {
 	canAutoApproveParsedBash,
 	detectDangerousBashPattern,
@@ -289,31 +296,157 @@ describe("permissions config merge", () => {
 });
 
 describe("external path canonicalization", () => {
-	it("detects symlink escapes as external", async () => {
+	it("canonicalizes nested missing paths through a symlink ancestor", async () => {
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-test-"));
 		const cwd = path.join(tmp, "cwd");
 		const outside = path.join(tmp, "outside");
 		await fs.mkdir(cwd, { recursive: true });
 		await fs.mkdir(outside, { recursive: true });
-		await fs.writeFile(path.join(outside, "secret.txt"), "x", "utf8");
 
-		const linkPath = path.join(cwd, "link");
-		await fs.symlink(outside, linkPath);
+		try {
+			const linkPath = path.join(cwd, "link");
+			try {
+				await fs.symlink(outside, linkPath, process.platform === "win32" ? "junction" : "dir");
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (["EPERM", "EACCES", "ENOTSUP"].includes(code ?? "")) return;
+				throw error;
+			}
 
-		const isOutside = isPathOutsideCwd("link/secret.txt", cwd);
-		expect(isOutside).toBe(true);
-
-		await fs.rm(tmp, { recursive: true, force: true });
+			const expected = path.join(await fs.realpath(outside), "missing", "nested", "file.txt");
+			expect(canonicalizePathToken("link/missing/nested/file.txt", cwd)).toBe(expected);
+			expect(isPathOutsideCwd("link/missing/nested/file.txt", cwd)).toBe(true);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
 	});
 
-	it("treats normal in-project paths as internal", async () => {
+	it("resolves dangling relative symlinks to missing external targets", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-test-"));
+		const cwd = path.join(tmp, "cwd");
+		const outside = path.join(tmp, "outside");
+		await fs.mkdir(cwd, { recursive: true });
+		await fs.mkdir(outside, { recursive: true });
+
+		try {
+			const linkPath = path.join(cwd, "dangling");
+			try {
+				await fs.symlink(path.join("..", "outside", "missing-target"), linkPath, "dir");
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (["EPERM", "EACCES", "ENOTSUP"].includes(code ?? "")) return;
+				throw error;
+			}
+
+			const expectedTarget = path.join(await fs.realpath(outside), "missing-target");
+			expect(canonicalizePathToken("dangling", cwd)).toBe(expectedTarget);
+			expect(isPathOutsideCwd("dangling", cwd)).toBe(true);
+			expect(canonicalizePathToken("dangling/additional/child.txt", cwd)).toBe(
+				path.join(expectedTarget, "additional", "child.txt"),
+			);
+			expect(isPathOutsideCwd("dangling/additional/child.txt", cwd)).toBe(true);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves dangling absolute symlinks to missing external targets", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-test-"));
+		const cwd = path.join(tmp, "cwd");
+		const missingTarget = path.join(tmp, "outside", "missing-target");
+		await fs.mkdir(cwd, { recursive: true });
+
+		try {
+			const linkPath = path.join(cwd, "absolute-dangling");
+			try {
+				await fs.symlink(missingTarget, linkPath, "dir");
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (["EPERM", "EACCES", "ENOTSUP"].includes(code ?? "")) return;
+				throw error;
+			}
+
+			expect(canonicalizePathToken("absolute-dangling", cwd)).toBe(
+				path.join(await fs.realpath(tmp), "outside", "missing-target"),
+			);
+			expect(isPathOutsideCwd("absolute-dangling", cwd)).toBe(true);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("throws conservatively when canonicalizing a symlink cycle", async () => {
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-test-"));
 		const cwd = path.join(tmp, "cwd");
 		await fs.mkdir(cwd, { recursive: true });
-		await fs.writeFile(path.join(cwd, "a.txt"), "ok", "utf8");
 
-		expect(isPathOutsideCwd("a.txt", cwd)).toBe(false);
-		await fs.rm(tmp, { recursive: true, force: true });
+		try {
+			try {
+				await fs.symlink("cycle-b", path.join(cwd, "cycle-a"), "dir");
+				await fs.symlink("cycle-a", path.join(cwd, "cycle-b"), "dir");
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (["EPERM", "EACCES", "ENOTSUP"].includes(code ?? "")) return;
+				throw error;
+			}
+
+			expect(() => canonicalizePathToken("cycle-a/secret.txt", cwd)).toThrow(
+				"Unable to safely resolve symlink chain",
+			);
+			expect(() => isPathOutsideCwd("cycle-a/secret.txt", cwd)).toThrow(
+				"Unable to safely resolve symlink chain",
+			);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps multiple ordinary missing levels inside cwd", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-test-"));
+		const cwd = path.join(tmp, "cwd");
+		await fs.mkdir(cwd, { recursive: true });
+
+		try {
+			const expected = path.join(await fs.realpath(cwd), "one", "two", "file.txt");
+			expect(canonicalizePathToken("one/two/file.txt", cwd)).toBe(expected);
+			expect(isPathOutsideCwd("one/two/file.txt", cwd)).toBe(false);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("canonicalizes existing targets", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-test-"));
+		const cwd = path.join(tmp, "cwd");
+		const filePath = path.join(cwd, "existing.txt");
+		await fs.mkdir(cwd, { recursive: true });
+		await fs.writeFile(filePath, "ok", "utf8");
+
+		try {
+			expect(canonicalizePathToken("existing.txt", cwd)).toBe(await fs.realpath(filePath));
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("uses current-platform node:path separator and root semantics", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-test-"));
+		const cwd = path.join(tmp, "cwd");
+		await fs.mkdir(cwd, { recursive: true });
+
+		try {
+			const root = path.parse(path.resolve(cwd)).root;
+			const canonicalCwd = await fs.realpath(cwd);
+			expect(path.isAbsolute(root)).toBe(true);
+			expect(root.endsWith(path.sep)).toBe(true);
+			expect(canonicalizePath(root)).toBe(await fs.realpath(root));
+			expect(canonicalizePathToken(`.${path.sep}missing${path.sep}..${path.sep}stable.txt`, cwd)).toBe(
+				path.join(canonicalCwd, "stable.txt"),
+			);
+			expect(isPathOutsideCwd(`child${path.sep}file.txt`, cwd)).toBe(false);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -1150,6 +1283,38 @@ describe("permissions extension sandbox lifecycle", () => {
 			await harness.restore();
 		}
 	}
+
+	it("fails closed at the registered filesystem tool_call boundary for a cyclic path", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			rules: [{ tool: "read", action: "ask" }],
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			try {
+				await fs.symlink("cycle-b", path.join(harness.cwd, "cycle-a"), "dir");
+				await fs.symlink("cycle-a", path.join(harness.cwd, "cycle-b"), "dir");
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (["EPERM", "EACCES", "ENOTSUP"].includes(code ?? "")) return;
+				throw error;
+			}
+
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			await expect(toolCall(
+				{ toolName: "read", input: { path: "cycle-a/secret.txt" } },
+				harness.ctx,
+			)).rejects.toThrow("Unable to safely resolve symlink chain");
+		} finally {
+			await harness.restore();
+		}
+	});
 
 	it("blocks when an approval selection is dismissed", async () => {
 		const { result } = await requestReadApproval(undefined);

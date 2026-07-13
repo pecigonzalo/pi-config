@@ -124,27 +124,52 @@ export function resolveToken(token: string, cwd: string): string {
 	return path.isAbsolute(clean) ? path.resolve(clean) : path.resolve(cwd, clean);
 }
 
-export function canonicalizePath(inputPath: string): string {
-	try {
-		return fs.realpathSync.native(inputPath);
-	} catch {
-		return path.resolve(inputPath);
+function canonicalizeThroughExistingAncestor(
+	inputPath: string,
+	visitedSymlinks: Set<string> = new Set(),
+): string {
+	const absolutePath = path.resolve(inputPath);
+	let current = absolutePath;
+	const unresolved: string[] = [];
+
+	while (true) {
+		try {
+			return path.join(fs.realpathSync.native(current), ...unresolved);
+		} catch {
+			let isSymlink = false;
+			try {
+				isSymlink = fs.lstatSync(current).isSymbolicLink();
+			} catch {
+				// Missing components are handled through their longest existing ancestor.
+			}
+
+			if (isSymlink) {
+				// A cycle must fail closed rather than be mistaken for an ordinary missing path.
+				if (visitedSymlinks.has(current) || visitedSymlinks.size >= 40) {
+					throw new Error(`Unable to safely resolve symlink chain at ${current}`);
+				}
+				visitedSymlinks.add(current);
+				const linkTarget = fs.readlinkSync(current);
+				const resolvedTarget = path.isAbsolute(linkTarget)
+					? path.resolve(linkTarget)
+					: path.resolve(path.dirname(current), linkTarget);
+				return canonicalizeThroughExistingAncestor(path.join(resolvedTarget, ...unresolved), visitedSymlinks);
+			}
+
+			const parent = path.dirname(current);
+			if (parent === current) return path.join(current, ...unresolved);
+			unresolved.unshift(path.basename(current));
+			current = parent;
+		}
 	}
 }
 
+export function canonicalizePath(inputPath: string): string {
+	return canonicalizeThroughExistingAncestor(inputPath);
+}
+
 export function canonicalizePathToken(token: string, cwd: string): string {
-	const abs = resolveToken(token, cwd);
-	try {
-		return fs.realpathSync.native(abs);
-	} catch {
-		const parent = path.dirname(abs);
-		const base = path.basename(abs);
-		try {
-			return path.join(fs.realpathSync.native(parent), base);
-		} catch {
-			return abs;
-		}
-	}
+	return canonicalizeThroughExistingAncestor(resolveToken(token, cwd));
 }
 
 export interface FilesystemApprovalTargets {
