@@ -1020,6 +1020,9 @@ describe("permissions extension sandbox lifecycle", () => {
 		sandboxManager: { initialize: () => Promise<void>; reset: () => Promise<void>; wrapWithSandbox: (command: string) => Promise<string> };
 		now: () => number;
 		notifications?: string[];
+		approvalSelection?: string;
+		blockReason?: string;
+		approvalOptions?: string[][];
 	}) {
 		await fs.mkdir(TEST_SCRATCH_DIR, { recursive: true });
 		const tmp = await fs.mkdtemp(path.join(TEST_SCRATCH_DIR, "perm-extension-probe-"));
@@ -1040,7 +1043,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		Date.now = options.now;
 		const tools = new Map<string, RegisteredTool>();
 		const commands = new Map<string, RegisteredCommand>();
-		const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => Promise<void> | void>>();
+		const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => Promise<unknown> | unknown>>();
 		const pi = {
 			registerFlag: () => {},
 			getFlag: () => false,
@@ -1050,14 +1053,21 @@ describe("permissions extension sandbox lifecycle", () => {
 			registerCommand: (name: string, command: RegisteredCommand) => {
 				commands.set(name, command);
 			},
-			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void> | void) => {
+			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<unknown> | unknown) => {
 				handlers.set(event, [...(handlers.get(event) ?? []), handler]);
 			},
 		} as unknown as ExtensionAPI;
 		const ctx = {
 			cwd,
 			hasUI: true,
-			ui: { notify: (message: string) => options.notifications?.push(message) },
+			ui: {
+				notify: (message: string) => options.notifications?.push(message),
+				select: async (_title: string, choices: string[]) => {
+					options.approvalOptions?.push(choices);
+					return options.approvalSelection;
+				},
+				input: async () => options.blockReason,
+			},
 		} as unknown as ExtensionContext;
 
 		const { default: registerPermissions } = await import("./permissions");
@@ -1077,6 +1087,68 @@ describe("permissions extension sandbox lifecycle", () => {
 			},
 		};
 	}
+
+	async function requestReadApproval(
+		approvalSelection: string | undefined,
+		blockReason?: string,
+	): Promise<{ result: { block: true; reason: string } | undefined; approvalOptions: string[][] }> {
+		const approvalOptions: string[][] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			rules: [{ tool: "read", action: "ask" }],
+			now: () => 0,
+			approvalSelection,
+			blockReason,
+			approvalOptions,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const result = await toolCall(
+				{ toolName: "read", input: { path: "README.md" } },
+				harness.ctx,
+			) as { block: true; reason: string } | undefined;
+			return { result, approvalOptions };
+		} finally {
+			await harness.restore();
+		}
+	}
+
+	it("blocks when an approval selection is dismissed", async () => {
+		const { result } = await requestReadApproval(undefined);
+
+		expect(result).toEqual({ block: true, reason: "Blocked by user" });
+	});
+
+	it("blocks an unknown approval selection", async () => {
+		const { result } = await requestReadApproval("Unexpected selection");
+
+		expect(result).toEqual({ block: true, reason: "Blocked by user" });
+	});
+
+	it("allows an explicit Allow once selection", async () => {
+		const { result, approvalOptions } = await requestReadApproval("Allow once");
+
+		expect(result).toBeUndefined();
+		expect(approvalOptions[0]?.[0]).toBe("Allow once");
+	});
+
+	it("blocks an explicit Block selection", async () => {
+		const { result } = await requestReadApproval("Block");
+
+		expect(result).toEqual({ block: true, reason: "Blocked by user" });
+	});
+
+	it("blocks and steers with the supplied reason", async () => {
+		const { result } = await requestReadApproval("Block and steer agent", "Use a read-only alternative");
+
+		expect(result).toEqual({ block: true, reason: "Use a read-only alternative" });
+	});
 
 	it("reports active sandbox status through the permissions command", async () => {
 		let now = 0;

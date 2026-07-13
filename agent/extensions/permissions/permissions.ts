@@ -147,6 +147,22 @@ import {
 } from "./shared";
 export type { AgentProfile, ExternalPathPolicy, PermissionMode, PermissionsConfig, Rule } from "./shared";
 
+type PermissionDecision =
+	| { action: "allow" }
+	| { action: "block"; reason: string };
+
+const ALLOW_PERMISSION: PermissionDecision = { action: "allow" };
+
+function blockPermission(reason: string): PermissionDecision {
+	return { action: "block", reason };
+}
+
+function toToolCallResult(decision: PermissionDecision): { block: true; reason: string } | undefined {
+	return decision.action === "block"
+		? { block: true, reason: decision.reason }
+		: undefined;
+}
+
 // ─── Agent name detection ─────────────────────────────────────────────────────
 
 function detectAgentName(pi: ExtensionAPI): string {
@@ -821,6 +837,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Ask helper ────────────────────────────────────────────────────────────
 
+	const allowOnceOption = "Allow once";
 	const blockOption = "Block";
 	const blockAndSteerOption = "Block and steer agent";
 
@@ -832,17 +849,18 @@ export default function (pi: ExtensionAPI) {
 		return message?.trim() || undefined;
 	}
 
-	async function handleBlockChoice(
+	async function resolveApprovalChoice(
 		choice: string | undefined,
+		allowChoices: readonly string[],
 		ctx: ExtensionContext,
 		reason = "Blocked by user",
-	): Promise<{ block: true; reason: string } | undefined> {
+	): Promise<PermissionDecision> {
 		if (choice === blockAndSteerOption) {
 			const steeringReason = await promptForBlockReason(ctx);
-			return { block: true, reason: steeringReason ?? reason };
+			return blockPermission(steeringReason ?? reason);
 		}
-		if (choice === blockOption || choice === undefined) return { block: true, reason };
-		return undefined;
+		if (choice !== undefined && allowChoices.includes(choice)) return ALLOW_PERMISSION;
+		return blockPermission(reason);
 	}
 
 	async function askPermission(
@@ -853,12 +871,11 @@ export default function (pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		bashFocusCommand?: string,
 		parsedFocusCommand?: ParsedCommand,
-	): Promise<{ block: boolean; reason: string } | undefined> {
+	): Promise<PermissionDecision> {
 		if (!ctx.hasUI) {
-			return {
-				block: true,
-				reason: `Requires confirmation for ${toolName} but no UI is available (profile: ${agentName})`,
-			};
+			return blockPermission(
+				`Requires confirmation for ${toolName} but no UI is available (profile: ${agentName})`,
+			);
 		}
 
 		const target = getMatchTarget(toolName, input);
@@ -902,19 +919,18 @@ export default function (pi: ExtensionAPI) {
 			const saveExactLabel = approvalTarget === command
 				? `Save exact command permanently (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`
 				: `Save exact segment permanently (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`;
-			const options = [
-				"Allow once",
+			const allowChoices = [
+				allowOnceOption,
 				allowExactLabel,
 				saveExactLabel,
 				...prefixSessionToValue.keys(),
 				...prefixPermanentToValue.keys(),
-				blockAndSteerOption,
-				blockOption,
 			];
+			const options = [...allowChoices, blockAndSteerOption, blockOption];
 			const choice = await ctx.ui.select(`⚠️  Permission required\n\n${bashLines.join("\n")}`, options);
 
-			const block = await handleBlockChoice(choice, ctx);
-			if (block) return block;
+			const decision = await resolveApprovalChoice(choice, allowChoices, ctx);
+			if (decision.action === "block") return decision;
 
 			if (choice === allowExactLabel) {
 				sessionBashApprovals.push({
@@ -974,7 +990,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
-			return undefined;
+			return decision;
 		}
 
 		const approvalTargets = isFilesystemToolName(toolName)
@@ -1002,8 +1018,8 @@ export default function (pi: ExtensionAPI) {
 			? `Allow git repo permanently (${approvalTargets.gitRepoPath})`
 			: undefined;
 
-		const options = [
-			"Allow once",
+		const allowChoices = [
+			allowOnceOption,
 			"Allow tool for this session",
 			"Allow tool permanently",
 			...(allowTargetSessionLabel ? [allowTargetSessionLabel] : []),
@@ -1012,14 +1028,13 @@ export default function (pi: ExtensionAPI) {
 			...(allowParentFolderPermanentLabel ? [allowParentFolderPermanentLabel] : []),
 			...(allowGitRepoSessionLabel ? [allowGitRepoSessionLabel] : []),
 			...(allowGitRepoPermanentLabel ? [allowGitRepoPermanentLabel] : []),
-			blockAndSteerOption,
-			blockOption,
 		];
+		const options = [...allowChoices, blockAndSteerOption, blockOption];
 
 		const choice = await ctx.ui.select(`⚠️  Permission required\n\n${lines.join("\n")}`, options);
 
-		const block = await handleBlockChoice(choice, ctx);
-		if (block) return block;
+		const decision = await resolveApprovalChoice(choice, allowChoices, ctx);
+		if (decision.action === "block") return decision;
 
 		if (choice === "Allow tool for this session") {
 			sessionAllows.add(toolName);
@@ -1072,7 +1087,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`✓ Git repo approved permanently: ${approvalTargets.gitRepoPath}`, "info");
 		}
 
-		return undefined;
+		return decision;
 	}
 
 	// ── External path gate ────────────────────────────────────────────────────
@@ -1084,19 +1099,18 @@ export default function (pi: ExtensionAPI) {
 		externalPaths: string[],
 		projectRoot: string,
 		ctx: ExtensionContext,
-	): Promise<{ block: boolean; reason: string } | undefined> {
+	): Promise<PermissionDecision> {
 		if (policy === "block") {
 			const preview = externalPaths[0] ?? getMatchTarget(toolName, input);
 			const reason = `Path is outside the current project${preview ? `: ${preview}` : ""}`;
 			if (ctx.hasUI) ctx.ui.notify(`🚫 ${reason}`, "warning");
-			return { block: true, reason };
+			return blockPermission(reason);
 		}
 
 		if (!ctx.hasUI) {
-			return {
-				block: true,
-				reason: `Path is outside the current project and no UI is available (profile: ${agentName})`,
-			};
+			return blockPermission(
+				`Path is outside the current project and no UI is available (profile: ${agentName})`,
+			);
 		}
 
 		const shown = externalPaths.slice(0, 3);
@@ -1131,20 +1145,22 @@ export default function (pi: ExtensionAPI) {
 			? `Allow git repo permanently (${approvalTargets.gitRepoPath})`
 			: undefined;
 
-		const choice = await ctx.ui.select(`⚠️  External path permission required\n\n${lines.join("\n")}`, [
-			"Allow once",
+		const allowChoices = [
+			allowOnceOption,
 			allowPathSessionLabel,
 			allowPathPermanentLabel,
 			...(allowParentFolderSessionLabel ? [allowParentFolderSessionLabel] : []),
 			...(allowParentFolderPermanentLabel ? [allowParentFolderPermanentLabel] : []),
 			...(allowGitRepoSessionLabel ? [allowGitRepoSessionLabel] : []),
 			...(allowGitRepoPermanentLabel ? [allowGitRepoPermanentLabel] : []),
-			blockAndSteerOption,
-			blockOption,
-		]);
+		];
+		const choice = await ctx.ui.select(
+			`⚠️  External path permission required\n\n${lines.join("\n")}`,
+			[...allowChoices, blockAndSteerOption, blockOption],
+		);
 
-		const block = await handleBlockChoice(choice, ctx);
-		if (block) return block;
+		const decision = await resolveApprovalChoice(choice, allowChoices, ctx);
+		if (decision.action === "block") return decision;
 
 		if (choice === allowPathSessionLabel) {
 			addSessionPathApprovals(toolName, approvalTargets ? [approvalTargets.targetPath] : externalPaths, projectRoot);
@@ -1186,7 +1202,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`✓ Git repo approved permanently: ${approvalTargets.gitRepoPath}`, "info");
 		}
 
-		return undefined;
+		return decision;
 	}
 
 	async function checkBashPermission(
@@ -1194,11 +1210,11 @@ export default function (pi: ExtensionAPI) {
 		input: PermissionToolInput,
 		projectRoot: string,
 		ctx: ExtensionContext,
-	): Promise<{ block: true; reason: string } | undefined> {
+	): Promise<PermissionDecision> {
 		const policy = activePolicy(config, agentName, profileName);
 		const bashApprovals = [...persistentApprovals, ...sessionBashApprovals];
 		if (approvalsCoverBash(bashApprovals, command, projectRoot, agentName, approvalsSettings)) {
-			return undefined;
+			return ALLOW_PERMISSION;
 		}
 		const isApprovedBashSegment = (candidate: string) =>
 			approvalsCoverBash(bashApprovals, candidate, projectRoot, agentName, approvalsSettings);
@@ -1214,18 +1230,18 @@ export default function (pi: ExtensionAPI) {
 
 		const fallbackMode = sandboxFallbackMode();
 		if (fallbackMode === "block-all-bash") {
-			return { block: true, reason: `Bash blocked: sandbox unavailable in ${policy.mode} mode` };
+			return blockPermission(`Bash blocked: sandbox unavailable in ${policy.mode} mode`);
 		}
 		if (fallbackMode === "ask-all-bash") {
-			return askPermission("bash", input, "Sandbox unavailable: confirmation required for all bash commands", projectRoot, ctx) as Promise<{ block: true; reason: string } | undefined>;
+			return askPermission("bash", input, "Sandbox unavailable: confirmation required for all bash commands", projectRoot, ctx);
 		}
 		const dangerousReason = parsedBash ? undefined : detectDangerousBashPattern(command);
 		if (dangerousReason) {
-			return askPermission("bash", input, dangerousReason, projectRoot, ctx) as Promise<{ block: true; reason: string } | undefined>;
+			return askPermission("bash", input, dangerousReason, projectRoot, ctx);
 		}
 
 		if (parsedBash && canAutoApproveParsedBash(parsedBash, policy.rules, isApprovedBashSegment)) {
-			return undefined;
+			return ALLOW_PERMISSION;
 		}
 
 		const getUnapprovedBashSegment = (): { segment?: string; parsed?: ParsedCommand } => {
@@ -1238,21 +1254,21 @@ export default function (pi: ExtensionAPI) {
 		};
 
 		const rule = policy.rules.length > 0 ? matchRule(policy.rules, "bash", input) : undefined;
-		if (!rule) return undefined;
+		if (!rule) return ALLOW_PERMISSION;
 
 		if (rule.action === "block") {
 			const reason = rule.reason ?? `Blocked by permissions policy (profile: ${agentName})`;
 			if (ctx.hasUI) ctx.ui.notify(`🚫 bash: ${reason}`, "warning");
-			return { block: true, reason };
+			return blockPermission(reason);
 		}
 
 		if (rule.action === "ask") {
 			if (parsedBash && canAutoApproveParsedBash(parsedBash, policy.rules, isApprovedBashSegment)) {
-				return undefined;
+				return ALLOW_PERMISSION;
 			}
 			const { segment: unapprovedSegment, parsed: unapprovedParsed } = getUnapprovedBashSegment();
 			const note = rule.reason ?? (unapprovedSegment ? `Unapproved shell segment: ${unapprovedSegment}` : undefined);
-			return askPermission("bash", input, note, projectRoot, ctx, unapprovedSegment, unapprovedParsed) as Promise<{ block: true; reason: string } | undefined>;
+			return askPermission("bash", input, note, projectRoot, ctx, unapprovedSegment, unapprovedParsed);
 		}
 
 		if (rule.action === "allow" && parsedBash) {
@@ -1262,12 +1278,12 @@ export default function (pi: ExtensionAPI) {
 					? `Unapproved shell segment: ${unapprovedSegment}`
 					: parsedBash.isComplex ? "Complex shell command requires confirmation" : undefined;
 				if (note) {
-					return askPermission("bash", input, note, projectRoot, ctx, unapprovedSegment, unapprovedParsed) as Promise<{ block: true; reason: string } | undefined>;
+					return askPermission("bash", input, note, projectRoot, ctx, unapprovedSegment, unapprovedParsed);
 				}
 			}
 		}
 
-		return undefined;
+		return ALLOW_PERMISSION;
 	}
 
 	function blockedUserBashResult(reason: string): UserBashEventResult {
@@ -1318,27 +1334,13 @@ export default function (pi: ExtensionAPI) {
 		};
 	}
 
-	// ── Main gate ─────────────────────────────────────────────────────────────
-
-	pi.on("user_bash", async (event, ctx) => {
-		applyMcpEnvironment(ctx.cwd, ctx.sessionManager?.getSessionId?.());
-		agentName = detectAgentName(pi);
-		profileName = detectProfileName(pi);
-		const input: PermissionToolInput = { command: event.command };
-		const projectRoot = canonicalizePath(ctx.cwd);
-		const blocked = await checkBashPermission(event.command, input, projectRoot, ctx);
-		if (blocked?.block) return blockedUserBashResult(blocked.reason);
-		const operations = await getUserBashOperations(ctx);
-		return operations ? { operations } : undefined;
-	});
-
-	pi.on("tool_call", async (event, ctx) => {
-		agentName = detectAgentName(pi);
-		profileName = detectProfileName(pi);
-		const input = asPermissionToolInput(event.input);
-		const toolName = asPermissionToolName(event.toolName);
+	async function checkToolPermission(
+		toolName: PermissionToolName,
+		input: PermissionToolInput,
+		projectRoot: string,
+		ctx: ExtensionContext,
+	): Promise<PermissionDecision> {
 		const policy = activePolicy(config, agentName, profileName);
-		const projectRoot = canonicalizePath(ctx.cwd);
 
 		let bashApprovals: ApprovalRecord[] = [];
 		let isApprovedBashSegment: ((candidate: string) => boolean) | undefined;
@@ -1347,9 +1349,9 @@ export default function (pi: ExtensionAPI) {
 		if (toolName === "bash") {
 			return checkBashPermission(getCommandInput(input) ?? "", input, projectRoot, ctx);
 		} else if (sessionAllows.has(toolName)) {
-			return undefined;
+			return ALLOW_PERMISSION;
 		} else if (approvalsCoverTool(persistentApprovals, toolName, projectRoot, agentName, approvalsSettings)) {
-			return undefined;
+			return ALLOW_PERMISSION;
 		}
 
 		const getUnapprovedBashSegment = (): { segment?: string; parsed?: ParsedCommand } => {
@@ -1370,14 +1372,14 @@ export default function (pi: ExtensionAPI) {
 			if (rule.action === "block") {
 				const reason = rule.reason ?? `Blocked by permissions policy (profile: ${agentName})`;
 				if (ctx.hasUI) ctx.ui.notify(`🚫 ${toolName}: ${reason}`, "warning");
-				return { block: true, reason };
+				return blockPermission(reason);
 			}
 
 			if (rule.action === "ask") {
 				if (toolName === "bash") {
 					// If tree-sitter confirms all simple commands are allowed, skip.
 					if (parsedBash && canAutoApproveParsedBash(parsedBash, policy.rules, isApprovedBashSegment)) {
-						return undefined;
+						return ALLOW_PERMISSION;
 					}
 					const { segment: unapprovedSegment, parsed: unapprovedParsed } = getUnapprovedBashSegment();
 					const note = rule.reason ?? (unapprovedSegment ? `Unapproved shell segment: ${unapprovedSegment}` : undefined);
@@ -1390,7 +1392,7 @@ export default function (pi: ExtensionAPI) {
 						const canonPath = canonicalizePathToken(rawPath, ctx.cwd);
 						const effectiveApprovals = [...persistentApprovals, ...sessionPathApprovals];
 						if (approvalsCoverPaths(effectiveApprovals, toolName, [canonPath], projectRoot, agentName, approvalsSettings)) {
-							return undefined;
+							return ALLOW_PERMISSION;
 						}
 					}
 				}
@@ -1414,7 +1416,7 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				const epa = rule.externalPathAction ?? "inherit";
-				if (epa === "allow") return undefined; // explicit bypass
+				if (epa === "allow") return ALLOW_PERMISSION; // explicit bypass
 
 				const externalPolicy = epa === "inherit" ? policy.externalPath : epa;
 				const externalPaths = externalPolicy === "allow" ? [] : getExternalPaths(toolName, input, ctx.cwd);
@@ -1424,7 +1426,7 @@ export default function (pi: ExtensionAPI) {
 						return applyExternalPathPolicy(externalPolicy, toolName, input, externalPaths, projectRoot, ctx);
 					}
 				}
-				return undefined;
+				return ALLOW_PERMISSION;
 			}
 		}
 
@@ -1439,7 +1441,31 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		return undefined;
+		return ALLOW_PERMISSION;
+	}
+
+	// ── Main gate ─────────────────────────────────────────────────────────────
+
+	pi.on("user_bash", async (event, ctx) => {
+		applyMcpEnvironment(ctx.cwd, ctx.sessionManager?.getSessionId?.());
+		agentName = detectAgentName(pi);
+		profileName = detectProfileName(pi);
+		const input: PermissionToolInput = { command: event.command };
+		const projectRoot = canonicalizePath(ctx.cwd);
+		const decision = await checkBashPermission(event.command, input, projectRoot, ctx);
+		if (decision.action === "block") return blockedUserBashResult(decision.reason);
+		const operations = await getUserBashOperations(ctx);
+		return operations ? { operations } : undefined;
+	});
+
+	pi.on("tool_call", async (event, ctx) => {
+		agentName = detectAgentName(pi);
+		profileName = detectProfileName(pi);
+		const input = asPermissionToolInput(event.input);
+		const toolName = asPermissionToolName(event.toolName);
+		const projectRoot = canonicalizePath(ctx.cwd);
+		const decision = await checkToolPermission(toolName, input, projectRoot, ctx);
+		return toToolCallResult(decision);
 	});
 
 	// ── /permissions command ──────────────────────────────────────────────────
