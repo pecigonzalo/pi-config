@@ -135,6 +135,7 @@ import {
 	runSandboxedCommandAfterHealthCheck,
 	SandboxHealthMonitor,
 } from "./sandbox-lifecycle";
+import { formatPermissionPreview } from "./preview";
 import {
 	dedupeStrings,
 	isFilesystemToolName,
@@ -904,11 +905,12 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		}
 
 		const target = getMatchTarget(toolName, input);
-		const preview = target ? (target.length > 100 ? `${target.slice(0, 100)}…` : target) : undefined;
 
 		const lines = [`Tool:    ${toolName}`];
-		if (preview) lines.push(`Details: ${preview}`);
-		if (note)    lines.push(`Note:    ${note}`);
+		const detailLines: string[] = [];
+		if (target) detailLines.push(`Details: ${target}`);
+		if (note) detailLines.push(`Note:    ${note}`);
+		if (detailLines.length > 0) lines.push(formatPermissionPreview(detailLines.join("\n")));
 		lines.push(`Profile: ${agentName}`);
 
 		if (toolName === "bash") {
@@ -921,29 +923,34 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			const segmentNote = approvalTarget !== command ? `Unapproved shell segment: ${approvalTarget}` : undefined;
 			const displayNote = note && note !== segmentNote ? note : undefined;
 
-			const bashLines = [`Command: ${command.length > 120 ? `${command.slice(0, 120)}…` : command}`];
+			const bashLines = [
+				"Full command:",
+				formatPermissionPreview(command, { preserveEnd: true }),
+			];
 			if (approvalTarget !== command) {
-				bashLines.push(`Needs approval: ${approvalTarget.length > 120 ? `${approvalTarget.slice(0, 120)}…` : approvalTarget}`);
+				bashLines.push("Approval target:", formatPermissionPreview(approvalTarget, { preserveEnd: true }));
 			}
-			if (displayNote) bashLines.push(`Note: ${displayNote}`);
+			if (displayNote) bashLines.push("Note:", formatPermissionPreview(displayNote));
 			bashLines.push(`Profile: ${agentName}`);
-			if (uniquePrefixCandidates.length > 0) {
-				bashLines.push(`Prefix options: ${uniquePrefixCandidates.map((p) => `${p} *`).join(" | ")}`);
-			}
 
 			const prefixSessionToValue = new Map<string, string>();
 			const prefixPermanentToValue = new Map<string, string>();
-			for (const candidate of uniquePrefixCandidates) {
-				prefixSessionToValue.set(`Allow prefix for this session (${candidate} *)`, candidate);
-				prefixPermanentToValue.set(`Save prefix permanently (${candidate} *)`, candidate);
+			for (const [index, candidate] of uniquePrefixCandidates.entries()) {
+				const candidateNumber = index + 1;
+				bashLines.push(
+					`Prefix candidate ${candidateNumber}:`,
+					formatPermissionPreview(`${candidate} *`, { maxLines: 4, maxChars: 240, preserveEnd: true }),
+				);
+				prefixSessionToValue.set(`Allow prefix ${candidateNumber} for this session`, candidate);
+				prefixPermanentToValue.set(`Save prefix ${candidateNumber} permanently`, candidate);
 			}
 			const prefixOptionToValue = new Map([...prefixSessionToValue, ...prefixPermanentToValue]);
 			const allowExactLabel = approvalTarget === command
-				? `Allow exact command for this session (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`
-				: `Allow exact segment for this session (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`;
+				? "Allow exact Full command for this session"
+				: "Allow exact Approval target for this session";
 			const saveExactLabel = approvalTarget === command
-				? `Save exact command permanently (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`
-				: `Save exact segment permanently (${approvalTarget.length > 60 ? `${approvalTarget.slice(0, 60)}…` : approvalTarget})`;
+				? "Save exact Full command permanently"
+				: "Save exact Approval target permanently";
 			const allowChoices = [
 				allowOnceOption,
 				allowExactLabel,

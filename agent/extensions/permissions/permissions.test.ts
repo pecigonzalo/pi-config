@@ -1293,6 +1293,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		approvalSelection?: string | ((choices: string[]) => string | undefined);
 		blockReason?: string;
 		approvalOptions?: string[][];
+		approvalTitles?: string[];
 		writeApprovalFile?: () => void;
 	}) {
 		await fs.mkdir(TEST_SCRATCH_DIR, { recursive: true });
@@ -1333,7 +1334,8 @@ describe("permissions extension sandbox lifecycle", () => {
 			hasUI: true,
 			ui: {
 				notify: (message: string) => options.notifications?.push(message),
-				select: async (_title: string, choices: string[]) => {
+				select: async (title: string, choices: string[]) => {
+					options.approvalTitles?.push(title);
 					options.approvalOptions?.push(choices);
 					return typeof options.approvalSelection === "function"
 						? options.approvalSelection(choices)
@@ -1443,13 +1445,153 @@ describe("permissions extension sandbox lifecycle", () => {
 		expect(approvalOptions[0]?.[0]).toBe("Allow once");
 	});
 
+	it("shows bounded, labeled Bash command and approval-target previews with Allow once first", async () => {
+		const approvalTitles: string[] = [];
+		const approvalOptions: string[][] = [];
+		const dangerousSuffix = "rm -rf /dangerous-suffix";
+		const command = `echo safe && ${dangerousSuffix}`;
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			rules: [{ tool: "bash", match: "^echo\\b", action: "allow" }, { tool: "bash", action: "ask" }],
+			now: () => 0,
+			approvalSelection: "Allow once",
+			approvalOptions,
+			approvalTitles,
+			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (value: string) => value },
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
+			expect(approvalTitles[0]).toContain(`Full command:\n${command}`);
+			expect(approvalTitles[0]).toContain(`Approval target:\n${dangerousSuffix}`);
+			expect(approvalOptions[0]?.[0]).toBe("Allow once");
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("keeps a distinct approval target visible after a huge full command", async () => {
+		const approvalTitles: string[] = [];
+		const approvalOptions: string[][] = [];
+		const target = "rm -rf /still-visible";
+		const command = `echo ${"x".repeat(20_000)} && ${target}`;
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			rules: [{ tool: "bash", match: "^echo\\b", action: "allow" }, { tool: "bash", action: "ask" }],
+			now: () => 0,
+			approvalSelection: "Allow once",
+			approvalOptions,
+			approvalTitles,
+			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (value: string) => value },
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
+			const title = approvalTitles[0] ?? "";
+			expect(title).toContain("Full command:\n");
+			expect(title).toContain("[Preview shortened: omitted");
+			expect(title).toContain(`${target}\nApproval target:\n${target}`);
+			expect(title.length).toBeLessThan(2_000);
+			expect(approvalOptions[0]?.[0]).toBe("Allow once");
+			expect(approvalOptions[0]).toContain("Allow exact Approval target for this session");
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("keeps a dangerous final line visible in full command and exact approval target sections", async () => {
+		const approvalTitles: string[] = [];
+		const finalLine = "rm -rf /dangerous-final-line";
+		const command = `echo safe && printf '${"x".repeat(20_000)}'\n${finalLine}`;
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			rules: [{ tool: "bash", match: "^echo\\b", action: "allow" }, { tool: "bash", action: "ask" }],
+			now: () => 0,
+			approvalSelection: "Allow once",
+			approvalTitles,
+			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (value: string) => value },
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
+			const title = approvalTitles[0] ?? "";
+			expect(title).toContain(`\n${finalLine}\nApproval target:\nprintf `);
+			expect(title).toContain("'\nProfile: default");
+			expect(title).toContain("[Preview shortened: omitted");
+			expect(title.length).toBeLessThan(3_000);
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("bounds multiline prefix candidates and uses stable numbered option labels", async () => {
+		const approvalTitles: string[] = [];
+		const approvalOptions: string[][] = [];
+		const notifications: string[] = [];
+		const candidate = `tool-${"p".repeat(600)}\nsecond-line`;
+		const command = `${JSON.stringify(candidate)} argument`;
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			rules: [{ tool: "bash", action: "ask" }],
+			now: () => 0,
+			approvalSelection: (choices) => choices.find((choice) => choice === "Allow prefix 1 for this session"),
+			approvalOptions,
+			approvalTitles,
+			notifications,
+			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (value: string) => value },
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
+			const title = approvalTitles[0] ?? "";
+			const options = approvalOptions[0] ?? [];
+			expect(title).toContain("Prefix candidate 1:\n");
+			expect(title).toContain("[Preview shortened: omitted");
+			expect(options[0]).toBe("Allow once");
+			expect(options).toContain("Allow prefix 1 for this session");
+			expect(options).toContain("Save prefix 1 permanently");
+			expect(Math.max(...options.map((option) => option.length))).toBeLessThan(80);
+			const prefixNotification = notifications.find((message) => message.includes("bash-prefix:"));
+			expect(prefixNotification).toContain("tool-");
+			expect(prefixNotification).toContain("second-line");
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("shows explicit truncation notices for large Bash commands and generic details", async () => {
+		const approvalTitles: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			rules: [{ tool: "bash", action: "ask" }, { tool: "mcp", action: "ask" }],
+			now: () => 0,
+			approvalSelection: "Block",
+			approvalTitles,
+			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (value: string) => value },
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			await toolCall({ toolName: "bash", input: { command: `echo ${"x".repeat(2_000)}` } }, harness.ctx);
+			await toolCall({ toolName: "mcp", input: { command: "y".repeat(2_000) } }, harness.ctx);
+			expect(approvalTitles).toHaveLength(2);
+			expect(approvalTitles.every((title) => title.includes("[Preview shortened: omitted"))).toBe(true);
+		} finally {
+			await harness.restore();
+		}
+	});
+
 	it.each([
 		{
 			name: "Bash exact permanent",
 			toolName: "bash",
 			input: { command: "permissions-save-failure-command --unique" },
 			rules: [{ tool: "bash", action: "ask" }] as Rule[],
-			pick: (choices: string[]) => choices.find((choice) => choice.startsWith("Save exact command permanently")),
+			pick: (choices: string[]) => choices.find((choice) => choice === "Save exact Full command permanently"),
 		},
 		{
 			name: "path permanent",
