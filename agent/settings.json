@@ -1,14 +1,18 @@
 {
-  "lastChangelogVersion": "0.80.3",
+  "lastChangelogVersion": "0.80.6",
   "theme": "dracula",
-  "extensions": ["-extensions/store/index.ts"],
-  "defaultProvider": "openrouter",
-  "defaultModel": "anthropic/claude-sonnet-4.6",
-  "defaultThinkingLevel": "off",
+  "extensions": [
+    "-extensions/store/index.ts"
+  ],
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.6-sol",
+  "defaultThinkingLevel": "low",
   "compaction": {
     "enabled": true
   },
-  "skills": ["~/.config/opencode/skills"],
+  "skills": [
+    "~/.config/opencode/skills"
+  ],
   "hideThinkingBlock": false,
   "treeFilterMode": "no-tools",
   "collapseChangelog": true,

@@ -2,25 +2,27 @@
   "efforts": {
     "smart": {
       "description": "A smarter thinking model for complex tasks and reasoning",
-      "provider": "github-copilot",
-      "model": "gpt-5.4",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-sol",
       "thinkingLevel": "high"
     },
     "light": {
       "description": "Lower-cost lightweight reasoning model",
-      "provider": "github-copilot",
-      "model": "gpt-5-mini"
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "thinkingLevel": "low"
     },
     "balanced": {
-      "description": "Balanced default model for most tasks",
-      "provider": "github-copilot",
-      "model": "gpt-5.3-codex"
+      "description": "Cost-effective default model for most tasks",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-sol",
+      "thinkingLevel": "low"
     },
     "heavy": {
       "description": "Heavier model for deep planning and hard tasks",
-      "provider": "github-copilot",
-      "model": "gpt-5.3-codex",
-      "thinkingLevel": "high"
+      "provider": "openai-codex",
+      "model": "gpt-5.6-sol",
+      "thinkingLevel": "xhigh"
     }
   }
 }
