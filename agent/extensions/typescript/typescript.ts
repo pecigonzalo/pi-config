@@ -148,6 +148,7 @@ interface BridgeRuntimeState {
 	onUpdate?: Parameters<NonNullable<Parameters<ExtensionAPI["registerTool"]>[0]["execute"]>>[3];
 	signal?: AbortSignal;
 	cwd: string;
+	policyCwd: string;
 	allowProjectAgents: boolean;
 	policies: EffectivePolicy[];
 	sessionId?: string;
@@ -216,13 +217,30 @@ function clampTimeout(value: number | undefined): number {
 	return Math.max(1, Math.min(120, value));
 }
 
-async function resolveExecutionCwd(baseCwd: string, requested: string | undefined): Promise<string> {
+async function resolveContainedCwd(baseCwd: string, requested: string | undefined): Promise<string> {
+	const requestedCwd = path.resolve(baseCwd, requested ?? ".");
+	const [realBaseCwd, realRequestedCwd] = await Promise.all([
+		fs.realpath(baseCwd),
+		fs.realpath(requestedCwd),
+	]);
+	const relativeCwd = path.relative(realBaseCwd, realRequestedCwd);
+	if (relativeCwd === ".." || relativeCwd.startsWith(`..${path.sep}`) || path.isAbsolute(relativeCwd)) {
+		throw new Error("cwd must stay within the session workspace");
+	}
+	return realRequestedCwd;
+}
+
+async function resolveExecutionPaths(
+	baseCwd: string,
+	requested: string | undefined,
+): Promise<{ executionCwd: string; policyCwd: string }> {
+	const policyCwd = path.resolve(baseCwd);
 	const raw = (requested ?? ".").replace(/^@/, "");
-	const resolved = path.resolve(baseCwd, raw);
-	const stat = await fs.stat(resolved).catch(() => undefined);
-	if (!stat) throw new Error(`CodeMode cwd does not exist: ${requested ?? baseCwd}`);
-	if (!stat.isDirectory()) throw new Error(`CodeMode cwd is not a directory: ${requested ?? baseCwd}`);
-	return resolved;
+	const executionCwd = path.resolve(policyCwd, raw);
+	const stat = await fs.stat(executionCwd).catch(() => undefined);
+	if (!stat) throw new Error(`CodeMode cwd does not exist: ${requested ?? policyCwd}`);
+	if (!stat.isDirectory()) throw new Error(`CodeMode cwd is not a directory: ${requested ?? policyCwd}`);
+	return { executionCwd, policyCwd };
 }
 
 function serializeForDisplay(value: unknown): string {
@@ -716,7 +734,9 @@ async function runTaskBridge(state: BridgeRuntimeState, args: unknown): Promise<
 	if (agentScope !== "user" && !state.allowProjectAgents) {
 		throw new Error("host.task.run only allows agentScope='user' in this MVP");
 	}
-	const taskCwd = typeof input.cwd === "string" ? path.resolve(state.cwd, input.cwd) : state.cwd;
+	const taskCwd = await resolveContainedCwd(state.policyCwd, typeof input.cwd === "string" ? input.cwd : undefined).catch((error) => {
+		throw new Error(`host.task.run ${error instanceof Error ? error.message : String(error)}`);
+	});
 	const discovery = taskAgents.discoverAgents(taskCwd, agentScope);
 	const agent = discovery.agents.find((candidate) => candidate.name === input.agent);
 	if (!agent) throw new Error(`Unknown agent: ${input.agent}`);
@@ -813,7 +833,7 @@ async function runTaskBridge(state: BridgeRuntimeState, args: unknown): Promise<
 }
 
 function getMcpService(state: BridgeRuntimeState): McpService {
-	state.mcpService ??= createMcpService({ cwd: state.cwd, sessionId: state.sessionId });
+	state.mcpService ??= createMcpService({ cwd: state.policyCwd, sessionId: state.sessionId });
 	return state.mcpService;
 }
 
@@ -1104,10 +1124,10 @@ export default function (pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const timeout = clampTimeout(params.timeout);
 			const codeMode = (params.mode ?? "analysis") as CodemodeMode;
-			const cwd = await resolveExecutionCwd(ctx.cwd, params.cwd);
-			const config = loadConfig(cwd);
+			const { executionCwd, policyCwd } = await resolveExecutionPaths(ctx.cwd, params.cwd);
+			const config = loadConfig(policyCwd);
 			const profileScope: AgentScope = ctx.isProjectTrusted() ? "both" : "user";
-			const discoveredProfiles = taskAgents.discoverProfiles(cwd, profileScope, ctx.isProjectTrusted()).profiles;
+			const discoveredProfiles = taskAgents.discoverProfiles(policyCwd, profileScope, ctx.isProjectTrusted()).profiles;
 			const agentName = detectAgentName(pi);
 			const inheritedPermissionsProfile = detectProfileName(pi);
 			const permissionsProfile = resolvePermissionsProfileName(params.profile, inheritedPermissionsProfile, discoveredProfiles);
@@ -1120,11 +1140,11 @@ export default function (pi: ExtensionAPI) {
 			const inheritedPolicy = activePolicy(config, agentName, inheritedPermissionsProfile);
 			const selectedPolicy = activePolicy(config, agentName, permissionsProfile);
 			const policy = params.profile ? constrainCodemodePolicy(inheritedPolicy, selectedPolicy) : inheritedPolicy;
-			const tmpBase = getEffectiveSandboxTmpDir(cwd, config.sandbox);
+			const tmpBase = getEffectiveSandboxTmpDir(policyCwd, config.sandbox);
 			await fs.mkdir(tmpBase, { recursive: true });
 			const runtimeDir = await fs.mkdtemp(path.join(tmpBase, "codemode-"));
 			const artifactsDir = path.join(runtimeDir, "artifacts");
-			const resolvedPolicy = resolveCodemodePolicy(policy, cwd, config.sandbox, codeMode, runtimeDir);
+			const resolvedPolicy = resolveCodemodePolicy(policy, policyCwd, config.sandbox, codeMode, runtimeDir);
 
 			if (!resolvedPolicy.sandbox.enabled) {
 				await fs.rm(runtimeDir, { recursive: true, force: true }).catch(() => {});
@@ -1147,7 +1167,8 @@ export default function (pi: ExtensionAPI) {
 				PI_CODEMODE_MODE: codeMode,
 				PI_CODEMODE_PROFILE: params.profile ?? "",
 				PI_CODEMODE_PERMISSIONS_PROFILE: permissionsProfile ?? "",
-				PI_CODEMODE_CWD: cwd,
+				PI_CODEMODE_CWD: executionCwd,
+				PI_CODEMODE_POLICY_CWD: policyCwd,
 			};
 			const { entryFile } = await createRuntimeFiles(runtimeDir, params.code, resolvedPolicy.capabilities);
 			const command = `bun ${JSON.stringify(entryFile)}`;
@@ -1161,7 +1182,8 @@ export default function (pi: ExtensionAPI) {
 				bridgeCalls,
 				onUpdate,
 				signal,
-				cwd,
+				cwd: executionCwd,
+				policyCwd,
 				allowProjectAgents: resolvedPolicy.allowProjectAgents,
 				policies: params.profile ? [inheritedPolicy, selectedPolicy] : [inheritedPolicy],
 				sessionId: ctx.sessionManager.getSessionId(),
@@ -1259,7 +1281,7 @@ export default function (pi: ExtensionAPI) {
 					},
 					{
 						command,
-						cwd,
+						cwd: executionCwd,
 						timeout,
 						signal,
 						stdinMode: "pipe",
@@ -1279,7 +1301,7 @@ export default function (pi: ExtensionAPI) {
 				const details: CodemodeDetails = {
 					codeMode,
 					profile: params.profile,
-					cwd,
+					cwd: executionCwd,
 					timeout,
 					code: params.code,
 					exitCode,
@@ -1321,7 +1343,7 @@ export default function (pi: ExtensionAPI) {
 			const details: CodemodeDetails = {
 				codeMode,
 				profile: params.profile,
-				cwd,
+				cwd: executionCwd,
 				timeout,
 				code: params.code,
 				exitCode,
@@ -1365,7 +1387,8 @@ export const __test__ = {
 	buildRunnerSource,
 	splitImportsAndBody,
 	buildUserModule,
-	resolveExecutionCwd,
+	resolveContainedCwd,
+	resolveExecutionPaths,
 	resolvePermissionsProfileName,
 	clampTimeout,
 	sanitizeArtifactName,

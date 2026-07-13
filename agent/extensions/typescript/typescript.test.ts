@@ -1,5 +1,7 @@
 import { beforeAll, describe, expect, it, mock } from "bun:test";
 import { EventEmitter } from "node:events";
+import * as os from "node:os";
+import * as path from "node:path";
 
 let __test__: any;
 let extensionFactory: any;
@@ -89,6 +91,22 @@ describe("typescript tool helpers", () => {
 			expect(guideline).toContain("typescript");
 			expect(guideline.toLowerCase()).not.toContain("this tool");
 		}
+	});
+
+	it("keeps the session policy root when execution cwd is external", async () => {
+		const baseCwd = process.cwd();
+		const externalCwd = os.tmpdir();
+
+		const resolved = await __test__.resolveExecutionPaths(baseCwd, externalCwd);
+
+		expect(resolved.policyCwd).toBe(path.resolve(baseCwd));
+		expect(resolved.executionCwd).toBe(path.resolve(externalCwd));
+	});
+
+	it("rejects host bridge cwd outside the session workspace", async () => {
+		await expect(__test__.resolveContainedCwd(process.cwd(), os.tmpdir())).rejects.toThrow(
+			"cwd must stay within the session workspace",
+		);
 	});
 
 	it("resolves requested capability profiles to permissions profiles", () => {

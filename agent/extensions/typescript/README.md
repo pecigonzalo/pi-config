@@ -233,6 +233,8 @@ return {
 
 The tool always uses a dedicated sandbox for code execution. The selected capability profile resolves to its permissions profile through the existing permissions system and is intersected with the current session policy; when omitted, the current session permissions profile is inherited. CodeMode does not override that policy with its own access mode.
 
+The optional tool `cwd` changes only the child process's working directory. Sandbox policy, project configuration, writable workspace paths, MCP configuration, and project profile discovery remain rooted at the session workspace, so an external `cwd` cannot relocate the writable boundary. Host bridge operations such as `host.task.run()` must keep their own `cwd` inside the session workspace.
+
 If the effective policy disables dedicated sandboxing or the sandbox cannot be initialized, the tool fails closed.
 
 ## Audit trail
