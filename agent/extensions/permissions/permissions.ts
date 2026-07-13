@@ -1358,6 +1358,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 					notifySandboxBypass(ctx, bypassMatch);
 					return createLocalBashOperations().exec(command, cwd, options);
 				}
+				const lifecycleGeneration = sandboxLifecycleGeneration;
 				return runSandboxedCommandAfterHealthCheck({
 					healthMonitor: sandboxHealthMonitor,
 					ensureHealthy: (signal) => ensureSandboxHealthyAfterIdle(ctx, healthExecution, healthRuntime, signal),
@@ -1365,8 +1366,12 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 					execute: () => {
 						const currentActive = activeSandboxState();
 						const currentRuntime = sandboxRuntime;
-						if (!currentActive || !currentRuntime) {
-							return createLocalBashOperations().exec(command, cwd, options);
+						if (
+							!currentActive
+							|| !currentRuntime
+							|| sandboxLifecycleGeneration !== lifecycleGeneration
+						) {
+							throw new Error("Bash sandbox changed or became unavailable before command execution; blocked local fallback");
 						}
 						return currentRuntime.createBashOperations(currentActive.execution).exec(command, cwd, options);
 					},

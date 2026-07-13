@@ -1954,6 +1954,68 @@ describe("permissions extension sandbox lifecycle", () => {
 		expect(notifications).toContain("Bash sandbox bypassed for command matching: sandbox=false rule /^printf\\s+user-bypass$/");
 	});
 
+	it("keeps intentionally disabled user bash execution local", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			await harness.commands.get("permissions")?.handler("sandbox disable", harness.ctx);
+			const userBash = harness.handlers.get("user_bash")?.[0];
+			if (!userBash) throw new Error("user_bash handler was not registered");
+
+			const result = await userBash(
+				{ command: "printf local-user-bash", excludeFromContext: false, cwd: harness.cwd },
+				harness.ctx,
+			);
+
+			expect(result).toBeUndefined();
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("blocks local user bash fallback when sandbox state disappears before execution", async () => {
+		let commandCount = 0;
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					commandCount++;
+					return command;
+				},
+			},
+		});
+		try {
+			const userBash = harness.handlers.get("user_bash")?.[0];
+			if (!userBash) throw new Error("user_bash handler was not registered");
+			const result = await userBash(
+				{ command: "true", excludeFromContext: false, cwd: harness.cwd },
+				harness.ctx,
+			) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
+			if (!result?.operations) throw new Error("sandboxed user bash operations were not returned");
+
+			const execution = result.operations.exec("true", harness.cwd, { onData: () => {} });
+			for (const handler of harness.handlers.get("session_shutdown") ?? []) {
+				await handler({}, harness.ctx);
+			}
+
+			await expect(execution).rejects.toThrow("blocked local fallback");
+		} finally {
+			await harness.restore();
+		}
+
+		expect(commandCount).toBe(0);
+	});
+
 	it("runs user bash through active sandbox operations", async () => {
 		let now = 0;
 		const wrappedCommands: string[] = [];
