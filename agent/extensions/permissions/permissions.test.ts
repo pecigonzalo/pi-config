@@ -6,7 +6,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import { APPROVAL_CLOCK_SKEW_MS, approvalsCoverBash, approvalsCoverPaths, extractApprovalRecords, getApprovalsSettings } from "./approvals";
+import {
+	APPROVAL_CLOCK_SKEW_MS,
+	approvalsCoverBash,
+	approvalsCoverPaths,
+	approvalsCoverTool,
+	extractApprovalRecords,
+	getApprovalsSettings,
+} from "./approvals";
 import { resolveCodemodePolicy } from "./codemode";
 import { GIT_METADATA_PROTECTED_RESOURCE_MATCH } from "./protected-resources";
 import {
@@ -515,6 +522,40 @@ describe("scoped approvals", () => {
 		).toBe(false);
 	});
 
+	it("preserves direct in-memory wildcard matching for every approval matcher", () => {
+		const settings = getApprovalsSettings({ approvals: { scopeByProject: true, scopeByAgent: true } });
+		const common = { tool: "*" as const, projectRoot: "/repo-a", agentName: "default", createdAt: Date.now() };
+
+		expect(
+			approvalsCoverPaths(
+				[{ ...common, scopeType: "path-prefix", scopeValue: "/repo-a/external" }],
+				"read",
+				["/repo-a/external/file.txt"],
+				"/repo-a",
+				"default",
+				settings,
+			),
+		).toBe(true);
+		expect(
+			approvalsCoverBash(
+				[{ ...common, scopeType: "bash-prefix", scopeValue: "git" }],
+				"git status",
+				"/repo-a",
+				"default",
+				settings,
+			),
+		).toBe(true);
+		expect(
+			approvalsCoverTool(
+				[{ ...common, scopeType: "tool", scopeValue: "*" }],
+				"extension_tool",
+				"/repo-a",
+				"default",
+				settings,
+			),
+		).toBe(true);
+	});
+
 	it("matches bash exact and prefix approvals", () => {
 		const settings = getApprovalsSettings({ approvals: { scopeByProject: true, scopeByAgent: true } });
 		const approvals = [
@@ -598,8 +639,10 @@ describe("approval file parsing", () => {
 	it("rejects invalid tools, scopes, values, and timestamps", () => {
 		const now = 1_000_000;
 		const invalid = [
-			{ tool: "unknown", scopeType: "tool", scopeValue: "unknown", createdAt: now },
+			{ tool: "unknown", scopeType: "tool", scopeValue: "different", createdAt: now },
 			{ tool: "*", scopeType: "tool", scopeValue: "*", createdAt: now },
+			{ tool: "custom_tool", scopeType: "path-prefix", scopeValue: "/tmp", createdAt: now },
+			{ tool: "custom_tool", scopeType: "bash-prefix", scopeValue: "git", createdAt: now },
 			{ tool: "read", scopeType: "bash-prefix", scopeValue: "git", createdAt: now },
 			{ tool: "bash", scopeType: "path-prefix", scopeValue: "/tmp", createdAt: now },
 			{ tool: "read", scopeType: "tool", scopeValue: "write", createdAt: now },
@@ -612,6 +655,41 @@ describe("approval file parsing", () => {
 		const warnings: string[] = [];
 		expect(extractApprovalRecords({ approvals: invalid }, (warning) => warnings.push(warning), "test", now)).toEqual([]);
 		expect(warnings).toHaveLength(invalid.length);
+	});
+
+	it("rejects malformed concrete custom-tool names", () => {
+		const now = 1_000_000;
+		const names = ["extension tool", "extension\u00a0tool", "extension\ntool", "extension\u0000tool", "extension\u007ftool", "extension*tool"];
+		const approvals = names.map((tool) => ({ tool, scopeType: "tool", scopeValue: tool, createdAt: now }));
+
+		expect(extractApprovalRecords({ approvals }, undefined, "test", now)).toEqual([]);
+	});
+
+	it("rejects C1 controls in concrete custom-tool names", () => {
+		const now = 1_000_000;
+		const names = ["extension\u0080tool", "extension\u0085tool", "extension\u009ftool"];
+		const approvals = names.map((tool) => ({ tool, scopeType: "tool", scopeValue: tool, createdAt: now }));
+
+		expect(extractApprovalRecords({ approvals }, undefined, "test", now)).toEqual([]);
+	});
+
+	it("loads exact custom-tool approvals and covers only those tools", () => {
+		const now = 1_000_000;
+		const names = ["extension.tool", "extension-tool", "extension:tool/name"];
+		const approvals: ApprovalRecord[] = names.map((tool) => ({
+			tool,
+			scopeType: "tool",
+			scopeValue: tool,
+			createdAt: now,
+			projectRoot: "/repo",
+			agentName: "default",
+		}));
+		const records = extractApprovalRecords({ approvals }, undefined, "test", now);
+		const settings = getApprovalsSettings({ approvals: { scopeByProject: true, scopeByAgent: true } });
+
+		expect(records).toEqual(approvals);
+		for (const tool of names) expect(approvalsCoverTool(records, tool, "/repo", "default", settings)).toBe(true);
+		expect(approvalsCoverTool(records, "other_tool", "/repo", "default", settings)).toBe(false);
 	});
 
 	it("accepts known valid combinations and timestamps within clock skew", () => {

@@ -3,8 +3,8 @@ import type {
 	ApprovalFile,
 	ApprovalRecord,
 	ApprovalsSettings,
-	KnownToolName,
 	PermissionToolName,
+	RuleToolName,
 	PermissionsConfig,
 	ResolvedApprovalsSettings,
 } from "./shared";
@@ -25,7 +25,7 @@ function approvalScopeMatch(
 	agentName: string,
 	settings: ResolvedApprovalsSettings,
 ): boolean {
-	if (approval.tool !== toolName) return false;
+	if (approval.tool !== "*" && approval.tool !== toolName) return false;
 	if (settings.scopeByProject && approval.projectRoot !== projectRoot) return false;
 	if (settings.scopeByAgent && approval.agentName !== agentName) return false;
 	if (approval.scopeType !== "path-prefix") return false;
@@ -79,7 +79,7 @@ function bashApprovalMatches(
 	agentName: string,
 	settings: ResolvedApprovalsSettings,
 ): boolean {
-	if (approval.tool !== "bash") return false;
+	if (approval.tool !== "*" && approval.tool !== "bash") return false;
 	if (settings.scopeByProject && approval.projectRoot !== projectRoot) return false;
 	if (settings.scopeByAgent && approval.agentName !== agentName) return false;
 	if (approval.scopeType === "bash-exact") return approval.scopeValue === command;
@@ -96,7 +96,7 @@ export function approvalsCoverTool(
 ): boolean {
 	return approvals.some((a) => {
 		if (a.scopeType !== "tool") return false;
-		if (a.tool !== toolName) return false;
+		if (a.tool !== "*" && a.tool !== toolName) return false;
 		if (settings.scopeByProject && a.projectRoot !== projectRoot) return false;
 		if (settings.scopeByAgent && a.agentName !== agentName) return false;
 		return true;
@@ -104,27 +104,30 @@ export function approvalsCoverTool(
 }
 
 export const APPROVAL_CLOCK_SKEW_MS = 5 * 60 * 1000;
-const KNOWN_APPROVAL_TOOLS = new Set<KnownToolName>(["bash", "mcp", "read", "write", "edit", "grep", "find", "ls"]);
-const FILESYSTEM_APPROVAL_TOOLS = new Set<KnownToolName>(["read", "write", "edit", "grep", "find", "ls"]);
+const FILESYSTEM_APPROVAL_TOOLS = new Set<RuleToolName>(["read", "write", "edit", "grep", "find", "ls"]);
 
 function isApprovalScopeType(value: unknown): value is ApprovalRecord["scopeType"] {
 	return value === "path-prefix" || value === "tool" || value === "bash-exact" || value === "bash-prefix";
 }
 
+function isConcretePersistedToolName(value: unknown): value is string {
+	return typeof value === "string" && value.length > 0 && !/[\p{White_Space}\u0000-\u001f\u007f-\u009f*]/u.test(value);
+}
+
 function toApprovalRecord(candidate: unknown, now: number): ApprovalRecord | undefined {
 	if (!candidate || typeof candidate !== "object") return undefined;
 	const value = candidate as Partial<ApprovalRecord>;
-	if (typeof value.tool !== "string" || !KNOWN_APPROVAL_TOOLS.has(value.tool as KnownToolName)) return undefined;
+	if (!isConcretePersistedToolName(value.tool)) return undefined;
 	if (!isApprovalScopeType(value.scopeType)) return undefined;
 	if (typeof value.scopeValue !== "string" || value.scopeValue.trim().length === 0) return undefined;
 	if (value.scopeType === "tool" && value.scopeValue !== value.tool) return undefined;
 	if ((value.scopeType === "bash-exact" || value.scopeType === "bash-prefix") && value.tool !== "bash") return undefined;
-	if (value.scopeType === "path-prefix" && !FILESYSTEM_APPROVAL_TOOLS.has(value.tool as KnownToolName)) return undefined;
+	if (value.scopeType === "path-prefix" && !FILESYSTEM_APPROVAL_TOOLS.has(value.tool as RuleToolName)) return undefined;
 	if (typeof value.createdAt !== "number" || !Number.isFinite(value.createdAt) || value.createdAt < 0 || value.createdAt > now + APPROVAL_CLOCK_SKEW_MS) return undefined;
 	if (value.projectRoot !== undefined && typeof value.projectRoot !== "string") return undefined;
 	if (value.agentName !== undefined && typeof value.agentName !== "string") return undefined;
 	return {
-		tool: value.tool as KnownToolName,
+		tool: value.tool as RuleToolName,
 		scopeType: value.scopeType,
 		scopeValue: value.scopeValue,
 		projectRoot: value.projectRoot,
