@@ -14,6 +14,7 @@ let mockResources: any;
 let mockHasProjectTaskResources = false;
 let mockHasCoreProjectResources = false;
 let mockSavedProjectTrust: boolean | null = null;
+const mockSavedProjectTrustByCwd = new Map<string, boolean>();
 let lastDiscoveryProjectTrusted: boolean | undefined;
 
 beforeAll(async () => {
@@ -59,11 +60,11 @@ beforeAll(async () => {
 		...piCodingAgent,
 		hasTrustRequiringProjectResources: () => mockHasCoreProjectResources,
 		ProjectTrustStore: class {
-			get() {
-				return mockSavedProjectTrust;
+			get(cwd: string) {
+				return mockSavedProjectTrustByCwd.get(cwd) ?? mockSavedProjectTrust;
 			}
-			set(_cwd: string, trusted: boolean) {
-				mockSavedProjectTrust = trusted;
+			set(cwd: string, trusted: boolean) {
+				mockSavedProjectTrustByCwd.set(cwd, trusted);
 			}
 		},
 		getAgentDir: () => testAgentDir,
@@ -444,6 +445,59 @@ describe("tasks project trust integration", () => {
 		}
 	});
 
+	it("does not carry approval across project or session changes", async () => {
+		const projectA = await fs.mkdtemp(path.join(os.tmpdir(), "pi-task-project-a-"));
+		const projectB = await fs.mkdtemp(path.join(os.tmpdir(), "pi-task-project-b-"));
+		mockHasProjectTaskResources = true;
+		mockHasCoreProjectResources = false;
+		mockSavedProjectTrust = null;
+		mockSavedProjectTrustByCwd.clear();
+		lastDiscoveryProjectTrusted = undefined;
+		try {
+			const { eventHandlers, tool } = createExtensionHarness();
+			const createContext = (cwd: string, sessionId: string, hasUI: boolean, confirm: () => Promise<boolean>) => ({
+				cwd,
+				hasUI,
+				isProjectTrusted: () => true,
+				ui: { confirm, notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+				model: { provider: "test", id: "model" },
+				modelRegistry: { find: () => undefined },
+				sessionManager: {
+					getSessionFile: () => undefined,
+					getSessionId: () => sessionId,
+					getBranch: () => [],
+				},
+			});
+			const contextA = createContext(projectA, "session-a", true, async () => true);
+			await eventHandlers.session_start?.({ reason: "startup" }, contextA);
+			await eventHandlers.before_agent_start?.({ systemPrompt: "base" }, contextA);
+			expect(lastDiscoveryProjectTrusted as boolean | undefined).toBe(true);
+
+			const contextB = createContext(projectB, "session-b", false, async () => false);
+			await eventHandlers.session_start?.({ reason: "switch" }, contextB);
+			await eventHandlers.before_agent_start?.({ systemPrompt: "base" }, contextB);
+			expect(lastDiscoveryProjectTrusted as boolean | undefined).toBe(false);
+
+			mockResources = createResources({
+				projectTasksConfig: { source: "project", filePath: path.join(projectB, ".pi", "tasks.json"), persist: false },
+			});
+			await expect(tool.execute(
+				"tool-b",
+				{ steps: [{ task: "Do work", prompt: "Worker prompt" }], agentScope: "both" },
+				new AbortController().signal,
+				() => {},
+				contextB,
+			)).rejects.toThrow("Project task resources require a trusted project");
+		} finally {
+			mockHasProjectTaskResources = false;
+			mockSavedProjectTrust = null;
+			mockSavedProjectTrustByCwd.clear();
+			mockResources = undefined;
+			await fs.rm(projectA, { recursive: true, force: true });
+			await fs.rm(projectB, { recursive: true, force: true });
+		}
+	});
+
 	it("fails closed when task resources appear after trust resolution", async () => {
 		mockHasProjectTaskResources = false;
 		mockHasCoreProjectResources = false;
@@ -786,6 +840,94 @@ describe("tasks worker tool configuration", () => {
 		);
 
 		expect(args).toEqual([]);
+	});
+});
+
+describe("tasks project resource execution guardrails", () => {
+	const sessionManager = { getSessionFile: () => undefined, getBranch: () => [] };
+
+	it("removes obsolete caller-controlled project confirmation fields", () => {
+		const prepared = __test__.prepareTaskToolArguments({
+			steps: [{ task: "Do work", prompt: "Worker prompt" }],
+			confirmProjectAgents: false,
+		});
+
+		expect(prepared.confirmProjectAgents).toBeUndefined();
+	});
+
+	it("rejects an explicitly selected project profile when untrusted", async () => {
+		const resources = createResources({
+			profiles: [{
+				name: "project-profile",
+				description: "project profile",
+				enabled: true,
+				systemPromptMode: "append",
+				systemPrompt: "Project behavior",
+				source: "project",
+				filePath: "/project/profiles/project-profile.md",
+				persist: false,
+			}],
+		});
+
+		const preflight = await __test__.preflightTaskRun(
+			"single",
+			[{ task: "Do work", profile: "project-profile" }],
+			resources,
+			process.cwd(),
+			sessionManager,
+			false,
+		);
+
+		expect(preflight.prepared).toBeUndefined();
+		expect(preflight.error).toContain("Project task resources require a trusted project");
+	});
+
+	it("rejects project defaults and efforts in headless or otherwise untrusted execution", async () => {
+		const resources = createResources({
+			efforts: [{ name: "project-effort", model: "model", source: "project", filePath: "/project/tasks.json" }],
+			projectTasksConfig: { source: "project", filePath: "/project/tasks.json", persist: false },
+		});
+
+		const preflight = await __test__.preflightTaskRun(
+			"single",
+			[{ task: "Do work", prompt: "Worker prompt", effort: "project-effort" }],
+			resources,
+			process.cwd(),
+			sessionManager,
+			false,
+		);
+
+		expect(preflight.prepared).toBeUndefined();
+		expect(preflight.error).toContain("Project task resources require a trusted project");
+	});
+
+	it("allows project profiles and efforts after project trust is established", async () => {
+		const resources = createResources({
+			profiles: [{
+				name: "project-profile",
+				description: "project profile",
+				enabled: true,
+				systemPromptMode: "append",
+				systemPrompt: "Project behavior",
+				source: "project",
+				filePath: "/project/profiles/project-profile.md",
+				persist: false,
+			}],
+			efforts: [{ name: "project-effort", model: "model", source: "project", filePath: "/project/tasks.json" }],
+		});
+
+		const preflight = await __test__.preflightTaskRun(
+			"single",
+			[{ task: "Do work", profile: "project-profile", effort: "project-effort" }],
+			resources,
+			process.cwd(),
+			sessionManager,
+			true,
+		);
+
+		expect(preflight.error).toBeUndefined();
+		expect(preflight.prepared?.steps[0]?.worker.profile?.source).toBe("project");
+		expect(preflight.prepared?.steps[0]?.worker.effort?.source).toBe("project");
 	});
 });
 

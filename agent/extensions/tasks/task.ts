@@ -977,8 +977,22 @@ interface PersistedMainAgentState {
 let mainSessionBaseline: MainSessionBaseline | undefined;
 let activeMainWorker: ResolvedWorkerConfig | undefined;
 let startupCompositionError: string | undefined;
-let taskProjectTrusted = false;
-let taskProjectResourcesPresentAtTrustResolution = false;
+interface TaskProjectTrustState {
+	canonicalCwd: string;
+	sessionId?: string;
+	projectResourcesPresent: boolean;
+	trusted: boolean;
+}
+
+let taskProjectTrustState: TaskProjectTrustState | undefined;
+
+function canonicalizeTaskProjectCwd(cwd: string): string {
+	try {
+		return fs.realpathSync(cwd);
+	} catch {
+		return path.resolve(cwd);
+	}
+}
 
 function getProjectTrustOverride(): boolean | undefined {
 	let override: boolean | undefined;
@@ -995,33 +1009,44 @@ async function resolveTaskProjectTrust(ctx: {
 	isProjectTrusted?: () => boolean;
 	ui: { confirm(title: string, message: string): Promise<boolean> };
 }): Promise<boolean> {
+	const canonicalCwd = canonicalizeTaskProjectCwd(ctx.cwd);
 	const coreTrusted = ctx.isProjectTrusted?.() === true;
-	if (!hasProjectTaskResources(ctx.cwd)) return coreTrusted;
-	if (hasTrustRequiringProjectResources(ctx.cwd)) return coreTrusted;
+	if (!hasProjectTaskResources(canonicalCwd)) return coreTrusted;
+	if (hasTrustRequiringProjectResources(canonicalCwd)) return coreTrusted;
 
 	const override = getProjectTrustOverride();
 	if (override !== undefined) return override;
 	const trustStore = new ProjectTrustStore(getAgentDir());
-	const saved = trustStore.get(ctx.cwd);
+	const saved = trustStore.get(canonicalCwd);
 	if (saved !== null) return saved;
 	if (!ctx.hasUI) return false;
 
 	const trusted = await ctx.ui.confirm(
 		"Trust project configuration?",
 		[
-			`Task agents, profiles, or defaults were found for ${ctx.cwd}.`,
+			`Task agents, profiles, or defaults were found for ${canonicalCwd}.`,
 			"Project configuration is repository-controlled and can change worker prompts, tools, models, and context access.",
 			"Trust all project-local configuration in this directory?",
 		].join("\n\n"),
 	);
-	trustStore.set(ctx.cwd, trusted);
+	trustStore.set(canonicalCwd, trusted);
 	return trusted;
 }
 
-function isTaskProjectTrusted(ctx: { cwd: string; isProjectTrusted?: () => boolean }): boolean {
+function isTaskProjectTrusted(ctx: {
+	cwd: string;
+	isProjectTrusted?: () => boolean;
+	sessionManager?: { getSessionId?: () => string };
+}): boolean {
 	if (ctx.isProjectTrusted?.() !== true) return false;
-	if (!hasProjectTaskResources(ctx.cwd)) return true;
-	return taskProjectResourcesPresentAtTrustResolution && taskProjectTrusted;
+	const canonicalCwd = canonicalizeTaskProjectCwd(ctx.cwd);
+	if (!hasProjectTaskResources(canonicalCwd)) return true;
+	const state = taskProjectTrustState;
+	return state !== undefined &&
+		state.canonicalCwd === canonicalCwd &&
+		state.sessionId === ctx.sessionManager?.getSessionId?.() &&
+		state.projectResourcesPresent &&
+		state.trusted;
 }
 
 function isMainSessionCallableAgent(agent: AgentConfig): boolean {
@@ -1324,22 +1349,23 @@ function buildLegacySingleStep(record: Record<string, unknown>): TaskStepConfig 
 function normalizeTaskToolParams(params: unknown): PreparedTaskToolParams {
 	if (!params || typeof params !== "object") return { steps: [] };
 	const record = params as Record<string, unknown>;
+	const agentScope = record.agentScope as AgentScope | undefined;
 	if (Array.isArray(record.steps)) {
 		return {
-			...record,
 			mode: record.mode as TaskExecutionMode | undefined,
 			steps: record.steps as TaskStepConfig[],
+			agentScope,
 		};
 	}
 	if (Array.isArray(record.chain)) {
-		return { ...record, mode: "chain", steps: record.chain as TaskStepConfig[] };
+		return { mode: "chain", steps: record.chain as TaskStepConfig[], agentScope };
 	}
 	if (Array.isArray(record.tasks)) {
-		return { ...record, mode: "parallel", steps: record.tasks as TaskStepConfig[] };
+		return { mode: "parallel", steps: record.tasks as TaskStepConfig[], agentScope };
 	}
 	const legacyStep = buildLegacySingleStep(record);
-	if (legacyStep) return { ...record, mode: "single", steps: [legacyStep] };
-	return { ...record, mode: record.mode as TaskExecutionMode | undefined, steps: [] };
+	if (legacyStep) return { mode: "single", steps: [legacyStep], agentScope };
+	return { mode: record.mode as TaskExecutionMode | undefined, steps: [], agentScope };
 }
 
 function prepareTaskToolArguments(args: unknown): PreparedTaskToolParams {
@@ -1571,6 +1597,9 @@ async function preflightTaskRun(
 	projectTrusted = false,
 ): Promise<{ prepared?: PreparedTaskRun; error?: string }> {
 	const preparedSteps: PreparedTaskStep[] = [];
+	if (!projectTrusted && resources.projectTasksConfig) {
+		return { error: "Project task resources require a trusted project." };
+	}
 	for (let i = 0; i < steps.length; i++) {
 		const step = steps[i];
 		if (!step) return { error: `Invalid missing step at position ${i + 1}.` };
@@ -1582,6 +1611,12 @@ async function preflightTaskRun(
 			return { error: `Step ${i + 1}: ${resolved.error ?? "Failed to resolve task worker."}` };
 		}
 		const worker = resolved.config;
+		if (
+			!projectTrusted &&
+			(worker.agent?.source === "project" || worker.profile?.source === "project" || worker.effort?.source === "project")
+		) {
+			return { error: `Step ${i + 1}: Project task resources require a trusted project.` };
+		}
 		if (worker.context.mode !== "fresh" && worker.context.mode !== "fork") {
 			return {
 				error: `Invalid effective context.mode at step ${i + 1}: "${String(worker.context.mode)}". Expected "fresh" or "fork".`,
@@ -3667,8 +3702,16 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		taskProjectResourcesPresentAtTrustResolution = hasProjectTaskResources(ctx.cwd);
-		taskProjectTrusted = await resolveTaskProjectTrust(ctx);
+		taskProjectTrustState = undefined;
+		const canonicalCwd = canonicalizeTaskProjectCwd(ctx.cwd);
+		const projectResourcesPresent = hasProjectTaskResources(canonicalCwd);
+		const trusted = await resolveTaskProjectTrust(ctx);
+		taskProjectTrustState = {
+			canonicalCwd,
+			sessionId: ctx.sessionManager.getSessionId?.(),
+			projectResourcesPresent,
+			trusted,
+		};
 		ensureMainSessionBaseline(ctx, pi);
 		syncTaskUiChrome(ctx);
 		startupCompositionError = undefined;
@@ -3719,6 +3762,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		taskProjectTrustState = undefined;
 		setTaskWidgetEnabled(ctx, false);
 		clearTaskUiChrome(ctx);
 		for (const controller of listLiveTaskControllers()) {
@@ -4078,7 +4122,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.sessionManager.getLeafId?.(),
 			);
 
-			if (hasRuntimePersistOverride(normalizedParams)) {
+			if (hasRuntimePersistOverride(params)) {
 				throwTaskError("Invalid parameters. Runtime persist overrides are not supported.", makeDetails(mode)([]));
 			}
 
