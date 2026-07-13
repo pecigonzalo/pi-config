@@ -1466,6 +1466,83 @@ describe("permissions extension sandbox lifecycle", () => {
 		expect(wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`))).toBe(false);
 	});
 
+	it("blocks local fallback when sandbox state disappears before execution", async () => {
+		let commandCount = 0;
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					commandCount++;
+					return command;
+				},
+			},
+		});
+		try {
+			const bashTool = harness.tools.get("bash");
+			if (!bashTool) throw new Error("bash tool was not registered");
+
+			const execution = bashTool.execute(
+				"state-loss-test",
+				{ command: "true" },
+				undefined,
+				undefined,
+				harness.ctx,
+			);
+			for (const handler of harness.handlers.get("session_shutdown") ?? []) {
+				await handler({}, harness.ctx);
+			}
+
+			await expect(execution).rejects.toThrow("blocked local fallback");
+		} finally {
+			await harness.restore();
+		}
+
+		expect(commandCount).toBe(0);
+	});
+
+	it("blocks execution when sandbox state is replaced before execution", async () => {
+		let commandCount = 0;
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => {
+					commandCount++;
+					return command;
+				},
+			},
+		});
+		try {
+			const bashTool = harness.tools.get("bash");
+			if (!bashTool) throw new Error("bash tool was not registered");
+
+			const execution = bashTool.execute(
+				"state-replacement-test",
+				{ command: "true" },
+				undefined,
+				undefined,
+				harness.ctx,
+			);
+			for (const handler of harness.handlers.get("session_shutdown") ?? []) {
+				await handler({}, harness.ctx);
+			}
+			for (const handler of harness.handlers.get("session_start") ?? []) {
+				await handler({}, harness.ctx);
+			}
+
+			await expect(execution).rejects.toThrow("blocked local fallback");
+		} finally {
+			await harness.restore();
+		}
+
+		expect(commandCount).toBe(0);
+	});
+
 	it("retries idle health probes after failed pre-command repair attempts", async () => {
 		let now = 0;
 		let probeCount = 0;

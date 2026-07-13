@@ -240,6 +240,7 @@ export default function (pi: ExtensionAPI) {
 		| { kind: "failed"; reason: string; fallbackMode: SandboxBashFallbackMode; execution: SandboxExecution };
 	const SANDBOX_RESUME_IDLE_PROBE_MS = 5 * 60 * 1000;
 	let sandboxState: SandboxState = { kind: "inactive", reason: "inactive", fallbackMode: "normal" };
+	let sandboxLifecycleGeneration = 0;
 	let sandboxDisabledForSession = false;
 	let sandboxTmpDir: string | undefined;
 	let sandboxTmpDirEphemeral = false;
@@ -334,6 +335,7 @@ export default function (pi: ExtensionAPI) {
 			if (!active || !sandboxRuntime) {
 				return localBash.execute(id, params, signal, onUpdate);
 			}
+			const lifecycleGeneration = sandboxLifecycleGeneration;
 			const bypassMatch = await sandboxBypassMatch(params.command, active.execution);
 			if (bypassMatch) {
 				notifySandboxBypass(ctx, bypassMatch);
@@ -348,8 +350,12 @@ export default function (pi: ExtensionAPI) {
 				execute: () => {
 					const currentActive = activeSandboxState();
 					const currentRuntime = sandboxRuntime;
-					if (!currentActive || !currentRuntime) {
-						return localBash.execute(id, params, signal, onUpdate);
+					if (
+						!currentActive
+						|| !currentRuntime
+						|| sandboxLifecycleGeneration !== lifecycleGeneration
+					) {
+						throw new Error("Bash sandbox changed or became unavailable before command execution; blocked local fallback");
 					}
 					const sandboxedBash = createBashTool(ctx.cwd, {
 						operations: currentRuntime.createBashOperations(currentActive.execution),
@@ -778,6 +784,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
+		sandboxLifecycleGeneration++;
 		sessionAllows.clear();
 		sessionPathApprovals.length = 0;
 		sessionBashApprovals.length = 0;
@@ -795,6 +802,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
+		sandboxLifecycleGeneration++;
 		sandboxHealthMonitor.reset();
 		reload(ctx);
 		treeSitterReady = await isTreeSitterAvailable();
@@ -802,7 +810,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
-		if (sandboxState.kind === "active" && sandboxRuntime) {
+		sandboxLifecycleGeneration++;
+		const shouldResetSandbox = sandboxState.kind === "active" && sandboxRuntime !== undefined;
+		sandboxState = { kind: "inactive", reason: "inactive", fallbackMode: "normal" };
+		clearSandboxEnv();
+		if (shouldResetSandbox) {
 			await resetSandboxRuntime();
 		}
 		if (sandboxTmpDirEphemeral && sandboxTmpDir) {
@@ -814,10 +826,8 @@ export default function (pi: ExtensionAPI) {
 		}
 		sandboxTmpDir = undefined;
 		sandboxTmpDirEphemeral = false;
-		sandboxState = { kind: "inactive", reason: "inactive", fallbackMode: "normal" };
 		sandboxDisabledForSession = false;
 		sandboxHealthMonitor.reset();
-		clearSandboxEnv();
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
