@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -100,6 +101,7 @@ import {
 } from "./task-runs.js";
 import {
 	clearLiveTaskControllers,
+	createIdempotentControllerClose,
 	deleteLiveTaskController,
 	getLiveTaskController,
 	listLiveTaskControllers,
@@ -144,6 +146,7 @@ const taskWidgetEnabledSessions = new Set<string>();
 let taskDialogRelayQueue: Promise<void> = Promise.resolve();
 const SUBPROCESS_SIGKILL_TIMEOUT_MS = 5000;
 const RPC_COMPLETION_GRACE_MS = 1000;
+const RPC_INTERACTION_TIMEOUT_MS = 5000;
 
 function formatShortcutLabel(shortcut: string): string {
 	return shortcut
@@ -167,35 +170,81 @@ function formatShortcutLabel(shortcut: string): string {
 const TASKS_BROWSER_SHORTCUT_LABEL = formatShortcutLabel(TASKS_BROWSER_SHORTCUT);
 
 function terminateProcessWithEscalation(
-	proc: { kill(signal?: NodeJS.Signals | number): boolean; once(event: string, listener: () => void): unknown; exitCode: number | null; signalCode: NodeJS.Signals | null },
+	proc: {
+		kill(signal?: NodeJS.Signals | number): boolean;
+		once(event: string, listener: () => void): unknown;
+		removeListener(event: string, listener: () => void): unknown;
+		exitCode: number | null;
+		signalCode: NodeJS.Signals | null;
+	},
 	options?: { timeoutMs?: number; isExited?: () => boolean },
-): void {
-	let exited = options?.isExited?.() ?? (proc.exitCode !== null || proc.signalCode !== null);
-	if (exited) return;
-
-	let killTimer: ReturnType<typeof setTimeout> | undefined;
-	const markExited = () => {
-		exited = true;
-		if (killTimer) clearTimeout(killTimer);
-	};
-	proc.once("exit", markExited);
-	proc.once("close", markExited);
-
-	try {
-		proc.kill("SIGTERM");
-	} catch {
-		return;
+): Promise<void> {
+	if (options?.isExited?.() ?? (proc.exitCode !== null || proc.signalCode !== null)) {
+		return Promise.resolve();
 	}
 
-	killTimer = setTimeout(() => {
-		if (exited || options?.isExited?.()) return;
+	return new Promise((resolve) => {
+		let killTimer: ReturnType<typeof setTimeout> | undefined;
+		let settled = false;
+		const markExited = () => {
+			if (settled) return;
+			settled = true;
+			if (killTimer) clearTimeout(killTimer);
+			proc.removeListener("close", markExited);
+			resolve();
+		};
+		proc.once("close", markExited);
+
 		try {
-			proc.kill("SIGKILL");
+			proc.kill("SIGTERM");
 		} catch {
-			// Ignore best-effort cleanup failures.
+			markExited();
+			return;
 		}
-	}, options?.timeoutMs ?? SUBPROCESS_SIGKILL_TIMEOUT_MS);
-	killTimer.unref?.();
+
+		killTimer = setTimeout(() => {
+			if (options?.isExited?.()) {
+				markExited();
+				return;
+			}
+			try {
+				proc.kill("SIGKILL");
+			} catch {
+				markExited();
+			}
+		}, options?.timeoutMs ?? SUBPROCESS_SIGKILL_TIMEOUT_MS);
+		killTimer.unref?.();
+	});
+}
+
+function createUtf8StreamDecoder(append: (text: string) => void) {
+	const decoder = new StringDecoder("utf8");
+	return {
+		write(chunk: Buffer) {
+			append(decoder.write(chunk));
+		},
+		flush() {
+			append(decoder.end());
+		},
+	};
+}
+
+function mapTransportClose(
+	code: number | null,
+	signal: NodeJS.Signals | null,
+	options: {
+		aborted: boolean;
+		intentionalSignal?: NodeJS.Signals;
+		transportLabel: string;
+	},
+): { exitCode: number; signalMessage?: string } {
+	if (options.aborted) return { exitCode: 130 };
+	if (signal === options.intentionalSignal) return { exitCode: 0 };
+	if (code !== null) return { exitCode: code };
+	return {
+		exitCode: 1,
+		signalMessage: signal ? `${options.transportLabel} terminated by signal ${signal}` : undefined,
+	};
 }
 
 function createRpcCompletionCoordinator(options: {
@@ -204,7 +253,7 @@ function createRpcCompletionCoordinator(options: {
 	terminate: () => void;
 	delayMs?: number;
 }) {
-	let sawAgentEnd = false;
+	let sawAgentSettled = false;
 	let completionTimer: ReturnType<typeof setTimeout> | undefined;
 
 	const clear = () => {
@@ -228,10 +277,14 @@ function createRpcCompletionCoordinator(options: {
 	return {
 		dispose: clear,
 		onAgentStart() {
+			sawAgentSettled = false;
 			clear();
 		},
 		onAgentEnd() {
-			sawAgentEnd = true;
+			// agent_end can be followed by retry, compaction, or queued continuation.
+		},
+		onAgentSettled() {
+			sawAgentSettled = true;
 			schedule();
 		},
 		onQueueUpdate(steeringCount: number, followUpCount: number) {
@@ -241,7 +294,7 @@ function createRpcCompletionCoordinator(options: {
 				clear();
 				return;
 			}
-			if (sawAgentEnd && !options.controller.isStreaming) schedule();
+			if (sawAgentSettled && !options.controller.isStreaming) schedule();
 		},
 	};
 }
@@ -249,12 +302,18 @@ function createRpcCompletionCoordinator(options: {
 // Recursion depth guard
 const DEFAULT_MAX_SUBAGENT_DEPTH = 2;
 
-function checkSubagentDepth(): { blocked: boolean; depth: number; maxDepth: number } {
+function checkSubagentDepth(): {
+	blocked: boolean;
+	depth: number;
+	maxDepth: number;
+} {
 	const depth = Number(process.env.PI_SUBAGENT_DEPTH ?? "0");
-	const maxDepth = Number.isFinite(Number(process.env.PI_SUBAGENT_MAX_DEPTH))
-		? Number(process.env.PI_SUBAGENT_MAX_DEPTH)
-		: DEFAULT_MAX_SUBAGENT_DEPTH;
-	return { blocked: Number.isFinite(depth) && depth >= maxDepth, depth, maxDepth };
+	const maxDepth = Number.isFinite(Number(process.env.PI_SUBAGENT_MAX_DEPTH)) ? Number(process.env.PI_SUBAGENT_MAX_DEPTH) : DEFAULT_MAX_SUBAGENT_DEPTH;
+	return {
+		blocked: Number.isFinite(depth) && depth >= maxDepth,
+		depth,
+		maxDepth,
+	};
 }
 
 function getSubagentDepthEnv(): Record<string, string> {
@@ -355,7 +414,10 @@ interface TaskRpcUiMethods {
 interface TaskRpcUiContext {
 	hasUI?: boolean;
 	ui?: TaskRpcUiMethods;
-	sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined };
+	sessionManager?: {
+		getSessionFile?: () => string | undefined;
+		getSessionId?: () => string | undefined;
+	};
 	refreshTaskUiChrome?: () => void;
 }
 
@@ -374,10 +436,7 @@ function getTaskUiPrefix(controller: Pick<LiveTaskController, "agent" | "step">)
 	return `[${getTaskUiLabel(controller)}]`;
 }
 
-function formatTaskExtensionUiTitle(
-	controller: Pick<LiveTaskController, "agent" | "step">,
-	title: string | undefined,
-): string {
+function formatTaskExtensionUiTitle(controller: Pick<LiveTaskController, "agent" | "step">, title: string | undefined): string {
 	const label = getTaskUiLabel(controller);
 	const trimmedTitle = title?.trim();
 	return trimmedTitle ? `${label} · ${trimmedTitle}` : label;
@@ -430,7 +489,11 @@ async function relayTaskExtensionUiRequest(options: {
 		case "select": {
 			await enqueueTaskDialogRelay(async () => {
 				if (!hasParentUi || typeof ui?.select !== "function" || dialogSignal?.aborted) {
-					await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+					await sendResponse({
+						type: "extension_ui_response",
+						id: request.id,
+						cancelled: true,
+					});
 					return;
 				}
 				const relayOptions = Array.isArray(request.options) ? request.options.filter((value): value is string => typeof value === "string") : [];
@@ -438,7 +501,11 @@ async function relayTaskExtensionUiRequest(options: {
 				await sendResponse(
 					value !== undefined
 						? { type: "extension_ui_response", id: request.id, value }
-						: { type: "extension_ui_response", id: request.id, cancelled: true },
+						: {
+								type: "extension_ui_response",
+								id: request.id,
+								cancelled: true,
+							},
 				);
 			});
 			return;
@@ -446,25 +513,41 @@ async function relayTaskExtensionUiRequest(options: {
 		case "confirm": {
 			await enqueueTaskDialogRelay(async () => {
 				if (!hasParentUi || typeof ui?.confirm !== "function" || dialogSignal?.aborted) {
-					await sendResponse({ type: "extension_ui_response", id: request.id, confirmed: false });
+					await sendResponse({
+						type: "extension_ui_response",
+						id: request.id,
+						confirmed: false,
+					});
 					return;
 				}
 				const confirmed = await ui.confirm(title, typeof request.message === "string" ? request.message : "", dialogOptions);
-				await sendResponse({ type: "extension_ui_response", id: request.id, confirmed });
+				await sendResponse({
+					type: "extension_ui_response",
+					id: request.id,
+					confirmed,
+				});
 			});
 			return;
 		}
 		case "input": {
 			await enqueueTaskDialogRelay(async () => {
 				if (!hasParentUi || typeof ui?.input !== "function" || dialogSignal?.aborted) {
-					await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+					await sendResponse({
+						type: "extension_ui_response",
+						id: request.id,
+						cancelled: true,
+					});
 					return;
 				}
 				const value = await ui.input(title, request.placeholder, dialogOptions);
 				await sendResponse(
 					value !== undefined
 						? { type: "extension_ui_response", id: request.id, value }
-						: { type: "extension_ui_response", id: request.id, cancelled: true },
+						: {
+								type: "extension_ui_response",
+								id: request.id,
+								cancelled: true,
+							},
 				);
 			});
 			return;
@@ -472,14 +555,22 @@ async function relayTaskExtensionUiRequest(options: {
 		case "editor": {
 			await enqueueTaskDialogRelay(async () => {
 				if (!hasParentUi || typeof ui?.editor !== "function" || dialogSignal?.aborted) {
-					await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+					await sendResponse({
+						type: "extension_ui_response",
+						id: request.id,
+						cancelled: true,
+					});
 					return;
 				}
 				const value = await ui.editor(title, request.prefill, dialogOptions);
 				await sendResponse(
 					value !== undefined
 						? { type: "extension_ui_response", id: request.id, value }
-						: { type: "extension_ui_response", id: request.id, cancelled: true },
+						: {
+								type: "extension_ui_response",
+								id: request.id,
+								cancelled: true,
+							},
 				);
 			});
 			return;
@@ -491,9 +582,7 @@ async function relayTaskExtensionUiRequest(options: {
 			if (hasParentUi && typeof ui?.setStatus === "function") {
 				const relayKey = getTaskStatusRelayKey(controller, request.statusKey);
 				trackedStatusKeys?.add(relayKey);
-				const statusText = typeof request.statusText === "string" && request.statusText.trim().length > 0
-					? `${prefix} ${request.statusText}`
-					: undefined;
+				const statusText = typeof request.statusText === "string" && request.statusText.trim().length > 0 ? `${prefix} ${request.statusText}` : undefined;
 				ui.setStatus(relayKey, statusText);
 			}
 			return;
@@ -502,15 +591,9 @@ async function relayTaskExtensionUiRequest(options: {
 			if (hasParentUi && typeof ui?.setWidget === "function") {
 				const relayKey = getTaskWidgetRelayKey(controller, request.widgetKey);
 				trackedWidgetKeys?.add(relayKey);
-				const widgetLines = Array.isArray(request.widgetLines)
-					? request.widgetLines.filter((value): value is string => typeof value === "string")
-					: undefined;
+				const widgetLines = Array.isArray(request.widgetLines) ? request.widgetLines.filter((value): value is string => typeof value === "string") : undefined;
 				const placement = request.widgetPlacement === "belowEditor" ? { placement: "belowEditor" as const } : undefined;
-				ui.setWidget(
-					relayKey,
-					widgetLines && widgetLines.length > 0 ? widgetLines.map((line, index) => (index === 0 ? `${prefix} ${line}` : line)) : undefined,
-					placement,
-				);
+				ui.setWidget(relayKey, widgetLines && widgetLines.length > 0 ? widgetLines.map((line, index) => (index === 0 ? `${prefix} ${line}` : line)) : undefined, placement);
 			}
 			return;
 		}
@@ -519,7 +602,11 @@ async function relayTaskExtensionUiRequest(options: {
 			return;
 		}
 		default: {
-			await sendResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+			await sendResponse({
+				type: "extension_ui_response",
+				id: request.id,
+				cancelled: true,
+			});
 		}
 	}
 }
@@ -530,10 +617,7 @@ function resolveChildSessionTerminalStatus(result: SingleResult): Exclude<ChildS
 	return "failed";
 }
 
-function formatChildSessionStatus(
-	status: ChildSessionStatus,
-	themeFg: (color: any, text: string) => string,
-): string {
+function formatChildSessionStatus(status: ChildSessionStatus, themeFg: (color: any, text: string) => string): string {
 	switch (status) {
 		case "created":
 			return themeFg("warning", status);
@@ -548,12 +632,7 @@ function formatChildSessionStatus(
 
 function formatChildSessionCompact(snapshot: ChildSessionSnapshot, themeFg: (color: any, text: string) => string): string {
 	const shortId = snapshot.childSessionId.slice(0, 8);
-	return [
-		themeFg("muted", "session: "),
-		themeFg("accent", shortId),
-		themeFg("muted", " · "),
-		formatChildSessionStatus(snapshot.status, themeFg),
-	].join("");
+	return [themeFg("muted", "session: "), themeFg("accent", shortId), themeFg("muted", " · "), formatChildSessionStatus(snapshot.status, themeFg)].join("");
 }
 
 function formatChildSessionExpanded(snapshot: ChildSessionSnapshot, themeFg: (color: any, text: string) => string): string {
@@ -575,6 +654,10 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 	items: TIn[],
 	concurrency: number,
 	fn: (item: TIn, index: number) => Promise<TOut>,
+	cancellation?: {
+		isCancelled: () => boolean;
+		onCancelled: (item: TIn, index: number) => TOut;
+	},
 ): Promise<TOut[]> {
 	if (items.length === 0) return [];
 	const limit = Math.max(1, Math.min(concurrency, items.length));
@@ -582,9 +665,14 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 	let nextIndex = 0;
 	const workers = new Array(limit).fill(null).map(async () => {
 		while (true) {
+			if (nextIndex >= items.length) return;
 			const current = nextIndex++;
-			if (current >= items.length) return;
-			results[current] = await fn(items[current] as TIn, current);
+			const item = items[current] as TIn;
+			if (cancellation?.isCancelled()) {
+				results[current] = cancellation.onCancelled(item, current);
+				continue;
+			}
+			results[current] = await fn(item, current);
 		}
 	});
 	await Promise.all(workers);
@@ -596,7 +684,10 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
 	const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
 	await withFileMutationQueue(filePath, async () => {
-		await fs.promises.writeFile(filePath, prompt, { encoding: "utf-8", mode: 0o600 });
+		await fs.promises.writeFile(filePath, prompt, {
+			encoding: "utf-8",
+			mode: 0o600,
+		});
 	});
 	return { dir: tmpDir, filePath };
 }
@@ -655,33 +746,36 @@ function getTaskCallableAgents(resources: ResourceDiscoveryResult): AgentConfig[
 }
 
 function formatCallableAgentList(resources: ResourceDiscoveryResult): string {
-	return getTaskCallableAgents(resources)
-		.map((a) => `${a.name} (${a.source})`)
-		.join(", ") || "none";
+	return (
+		getTaskCallableAgents(resources)
+			.map((a) => `${a.name} (${a.source})`)
+			.join(", ") || "none"
+	);
 }
 
 function formatGenericWorkerBehaviorError(resources: ResourceDiscoveryResult): string {
 	const callableAgents = getTaskCallableAgents(resources);
-	const preferredAgentNames = ["reviewer", "thinker", "implementer"].filter((name) =>
-		callableAgents.some((agent) => agent.name === name),
-	);
+	const preferredAgentNames = ["reviewer", "thinker", "implementer"].filter((name) => callableAgents.some((agent) => agent.name === name));
 	const suggestedAgentNames = preferredAgentNames.length > 0 ? preferredAgentNames : callableAgents.slice(0, 3).map((agent) => agent.name);
 	const agentSuggestion =
-		suggestedAgentNames.length > 0
-			? `Use an agent such as ${suggestedAgentNames.map((name) => `\`${name}\``).join(", ")}.`
-			: "No task agents are available, so include a behavioral `prompt`.";
+		suggestedAgentNames.length > 0 ? `Use an agent such as ${suggestedAgentNames.map((name) => `\`${name}\``).join(", ")}.` : "No task agents are available, so include a behavioral `prompt`.";
 
 	return [
 		"Invalid task configuration. Generic task steps require worker behavior: set `agent`, select a behavior-bearing `profile`, or provide `prompt`.",
 		agentSuggestion,
-		"For generic workers, add `prompt`, for example: `prompt: \"You are an independent read-only code reviewer. Report findings with severity and file references.\"`.",
+		'For generic workers, add `prompt`, for example: `prompt: "You are an independent read-only code reviewer. Report findings with severity and file references."`.',
 		"Do not send bare `{ task: ... }` steps.",
 		`Available task agents: ${formatCallableAgentList(resources)}.`,
 	].join(" ");
 }
 
 function formatProfileList(resources: ResourceDiscoveryResult): string {
-	return resources.profiles.filter((profile) => profile.enabled).map((profile) => `${profile.name} (${profile.source})`).join(", ") || "none";
+	return (
+		resources.profiles
+			.filter((profile) => profile.enabled)
+			.map((profile) => `${profile.name} (${profile.source})`)
+			.join(", ") || "none"
+	);
 }
 
 function formatEffortList(resources: ResourceDiscoveryResult): string {
@@ -739,7 +833,10 @@ function firstDefined<T>(...values: Array<T | undefined>): T | undefined {
 	return undefined;
 }
 
-function buildEffortModelSpec(effort: EffortConfig): { model?: string; error?: string } {
+function buildEffortModelSpec(effort: EffortConfig): {
+	model?: string;
+	error?: string;
+} {
 	const normalizedModel = normalizeLegacyModelName(effort.model)?.trim();
 	if (!normalizedModel) {
 		return { error: `Effort "${effort.name}" has no model configured.` };
@@ -750,7 +847,9 @@ function buildEffortModelSpec(effort: EffortConfig): { model?: string; error?: s
 		const modelProvider = normalizedModel.slice(0, slashIndex).trim();
 		const modelId = normalizedModel.slice(slashIndex + 1).trim();
 		if (!modelProvider || !modelId) {
-			return { error: `Effort "${effort.name}" has an invalid model spec: "${effort.model}".` };
+			return {
+				error: `Effort "${effort.name}" has an invalid model spec: "${effort.model}".`,
+			};
 		}
 		if (effort.provider && effort.provider !== modelProvider) {
 			return {
@@ -767,11 +866,7 @@ function buildEffortModelSpec(effort: EffortConfig): { model?: string; error?: s
 	return { model: normalizedModel };
 }
 
-function resolveModelFromEffort(
-	model: string | undefined,
-	effortName: string | undefined,
-	resources: ResourceDiscoveryResult,
-): { model?: string; effort?: EffortConfig; error?: string } {
+function resolveModelFromEffort(model: string | undefined, effortName: string | undefined, resources: ResourceDiscoveryResult): { model?: string; effort?: EffortConfig; error?: string } {
 	if (model) return { model: normalizeLegacyModelName(model) };
 	if (!effortName) return {};
 	const effort = resources.efforts.find((candidate) => candidate.name === effortName);
@@ -803,10 +898,14 @@ function resolveWorkerConfig(
 		}
 		if (!agent.enabled) return { error: `Agent "${step.agent}" is disabled.` };
 		if (context === "task" && agent.availability === "main") {
-			return { error: `Agent "${step.agent}" is not task-callable (availability: main).` };
+			return {
+				error: `Agent "${step.agent}" is not task-callable (availability: main).`,
+			};
 		}
 		if (context === "main" && agent.availability === "task") {
-			return { error: `Agent "${step.agent}" is not main-session callable (availability: task).` };
+			return {
+				error: `Agent "${step.agent}" is not main-session callable (availability: task).`,
+			};
 		}
 	}
 
@@ -814,7 +913,9 @@ function resolveWorkerConfig(
 	const profile = profileName ? resources.profiles.find((candidate) => candidate.name === profileName) : undefined;
 	if (profileName) {
 		if (!profile) {
-			return { error: `Unknown profile: "${profileName}". Available profiles: ${formatProfileList(resources)}.` };
+			return {
+				error: `Unknown profile: "${profileName}". Available profiles: ${formatProfileList(resources)}.`,
+			};
 		}
 		if (!profile.enabled) return { error: `Profile "${profileName}" is disabled.` };
 	}
@@ -846,10 +947,12 @@ function resolveWorkerConfig(
 		mode?: ContextMode;
 		invalidModeValue?: unknown;
 		invalidShapeValue?: unknown;
-	}> = [{
-		source: "runtime step context",
-		mode: step.context,
-	}];
+	}> = [
+		{
+			source: "runtime step context",
+			mode: step.context,
+		},
+	];
 	if (agent) {
 		modeCandidates.push({
 			source: `agent "${agent.name}" (${agent.source})`,
@@ -919,12 +1022,8 @@ function resolveWorkerConfig(
 		}
 	}
 
-	const effectiveContextProject =
-		firstDefined(agentContextProject, profileContextProject, projectTaskDefaults?.context?.project, globalTaskDefaults?.context?.project) ??
-		false;
-	const effectiveContextSkills =
-		firstDefined(agentContextSkills, profileContextSkills, projectTaskDefaults?.context?.skills, globalTaskDefaults?.context?.skills) ??
-		false;
+	const effectiveContextProject = firstDefined(agentContextProject, profileContextProject, projectTaskDefaults?.context?.project, globalTaskDefaults?.context?.project) ?? false;
+	const effectiveContextSkills = firstDefined(agentContextSkills, profileContextSkills, projectTaskDefaults?.context?.skills, globalTaskDefaults?.context?.skills) ?? false;
 	const effectivePersist = firstDefined(agentPersist, profilePersist, projectTaskDefaults?.persist, globalTaskDefaults?.persist) ?? true;
 
 	const inheritProjectContext = agent?.inheritProjectContext ?? profile?.inheritProjectContext ?? false;
@@ -1003,12 +1102,7 @@ function getProjectTrustOverride(): boolean | undefined {
 	return override;
 }
 
-async function resolveTaskProjectTrust(ctx: {
-	cwd: string;
-	hasUI: boolean;
-	isProjectTrusted?: () => boolean;
-	ui: { confirm(title: string, message: string): Promise<boolean> };
-}): Promise<boolean> {
+async function resolveTaskProjectTrust(ctx: { cwd: string; hasUI: boolean; isProjectTrusted?: () => boolean; ui: { confirm(title: string, message: string): Promise<boolean> } }): Promise<boolean> {
 	const canonicalCwd = canonicalizeTaskProjectCwd(ctx.cwd);
 	const coreTrusted = ctx.isProjectTrusted?.() === true;
 	if (!hasProjectTaskResources(canonicalCwd)) return coreTrusted;
@@ -1033,20 +1127,12 @@ async function resolveTaskProjectTrust(ctx: {
 	return trusted;
 }
 
-function isTaskProjectTrusted(ctx: {
-	cwd: string;
-	isProjectTrusted?: () => boolean;
-	sessionManager?: { getSessionId?: () => string };
-}): boolean {
+function isTaskProjectTrusted(ctx: { cwd: string; isProjectTrusted?: () => boolean; sessionManager?: { getSessionId?: () => string } }): boolean {
 	if (ctx.isProjectTrusted?.() !== true) return false;
 	const canonicalCwd = canonicalizeTaskProjectCwd(ctx.cwd);
 	if (!hasProjectTaskResources(canonicalCwd)) return true;
 	const state = taskProjectTrustState;
-	return state !== undefined &&
-		state.canonicalCwd === canonicalCwd &&
-		state.sessionId === ctx.sessionManager?.getSessionId?.() &&
-		state.projectResourcesPresent &&
-		state.trusted;
+	return state !== undefined && state.canonicalCwd === canonicalCwd && state.sessionId === ctx.sessionManager?.getSessionId?.() && state.projectResourcesPresent && state.trusted;
 }
 
 function isMainSessionCallableAgent(agent: AgentConfig): boolean {
@@ -1058,7 +1144,11 @@ function getMainSessionCallableAgents(agents: AgentConfig[]): AgentConfig[] {
 }
 
 function formatMainSessionAgentList(agents: AgentConfig[]): string {
-	return getMainSessionCallableAgents(agents).map((agent) => `${agent.name} (${agent.source})`).join(", ") || "none";
+	return (
+		getMainSessionCallableAgents(agents)
+			.map((agent) => `${agent.name} (${agent.source})`)
+			.join(", ") || "none"
+	);
 }
 
 function getCurrentModelRef(ctx: { model?: { provider: string; id: string } }): { provider: string; id: string } | undefined {
@@ -1082,10 +1172,7 @@ function ensureMainSessionBaseline(
 	};
 }
 
-function parseAgentModelSpec(
-	modelSpec: string,
-	currentModel?: { provider: string; id: string },
-): { provider: string; modelId: string } | undefined {
+function parseAgentModelSpec(modelSpec: string, currentModel?: { provider: string; id: string }): { provider: string; modelId: string } | undefined {
 	const normalized = normalizeLegacyModelName(modelSpec)?.trim();
 	if (!normalized) return undefined;
 	const slashIndex = normalized.indexOf("/");
@@ -1099,10 +1186,7 @@ function parseAgentModelSpec(
 	return { provider: currentModel.provider, modelId: normalized };
 }
 
-function appendWorkerToolFlags(
-	args: string[],
-	worker: Pick<ResolvedWorkerConfig, "tools" | "excludeTools" | "allowDelegation">,
-): void {
+function appendWorkerToolFlags(args: string[], worker: Pick<ResolvedWorkerConfig, "tools" | "excludeTools" | "allowDelegation">): void {
 	if (worker.tools !== undefined) {
 		if (worker.tools.length > 0) args.push("--tools", worker.tools.join(","));
 		else args.push("--no-tools");
@@ -1113,11 +1197,7 @@ function appendWorkerToolFlags(
 	if (excludedTools.size > 0) args.push("--exclude-tools", [...excludedTools].join(","));
 }
 
-function appendProjectTrustFlags(
-	args: string[],
-	worker: Pick<ResolvedWorkerConfig, "context" | "inheritProjectContext">,
-	projectTrusted = false,
-): void {
+function appendProjectTrustFlags(args: string[], worker: Pick<ResolvedWorkerConfig, "context" | "inheritProjectContext">, projectTrusted = false): void {
 	if (!projectTrusted) {
 		args.push("--no-approve");
 		return;
@@ -1125,12 +1205,7 @@ function appendProjectTrustFlags(
 	if (worker.context.project || worker.inheritProjectContext) args.push("--approve");
 }
 
-function appendWorkerSkillFlags(
-	args: string[],
-	worker: Pick<ResolvedWorkerConfig, "displayAgentName" | "skills" | "context">,
-	launchCwd: string,
-	projectTrusted: boolean,
-): string | undefined {
+function appendWorkerSkillFlags(args: string[], worker: Pick<ResolvedWorkerConfig, "displayAgentName" | "skills" | "context">, launchCwd: string, projectTrusted: boolean): string | undefined {
 	if (worker.skills !== undefined) {
 		args.push("--no-skills");
 		if (worker.skills.length === 0) return undefined;
@@ -1175,7 +1250,12 @@ function getPersistedMainAgentState(entries: SessionEntry[]): PersistedMainAgent
 }
 
 function persistMainAgentSelection(
-	ctx: { sessionManager: { getBranch(): SessionEntry[]; appendCustomEntry?: (customType: string, data?: unknown) => string } },
+	ctx: {
+		sessionManager: {
+			getBranch(): SessionEntry[];
+			appendCustomEntry?: (customType: string, data?: unknown) => string;
+		};
+	},
 	state: { agent?: string; profile?: string; effort?: string },
 ): void {
 	const current = getPersistedMainAgentState(ctx.sessionManager.getBranch());
@@ -1187,10 +1267,7 @@ function persistMainAgentSelection(
 	});
 }
 
-function syncRuntimeEnv(
-	piApi: Pick<ExtensionAPI, "getFlag">,
-	state: { agent?: string; profile?: string },
-): void {
+function syncRuntimeEnv(piApi: Pick<ExtensionAPI, "getFlag">, state: { agent?: string; profile?: string }): void {
 	const explicitAgent = piApi.getFlag("agent-name");
 	if (!(typeof explicitAgent === "string" && explicitAgent.length > 0)) {
 		if (state.agent) process.env.PI_AGENT_NAME = state.agent;
@@ -1213,9 +1290,7 @@ async function restoreMainSessionBaseline(
 ): Promise<string | undefined> {
 	if (!mainSessionBaseline) return undefined;
 	if (mainSessionBaseline.model) {
-		const baselineModel = ctx.modelRegistry.find(mainSessionBaseline.model.provider, mainSessionBaseline.model.id) as
-			| { provider: string; id: string }
-			| undefined;
+		const baselineModel = ctx.modelRegistry.find(mainSessionBaseline.model.provider, mainSessionBaseline.model.id) as { provider: string; id: string } | undefined;
 		if (!baselineModel) {
 			return `Baseline model not found: ${mainSessionBaseline.model.provider}/${mainSessionBaseline.model.id}.`;
 		}
@@ -1233,10 +1308,17 @@ async function applyMainSessionAgentSelection(
 	ctx: {
 		cwd: string;
 		hasUI: boolean;
-		ui: { confirm(title: string, message: string): Promise<boolean>; notify(message: string, level: "info" | "warning" | "error"): void };
+		ui: {
+			confirm(title: string, message: string): Promise<boolean>;
+			notify(message: string, level: "info" | "warning" | "error"): void;
+		};
 		model?: { provider: string; id: string };
 		modelRegistry: { find(provider: string, modelId: string): unknown };
-		sessionManager: { getSessionId(): string; getBranch(): SessionEntry[]; appendCustomEntry?: (customType: string, data?: unknown) => string };
+		sessionManager: {
+			getSessionId(): string;
+			getBranch(): SessionEntry[];
+			appendCustomEntry?: (customType: string, data?: unknown) => string;
+		};
 		isProjectTrusted?: () => boolean;
 	},
 	piApi: Pick<ExtensionAPI, "getAllTools" | "getActiveTools" | "getFlag" | "getThinkingLevel" | "setActiveTools" | "setModel" | "setThinkingLevel">,
@@ -1249,10 +1331,17 @@ async function applyMainSessionAgentSelection(
 	if (selection.agent) {
 		const role = resources.agents.find((candidate) => candidate.name === selection.agent);
 		if (!role) {
-			return { ok: false, error: `Unknown agent: "${selection.agent}". Available main-session agents: ${formatMainSessionAgentList(resources.agents)}.` };
+			return {
+				ok: false,
+				error: `Unknown agent: "${selection.agent}". Available main-session agents: ${formatMainSessionAgentList(resources.agents)}.`,
+			};
 		}
 		if (!role.enabled) return { ok: false, error: `Agent "${selection.agent}" is disabled.` };
-		if (role.availability === "task") return { ok: false, error: `Agent "${selection.agent}" is not main-session callable (availability: task).` };
+		if (role.availability === "task")
+			return {
+				ok: false,
+				error: `Agent "${selection.agent}" is not main-session callable (availability: task).`,
+			};
 	}
 
 	if (!selection.agent && !selection.profile && !selection.effort) {
@@ -1277,7 +1366,10 @@ async function applyMainSessionAgentSelection(
 		{ requireBehavior: false, context: "main" },
 	);
 	if (resolved.error || !resolved.config) {
-		return { ok: false, error: resolved.error ?? "Failed to resolve main-session worker configuration." };
+		return {
+			ok: false,
+			error: resolved.error ?? "Failed to resolve main-session worker configuration.",
+		};
 	}
 	const worker = resolved.config;
 
@@ -1285,18 +1377,32 @@ async function applyMainSessionAgentSelection(
 	const configuredTools = [...(worker.tools ?? []), ...(worker.excludeTools ?? [])];
 	const invalidTools = configuredTools.filter((tool) => !allToolNames.has(tool));
 	if (invalidTools.length > 0) {
-		return { ok: false, error: `Unknown tools in main-session composition: ${invalidTools.join(", ")}.` };
+		return {
+			ok: false,
+			error: `Unknown tools in main-session composition: ${invalidTools.join(", ")}.`,
+		};
 	}
 
 	if (worker.model) {
 		const resolvedModel = parseAgentModelSpec(worker.model, ctx.model);
 		if (!resolvedModel) {
-			return { ok: false, error: `Could not resolve model for main session: ${worker.model}.` };
+			return {
+				ok: false,
+				error: `Could not resolve model for main session: ${worker.model}.`,
+			};
 		}
 		const model = ctx.modelRegistry.find(resolvedModel.provider, resolvedModel.modelId) as { provider: string; id: string } | undefined;
-		if (!model) return { ok: false, error: `Model not found for main session: ${resolvedModel.provider}/${resolvedModel.modelId}.` };
+		if (!model)
+			return {
+				ok: false,
+				error: `Model not found for main session: ${resolvedModel.provider}/${resolvedModel.modelId}.`,
+			};
 		const success = await piApi.setModel(model as never);
-		if (!success) return { ok: false, error: `No API key available for model ${resolvedModel.provider}/${resolvedModel.modelId}.` };
+		if (!success)
+			return {
+				ok: false,
+				error: `No API key available for model ${resolvedModel.provider}/${resolvedModel.modelId}.`,
+			};
 	} else {
 		const restoreError = await restoreMainSessionBaseline(ctx, piApi);
 		if (restoreError) return { ok: false, error: restoreError };
@@ -1314,13 +1420,13 @@ async function applyMainSessionAgentSelection(
 	if (activeTools) piApi.setActiveTools(activeTools);
 
 	activeMainWorker = worker;
-	syncRuntimeEnv(piApi, { agent: worker.agent?.name, profile: worker.profile?.permissionsProfile ?? worker.profile?.name });
+	syncRuntimeEnv(piApi, {
+		agent: worker.agent?.name,
+		profile: worker.profile?.permissionsProfile ?? worker.profile?.name,
+	});
 	if (options.persist) persistMainAgentSelection(ctx, selection);
 	if (options.notify) {
-		ctx.ui.notify(
-			`Main session: ${selection.agent ?? "generic"}${selection.profile ? ` + ${selection.profile}` : ""}${selection.effort ? ` + ${selection.effort}` : ""}`,
-			"info",
-		);
+		ctx.ui.notify(`Main session: ${selection.agent ?? "generic"}${selection.profile ? ` + ${selection.profile}` : ""}${selection.effort ? ` + ${selection.effort}` : ""}`, "info");
 	}
 	return { ok: true, worker };
 }
@@ -1388,14 +1494,26 @@ function normalizeTaskToolParams(params: unknown): PreparedTaskToolParams {
 		};
 	}
 	if (Array.isArray(record.chain)) {
-		return { mode: "chain", steps: record.chain as TaskStepConfig[], agentScope };
+		return {
+			mode: "chain",
+			steps: record.chain as TaskStepConfig[],
+			agentScope,
+		};
 	}
 	if (Array.isArray(record.tasks)) {
-		return { mode: "parallel", steps: record.tasks as TaskStepConfig[], agentScope };
+		return {
+			mode: "parallel",
+			steps: record.tasks as TaskStepConfig[],
+			agentScope,
+		};
 	}
 	const legacyStep = buildLegacySingleStep(record);
 	if (legacyStep) return { mode: "single", steps: [legacyStep], agentScope };
-	return { mode: record.mode as TaskExecutionMode | undefined, steps: [], agentScope };
+	return {
+		mode: record.mode as TaskExecutionMode | undefined,
+		steps: [],
+		agentScope,
+	};
 }
 
 function prepareTaskToolArguments(args: unknown): PreparedTaskToolParams {
@@ -1436,14 +1554,8 @@ function sanitizePathSegment(value: string | undefined, fallback: string): strin
 
 function buildTaskSessionWorkspaceName(run: TaskRunView, preferredStep?: TaskRunStepView): string {
 	const snapshot = preferredStep?.snapshot;
-	const stableId = sanitizePathSegment(
-		snapshot?.parentSessionId ?? run.sourceSessionId ?? path.basename(run.sourceSessionFile ?? ""),
-		"session",
-	);
-	const readableSource = sanitizePathSegment(
-		path.basename(snapshot?.parentSessionPath ?? run.sourceSessionFile ?? "", path.extname(snapshot?.parentSessionPath ?? run.sourceSessionFile ?? "")),
-		"",
-	);
+	const stableId = sanitizePathSegment(snapshot?.parentSessionId ?? run.sourceSessionId ?? path.basename(run.sourceSessionFile ?? ""), "session");
+	const readableSource = sanitizePathSegment(path.basename(snapshot?.parentSessionPath ?? run.sourceSessionFile ?? "", path.extname(snapshot?.parentSessionPath ?? run.sourceSessionFile ?? "")), "");
 	if (!readableSource || readableSource === stableId) return `pi-${stableId}`;
 	return `pi-${stableId}-${readableSource}`.slice(0, 80);
 }
@@ -1479,7 +1591,11 @@ interface ResolvedParentSession {
 async function resolveParentSessionForCurrentSession(
 	currentSessionFile: string,
 	entries: SessionEntry[],
-): Promise<{ resolved?: ResolvedParentSession; error?: string; noParent?: boolean }> {
+): Promise<{
+	resolved?: ResolvedParentSession;
+	error?: string;
+	noParent?: boolean;
+}> {
 	const headerParentSession = readSessionHeaderParentSession(entries);
 	if (headerParentSession) {
 		return {
@@ -1522,10 +1638,7 @@ function buildTaskChildSessionName(agentLabel: string, task: string): string {
 	return `task: ${agentLabel} · ${preview}`;
 }
 
-async function appendRawSessionEntries(
-	filePath: string,
-	entries: Array<Record<string, unknown>>,
-): Promise<void> {
+async function appendRawSessionEntries(filePath: string, entries: Array<Record<string, unknown>>): Promise<void> {
 	if (entries.length === 0) return;
 	await withFileMutationQueue(filePath, async () => {
 		await fs.promises.appendFile(filePath, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, {
@@ -1535,13 +1648,7 @@ async function appendRawSessionEntries(
 	});
 }
 
-async function seedFreshTaskSessionFile(params: {
-	filePath: string;
-	sessionId: string;
-	childCwd: string;
-	parentSessionFile?: string;
-	sessionName: string;
-}): Promise<void> {
+async function seedFreshTaskSessionFile(params: { filePath: string; sessionId: string; childCwd: string; parentSessionFile?: string; sessionName: string }): Promise<void> {
 	const timestamp = new Date().toISOString();
 	const sessionInfoId = createSessionEntryId();
 	const lines = [
@@ -1570,11 +1677,7 @@ async function seedFreshTaskSessionFile(params: {
 	});
 }
 
-async function createManagedFreshTaskSession(params: {
-	childCwd: string;
-	parentSessionFile?: string;
-	sessionName: string;
-}): Promise<{ sessionId: string; sessionFile: string }> {
+async function createManagedFreshTaskSession(params: { childCwd: string; parentSessionFile?: string; sessionName: string }): Promise<{ sessionId: string; sessionFile: string }> {
 	const manager = SessionManager.create(params.childCwd);
 	const sessionFile = manager.getSessionFile();
 	const sessionId = manager.getSessionId();
@@ -1589,11 +1692,7 @@ async function createManagedFreshTaskSession(params: {
 	return { sessionId, sessionFile };
 }
 
-async function createManagedForkedTaskSession(params: {
-	parentSessionFile: string;
-	childCwd: string;
-	sessionName: string;
-}): Promise<{ sessionId: string; sessionFile: string }> {
+async function createManagedForkedTaskSession(params: { parentSessionFile: string; childCwd: string; sessionName: string }): Promise<{ sessionId: string; sessionFile: string }> {
 	const manager = SessionManager.forkFrom(params.parentSessionFile, params.childCwd);
 	const sessionFile = manager.getSessionFile();
 	const sessionId = manager.getSessionId();
@@ -1643,18 +1742,21 @@ async function preflightTaskRun(
 		const step = steps[i];
 		if (!step) return { error: `Invalid missing step at position ${i + 1}.` };
 		if (step.context !== undefined && step.context !== "fresh" && step.context !== "fork") {
-			return { error: `Invalid context.mode at step ${i + 1}: "${String(step.context)}". Expected "fresh" or "fork".` };
+			return {
+				error: `Invalid context.mode at step ${i + 1}: "${String(step.context)}". Expected "fresh" or "fork".`,
+			};
 		}
 		const resolved = resolveWorkerConfig(step, resources);
 		if (resolved.error || !resolved.config) {
-			return { error: `Step ${i + 1}: ${resolved.error ?? "Failed to resolve task worker."}` };
+			return {
+				error: `Step ${i + 1}: ${resolved.error ?? "Failed to resolve task worker."}`,
+			};
 		}
 		const worker = resolved.config;
-		if (
-			!projectTrusted &&
-			(worker.agent?.source === "project" || worker.profile?.source === "project" || worker.effort?.source === "project")
-		) {
-			return { error: `Step ${i + 1}: Project task resources require a trusted project.` };
+		if (!projectTrusted && (worker.agent?.source === "project" || worker.profile?.source === "project" || worker.effort?.source === "project")) {
+			return {
+				error: `Step ${i + 1}: Project task resources require a trusted project.`,
+			};
 		}
 		if (worker.context.mode !== "fresh" && worker.context.mode !== "fork") {
 			return {
@@ -1699,7 +1801,9 @@ async function preflightTaskRun(
 	}
 	if (needsFork) {
 		if (!parentSessionFile) {
-			return { error: "context.mode=\"fork\" requires a parent session file, but the current session is unavailable." };
+			return {
+				error: 'context.mode="fork" requires a parent session file, but the current session is unavailable.',
+			};
 		}
 	}
 
@@ -1724,7 +1828,9 @@ async function preflightTaskRun(
 				sessionFile = createdSession.sessionFile;
 			} else {
 				if (!parentSessionFile) {
-					return { error: `Step ${i + 1} cannot fork because parent session is unavailable.` };
+					return {
+						error: `Step ${i + 1} cannot fork because parent session is unavailable.`,
+					};
 				}
 				const createdSession = await createManagedForkedTaskSession({
 					parentSessionFile,
@@ -1779,7 +1885,15 @@ async function runSingleAgentViaJson(
 				exitCode: 1,
 				messages: [],
 				stderr: "Missing child session file for persisted task step.",
-				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					cost: 0,
+					contextTokens: 0,
+					turns: 0,
+				},
 				model: worker.model,
 				step,
 				sessionMode: preparedStep.session.mode,
@@ -1812,7 +1926,15 @@ async function runSingleAgentViaJson(
 			exitCode: 1,
 			messages: [],
 			stderr: skillError,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: 0,
+				contextTokens: 0,
+				turns: 0,
+			},
 			model: agentModel,
 			step,
 			sessionMode: preparedStep.session.mode,
@@ -1835,7 +1957,15 @@ async function runSingleAgentViaJson(
 		exitCode: 0,
 		messages: [],
 		stderr: "",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			cost: 0,
+			contextTokens: 0,
+			turns: 0,
+		},
 		model: agentModel,
 		step,
 		sessionMode: preparedStep.session.mode,
@@ -1848,7 +1978,12 @@ async function runSingleAgentViaJson(
 	const emitUpdate = () => {
 		if (onUpdate) {
 			onUpdate({
-				content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
+				content: [
+					{
+						type: "text",
+						text: getFinalOutput(currentResult.messages) || "(running...)",
+					},
+				],
 				details: makeDetails([currentResult]),
 			});
 		}
@@ -1876,6 +2011,10 @@ async function runSingleAgentViaJson(
 				env: getWorkerProcessEnv(worker),
 			});
 			let buffer = "";
+			const stdoutDecoder = new StringDecoder("utf8");
+			const stderrDecoder = createUtf8StreamDecoder((text) => {
+				currentResult.stderr += text;
+			});
 			let procClosed = false;
 
 			const processLine = (line: string) => {
@@ -1916,20 +2055,29 @@ async function runSingleAgentViaJson(
 			};
 
 			proc.stdout.on("data", (data) => {
-				buffer += data.toString();
+				buffer += stdoutDecoder.write(data);
 				const lines = buffer.split("\n");
 				buffer = lines.pop() || "";
 				for (const line of lines) processLine(line);
 			});
 
 			proc.stderr.on("data", (data) => {
-				currentResult.stderr += data.toString();
+				stderrDecoder.write(data);
 			});
 
-			proc.on("close", (code) => {
+			proc.on("close", (code, closeSignal) => {
 				procClosed = true;
+				buffer += stdoutDecoder.end();
+				stderrDecoder.flush();
 				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
+				const outcome = mapTransportClose(code, closeSignal, {
+					aborted: wasAborted,
+					transportLabel: "Task process",
+				});
+				if (outcome.signalMessage) {
+					currentResult.stderr += currentResult.stderr ? `\n${outcome.signalMessage}` : outcome.signalMessage;
+				}
+				resolve(outcome.exitCode);
 			});
 
 			proc.on("error", () => {
@@ -1996,7 +2144,15 @@ async function runSingleAgentViaRpc(
 			exitCode: 1,
 			messages: [],
 			stderr: "Missing child session file for persisted RPC task step.",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: 0,
+				contextTokens: 0,
+				turns: 0,
+			},
 			model: worker.model,
 			step,
 			sessionMode: preparedStep.session.mode,
@@ -2025,7 +2181,15 @@ async function runSingleAgentViaRpc(
 			exitCode: 1,
 			messages: [],
 			stderr: skillError,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: 0,
+				contextTokens: 0,
+				turns: 0,
+			},
 			model: agentModel,
 			step,
 			sessionMode: preparedStep.session.mode,
@@ -2037,6 +2201,7 @@ async function runSingleAgentViaRpc(
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
+	let killProc: (() => void) | undefined;
 	const currentResult: SingleResult = {
 		agent: worker.displayAgentName,
 		agentSource: agent?.source ?? "unknown",
@@ -2047,7 +2212,15 @@ async function runSingleAgentViaRpc(
 		exitCode: 0,
 		messages: [],
 		stderr: "",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			cost: 0,
+			contextTokens: 0,
+			turns: 0,
+		},
 		model: agentModel,
 		step,
 		sessionMode: preparedStep.session.mode,
@@ -2059,7 +2232,12 @@ async function runSingleAgentViaRpc(
 	const emitUpdate = () => {
 		if (!onUpdate) return;
 		onUpdate({
-			content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
+			content: [
+				{
+					type: "text",
+					text: getFinalOutput(currentResult.messages) || "(running...)",
+				},
+			],
 			details: makeDetails([currentResult]),
 		});
 	};
@@ -2105,22 +2283,22 @@ async function runSingleAgentViaRpc(
 			pendingFollowUpCount: 0,
 			lastMessageCount: 0,
 			syncCursor: 0,
+			close: async () => {},
 		};
 		setLiveTaskController(controller);
 
 		let buffer = "";
+		const stdoutDecoder = new StringDecoder("utf8");
+		const stderrDecoder = createUtf8StreamDecoder((text) => {
+			currentResult.stderr += text;
+		});
 		let completionResolve: ((value: number) => void) | undefined;
 		const completion = new Promise<number>((resolve) => {
 			completionResolve = resolve;
 		});
-		let sawAgentEnd = false;
+		let intentionallyTerminatedAfterSettlement = false;
 		let rpcAborted = false;
 		let closed = false;
-		const completionCoordinator = createRpcCompletionCoordinator({
-			controller,
-			isClosed: () => closed,
-			terminate: () => proc.kill("SIGTERM"),
-		});
 		let uiRelayQueue: Promise<void> = Promise.resolve();
 
 		const clearRelayedUi = () => {
@@ -2154,6 +2332,23 @@ async function runSingleAgentViaRpc(
 			completionResolve?.(exitCode);
 		};
 
+		controller.close = createIdempotentControllerClose(async (error) => {
+			uiRelayAbortController.abort();
+			clearRelayedUi();
+			rejectPendingRpcResponses(controller, error);
+			await terminateProcessWithEscalation(proc, { isExited: () => closed });
+			if (!closed) finishController(rpcAborted ? 130 : 1);
+		});
+
+		const completionCoordinator = createRpcCompletionCoordinator({
+			controller,
+			isClosed: () => closed,
+			terminate: () => {
+				intentionallyTerminatedAfterSettlement = true;
+				void controller.close();
+			},
+		});
+
 		const handleLine = (line: string) => {
 			if (!line.trim()) return;
 			let event: unknown;
@@ -2182,7 +2377,6 @@ async function runSingleAgentViaRpc(
 				return;
 			}
 			if (event.type === "agent_end") {
-				sawAgentEnd = true;
 				controller.isStreaming = false;
 				controller.status = rpcAborted ? "aborted" : "completed";
 				controller.lastActivity = "agent_end";
@@ -2193,6 +2387,13 @@ async function runSingleAgentViaRpc(
 				}
 				emitUpdate();
 				completionCoordinator.onAgentEnd();
+				return;
+			}
+			if (event.type === "agent_settled") {
+				controller.isStreaming = false;
+				controller.status = rpcAborted ? "aborted" : "completed";
+				controller.lastActivity = "agent_settled";
+				completionCoordinator.onAgentSettled();
 				return;
 			}
 			if (event.type === "message_end" && event.message) {
@@ -2238,11 +2439,7 @@ async function runSingleAgentViaRpc(
 				controller.lastActivity = `ui:${event.method}`;
 				const request = event as unknown as TaskExtensionUiRequest;
 				if (request.method === "notify" && typeof request.message === "string" && request.message.trim()) {
-					addTaskInlineNotice(
-						currentResult,
-						request.message,
-						isTaskExtensionUiNotifyType(request.notifyType) ? request.notifyType : "info",
-					);
+					addTaskInlineNotice(currentResult, request.message, isTaskExtensionUiNotifyType(request.notifyType) ? request.notifyType : "info");
 					emitUpdate();
 				}
 				const sendExtensionUiResponse = async (payload: Record<string, unknown>) => {
@@ -2270,23 +2467,33 @@ async function runSingleAgentViaRpc(
 						currentResult.errorMessage = currentResult.errorMessage ?? `Failed to relay task UI request: ${message}`;
 						currentResult.stderr += currentResult.stderr ? `\n${message}` : message;
 						controller.status = rpcAborted ? "aborted" : "failed";
-						proc.kill("SIGTERM");
+						void controller.close(new Error(message));
 					});
 			}
 		};
 
 		proc.stdout.on("data", (data) => {
-			buffer += data.toString();
+			buffer += stdoutDecoder.write(data);
 			const lines = buffer.split("\n");
 			buffer = lines.pop() || "";
 			for (const line of lines) handleLine(line);
 		});
 		proc.stderr.on("data", (data) => {
-			currentResult.stderr += data.toString();
+			stderrDecoder.write(data);
 		});
-		proc.on("close", (code) => {
+		proc.on("close", (code, closeSignal) => {
+			buffer += stdoutDecoder.end();
+			stderrDecoder.flush();
 			if (buffer.trim()) handleLine(buffer);
-			finishController(sawAgentEnd ? 0 : (code ?? 1));
+			const outcome = mapTransportClose(code, closeSignal, {
+				aborted: rpcAborted,
+				intentionalSignal: intentionallyTerminatedAfterSettlement ? "SIGTERM" : undefined,
+				transportLabel: "Task RPC process",
+			});
+			if (outcome.signalMessage) {
+				currentResult.stderr += currentResult.stderr ? `\n${outcome.signalMessage}` : outcome.signalMessage;
+			}
+			finishController(outcome.exitCode);
 		});
 		proc.on("error", (error) => {
 			controller.status = rpcAborted ? "aborted" : "failed";
@@ -2295,30 +2502,46 @@ async function runSingleAgentViaRpc(
 		});
 
 		if (signal) {
-			const killProc = () => {
+			killProc = () => {
 				if (rpcAborted) return;
 				rpcAborted = true;
 				controller.status = "aborted";
-				terminateProcessWithEscalation(proc, { isExited: () => closed });
+				void controller.close(new Error("Task was aborted"));
 			};
 			if (signal.aborted) killProc();
 			else signal.addEventListener("abort", killProc, { once: true });
 		}
 
-		const promptResponse = await sendLiveTaskRpcCommand(controller, {
-			type: "prompt",
-			message: `Task: ${task}`,
-		});
-		if (promptResponse.success === false) {
-			controller.status = "failed";
-			proc.kill("SIGTERM");
+		try {
+			const promptResponse = await sendLiveTaskRpcCommand(
+				controller,
+				{
+					type: "prompt",
+					message: `Task: ${task}`,
+				},
+				{ signal },
+			);
+			if (promptResponse.success === false) {
+				controller.status = "failed";
+				currentResult.errorMessage = typeof promptResponse.error === "string" ? promptResponse.error : "Task prompt rejected";
+				if (!currentResult.stderr) currentResult.stderr = currentResult.errorMessage;
+				await controller.close(new Error(currentResult.errorMessage));
+				await completion;
+				currentResult.exitCode = 1;
+				return currentResult;
+			}
+		} catch (error) {
+			rpcAborted = signal?.aborted === true;
+			controller.status = rpcAborted ? "aborted" : "failed";
+			const message = error instanceof Error ? error.message : String(error);
+			currentResult.errorMessage = rpcAborted ? "Task was aborted" : `Failed to send task prompt: ${message}`;
+			if (!currentResult.stderr) currentResult.stderr = currentResult.errorMessage;
+			if (rpcAborted) currentResult.stopReason = "aborted";
+			await controller.close(new Error(currentResult.errorMessage));
 			await completion;
-			currentResult.exitCode = 1;
-			currentResult.errorMessage = typeof promptResponse.error === "string" ? promptResponse.error : "Task prompt rejected";
-			if (!currentResult.stderr && currentResult.errorMessage) currentResult.stderr = currentResult.errorMessage;
+			currentResult.exitCode = rpcAborted ? 130 : 1;
 			return currentResult;
 		}
-
 		const exitCode = await completion;
 		currentResult.exitCode = exitCode;
 		if (rpcAborted) {
@@ -2328,6 +2551,7 @@ async function runSingleAgentViaRpc(
 		}
 		return currentResult;
 	} finally {
+		if (signal && killProc) signal.removeEventListener("abort", killProc);
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);
@@ -2356,23 +2580,16 @@ async function runSingleAgent(
 	parentUiContext?: TaskRpcUiContext,
 ): Promise<SingleResult> {
 	if (enableRpcControl && initialChildSession && preparedStep.session.persist && preparedStep.session.sessionFile && toolCallId) {
-		return runSingleAgentViaRpc(
-			preparedStep,
-			task,
-			step,
-			signal,
-			onUpdate,
-			makeDetails,
-			initialChildSession,
-			toolCallId,
-			parentUiContext,
-		);
+		return runSingleAgentViaRpc(preparedStep, task, step, signal, onUpdate, makeDetails, initialChildSession, toolCallId, parentUiContext);
 	}
 	return runSingleAgentViaJson(preparedStep, task, step, signal, onUpdate, makeDetails, initialChildSession);
 }
 
 function appendTaskChildSessionMetadata(
-	sessionManager: { getBranch?: () => readonly SessionEntry[]; appendCustomEntry?: (customType: string, data?: unknown) => string },
+	sessionManager: {
+		getBranch?: () => readonly SessionEntry[];
+		appendCustomEntry?: (customType: string, data?: unknown) => string;
+	},
 	snapshot: ChildSessionSnapshot,
 ): string | undefined {
 	try {
@@ -2394,7 +2611,10 @@ async function runTaskStepWithMetadata(options: {
 	signal: AbortSignal | undefined;
 	onUpdate: OnUpdateCallback | undefined;
 	makeDetails: (results: SingleResult[]) => TaskDetails;
-	sessionManager: { getBranch?: () => readonly SessionEntry[]; appendCustomEntry?: (customType: string, data?: unknown) => string };
+	sessionManager: {
+		getBranch?: () => readonly SessionEntry[];
+		appendCustomEntry?: (customType: string, data?: unknown) => string;
+	};
 	origin?: TaskOriginSnapshot;
 	refreshUi?: () => Promise<void> | void;
 	enableRpcControl?: boolean;
@@ -2431,8 +2651,7 @@ async function runTaskStepWithMetadata(options: {
 		if (!appendError) await Promise.resolve(refreshUi?.());
 		if (appendError) {
 			const metadataError =
-				`Failed to append initial ${TASK_CHILD_SESSION_CUSTOM_TYPE} metadata (status="created"). ` +
-				"Persisted child step was not started because parent metadata is authoritative.";
+				`Failed to append initial ${TASK_CHILD_SESSION_CUSTOM_TYPE} metadata (status="created"). ` + "Persisted child step was not started because parent metadata is authoritative.";
 			const fullError = `${metadataError}\n${appendError}`;
 			return {
 				agent: preparedStep.worker.displayAgentName,
@@ -2444,7 +2663,15 @@ async function runTaskStepWithMetadata(options: {
 				exitCode: 1,
 				messages: [],
 				stderr: fullError,
-				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					cost: 0,
+					contextTokens: 0,
+					turns: 0,
+				},
 				model: preparedStep.worker.model,
 				step,
 				sessionMode: preparedStep.session.mode,
@@ -2466,18 +2693,7 @@ async function runTaskStepWithMetadata(options: {
 
 	let result: SingleResult;
 	try {
-		result = await runSingleAgent(
-			preparedStep,
-			task,
-			step,
-			signal,
-			onUpdate,
-			makeDetails,
-			createdSnapshot,
-			enableRpcControl === true,
-			toolCallId,
-			parentUiContext,
-		);
+		result = await runSingleAgent(preparedStep, task, step, signal, onUpdate, makeDetails, createdSnapshot, enableRpcControl === true, toolCallId, parentUiContext);
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error);
 		const aborted = /aborted/i.test(errorMessage);
@@ -2491,7 +2707,15 @@ async function runTaskStepWithMetadata(options: {
 			exitCode: aborted ? 130 : 1,
 			messages: [],
 			stderr: errorMessage,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: 0,
+				contextTokens: 0,
+				turns: 0,
+			},
 			model: preparedStep.worker.model,
 			step,
 			sessionMode: preparedStep.session.mode,
@@ -2515,9 +2739,7 @@ async function runTaskStepWithMetadata(options: {
 		const appendError = appendTaskChildSessionMetadata(sessionManager, terminalSnapshot);
 		if (!appendError) await Promise.resolve(refreshUi?.());
 		if (appendError) {
-			const metadataError =
-				`Failed to append terminal ${TASK_CHILD_SESSION_CUSTOM_TYPE} metadata (status="${terminalSnapshot.status}"). ` +
-				"Persisted run metadata is incomplete.";
+			const metadataError = `Failed to append terminal ${TASK_CHILD_SESSION_CUSTOM_TYPE} metadata (status="${terminalSnapshot.status}"). ` + "Persisted run metadata is incomplete.";
 			const fullError = `${metadataError}\n${appendError}`;
 			result.stderr = result.stderr ? `${result.stderr}\n${fullError}` : fullError;
 			result.errorMessage = result.errorMessage ? `${result.errorMessage} ${metadataError}` : metadataError;
@@ -2555,7 +2777,9 @@ function resolveLiveTaskControllerForRun(run: TaskRunView, step?: TaskRunStepVie
 	if (step) {
 		const controller = getLiveTaskController(makeTaskRunStepKey(run.runId, step.step));
 		if (!controller || controller.status !== "running") {
-			return { error: `Run ${run.runId} step ${step.step} is not attached to a running live task controller.` };
+			return {
+				error: `Run ${run.runId} step ${step.step} is not attached to a running live task controller.`,
+			};
 		}
 		return { controller };
 	}
@@ -2567,7 +2791,9 @@ function resolveLiveTaskControllerForRun(run: TaskRunView, step?: TaskRunStepVie
 		return { error: `Run ${run.runId} has no running live task controller.` };
 	}
 	if (controllers.length > 1) {
-		return { error: `Run ${run.runId} has multiple running steps. Select a specific child session id prefix first.` };
+		return {
+			error: `Run ${run.runId} has multiple running steps. Select a specific child session id prefix first.`,
+		};
 	}
 	return { controller: controllers[0]! };
 }
@@ -2721,17 +2947,17 @@ async function formatTaskRunDetails(scope: TasksScope, run: TaskRunView, selecte
 
 function extractToolCallNames(message: Message): string[] {
 	const content: unknown[] = Array.isArray(message.content) ? message.content : [];
-	return content
-		.filter((part): part is { type: string; name: string } => isRecord(part) && part.type === "toolCall" && typeof part.name === "string")
-		.map((part) => part.name);
+	return content.filter((part): part is { type: string; name: string } => isRecord(part) && part.type === "toolCall" && typeof part.name === "string").map((part) => part.name);
 }
 
 function formatTranscriptPreviewLine(message: Message): string {
-	const preview = extractMessagePreviewText(message) ?? (() => {
-		const toolCallNames = extractToolCallNames(message);
-		if (toolCallNames.length > 0) return `tool calls: ${toolCallNames.join(", ")}`;
-		return "(no text)";
-	})();
+	const preview =
+		extractMessagePreviewText(message) ??
+		(() => {
+			const toolCallNames = extractToolCallNames(message);
+			if (toolCallNames.length > 0) return `tool calls: ${toolCallNames.join(", ")}`;
+			return "(no text)";
+		})();
 	return `${message.role}: ${createTaskPreview(preview, 180)}`;
 }
 
@@ -2756,12 +2982,16 @@ function readSessionEntriesFromFile(sessionPath: string): SessionEntry[] {
 async function readTaskTranscriptPreview(run: TaskRunView, selectedStep?: TaskRunStepView): Promise<TaskTranscriptPreview> {
 	const inspectStep = selectTaskRunStepForInspect(run, selectedStep);
 	if (!inspectStep) {
-		return { lines: ["No task steps available."], sourceLabel: "none", truncated: false };
+		return {
+			lines: ["No task steps available."],
+			sourceLabel: "none",
+			truncated: false,
+		};
 	}
 	const controller = getLiveTaskController(makeTaskRunStepKey(run.runId, inspectStep.step));
 	if (controller?.status === "running" && controller.transport === "rpc") {
 		try {
-			const response = await sendLiveTaskRpcCommand(controller, { type: "get_messages" });
+			const response = await sendLiveTaskRpcCommand(controller, { type: "get_messages" }, { timeout: RPC_INTERACTION_TIMEOUT_MS });
 			if (response.success !== false && isRecord(response.data) && Array.isArray(response.data.messages)) {
 				const messages = response.data.messages as Message[];
 				const truncated = messages.length > 12;
@@ -2811,12 +3041,19 @@ interface TaskUiChromeSink {
 	ui?: {
 		setWidget?: (key: string, content: any, options?: any) => void;
 		setStatus?: (key: string, text?: string) => void;
-		theme?: { fg?: (color: any, text: string) => string; bold?: (text: string) => string };
+		theme?: {
+			fg?: (color: any, text: string) => string;
+			bold?: (text: string) => string;
+		};
 	};
 }
 
 interface TaskUiChromeContext extends TaskUiChromeSink {
-	sessionManager: { getBranch(): readonly SessionEntry[]; getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined };
+	sessionManager: {
+		getBranch(): readonly SessionEntry[];
+		getSessionFile?: () => string | undefined;
+		getSessionId?: () => string | undefined;
+	};
 }
 
 interface TaskWidgetSummary {
@@ -2825,7 +3062,12 @@ interface TaskWidgetSummary {
 	runs: TaskRunView[];
 }
 
-function getTaskWidgetSessionKey(ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } }): string | undefined {
+function getTaskWidgetSessionKey(ctx: {
+	sessionManager?: {
+		getSessionFile?: () => string | undefined;
+		getSessionId?: () => string | undefined;
+	};
+}): string | undefined {
 	const sessionFile = ctx.sessionManager?.getSessionFile?.();
 	if (typeof sessionFile === "string" && sessionFile.trim()) {
 		return `file:${normalizeSessionPathForComparison(sessionFile)}`;
@@ -2837,13 +3079,23 @@ function getTaskWidgetSessionKey(ctx: { sessionManager?: { getSessionFile?: () =
 	return undefined;
 }
 
-function isTaskWidgetEnabled(ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } }): boolean {
+function isTaskWidgetEnabled(ctx: {
+	sessionManager?: {
+		getSessionFile?: () => string | undefined;
+		getSessionId?: () => string | undefined;
+	};
+}): boolean {
 	const sessionKey = getTaskWidgetSessionKey(ctx);
 	return sessionKey ? taskWidgetEnabledSessions.has(sessionKey) : false;
 }
 
 function setTaskWidgetEnabled(
-	ctx: { sessionManager?: { getSessionFile?: () => string | undefined; getSessionId?: () => string | undefined } },
+	ctx: {
+		sessionManager?: {
+			getSessionFile?: () => string | undefined;
+			getSessionId?: () => string | undefined;
+		};
+	},
 	enabled: boolean,
 ): boolean {
 	const sessionKey = getTaskWidgetSessionKey(ctx);
@@ -2864,10 +3116,13 @@ function buildTaskWidgetSummary(runs: TaskRunView[]): TaskWidgetSummary {
 
 function buildTaskWidgetLines(
 	summary: TaskWidgetSummary,
-	style?: { fg?: (color: any, text: string) => string; bold?: (text: string) => string },
+	style?: {
+		fg?: (color: any, text: string) => string;
+		bold?: (text: string) => string;
+	},
 ): string[] {
-	const fg = typeof style?.fg === "function" ? style.fg.bind(style) : ((_color: any, text: string) => text);
-	const bold = typeof style?.bold === "function" ? style.bold.bind(style) : ((text: string) => text);
+	const fg = typeof style?.fg === "function" ? style.fg.bind(style) : (_color: any, text: string) => text;
+	const bold = typeof style?.bold === "function" ? style.bold.bind(style) : (text: string) => text;
 	const lines = [fg("toolTitle", bold(themeIndependentTaskBrowserHeading(summary.runningRuns)))];
 	if (summary.totalRuns === 0) {
 		lines.push(fg("muted", TASKS_NO_CURRENT_RUNS_MESSAGE));
@@ -2940,10 +3195,7 @@ function syncTaskUiChrome(ctx: TaskUiChromeContext): void {
 	}
 }
 
-async function withTaskWidgetTemporarilyHidden<T>(
-	ctx: TaskUiChromeContext,
-	action: () => Promise<T>,
-): Promise<T> {
+async function withTaskWidgetTemporarilyHidden<T>(ctx: TaskUiChromeContext, action: () => Promise<T>): Promise<T> {
 	const wasEnabled = isTaskWidgetEnabled(ctx);
 	if (wasEnabled) {
 		setTaskWidgetEnabled(ctx, false);
@@ -2985,40 +3237,47 @@ function selectTaskRunStepForInspect(run: TaskRunView, preferredStep?: TaskRunSt
 }
 
 function manualTaskSessionOpenInstruction(sessionPath: string): string {
-	return [
-		`Child session path: ${shortenHomePath(sessionPath)}`,
-		`Open manually via /resume, or run: pi --session "${sessionPath}"`,
-	].join("\n");
+	return [`Child session path: ${shortenHomePath(sessionPath)}`, `Open manually via /resume, or run: pi --session "${sessionPath}"`].join("\n");
 }
 
 function manualParentSessionOpenInstruction(sessionPath: string): string {
-	return [
-		`Parent session path: ${shortenHomePath(sessionPath)}`,
-		`Open manually via /resume, or run: pi --session "${sessionPath}"`,
-	].join("\n");
+	return [`Parent session path: ${shortenHomePath(sessionPath)}`, `Open manually via /resume, or run: pi --session "${sessionPath}"`].join("\n");
 }
 
-function canPersistTaskSnapshotUpdate(
-	currentSessionFile: string | undefined,
-	run: TaskRunView,
-): boolean {
+function canPersistTaskSnapshotUpdate(currentSessionFile: string | undefined, run: TaskRunView): boolean {
 	if (!currentSessionFile || !run.sourceSessionFile) return false;
 	return normalizeSessionPathForComparison(currentSessionFile) === normalizeSessionPathForComparison(run.sourceSessionFile);
 }
 
 async function attachTaskRunInTerminal(
 	ctx: {
-		sessionManager: { getBranch?: () => readonly SessionEntry[]; getSessionFile?: () => string | undefined; appendCustomEntry?: (customType: string, data?: unknown) => string };
+		sessionManager: {
+			getBranch?: () => readonly SessionEntry[];
+			getSessionFile?: () => string | undefined;
+			appendCustomEntry?: (customType: string, data?: unknown) => string;
+		};
 	},
 	run: TaskRunView,
 	preferredStep?: TaskRunStepView,
-): Promise<{ ok: boolean; level: "info" | "warning" | "error"; message: string }> {
+): Promise<{
+	ok: boolean;
+	level: "info" | "warning" | "error";
+	message: string;
+}> {
 	const targetStep = selectTaskRunStepForOpen(run, preferredStep);
 	if (!targetStep) {
-		return { ok: false, level: "error", message: `Run ${run.runId} has no persisted child session to attach.` };
+		return {
+			ok: false,
+			level: "error",
+			message: `Run ${run.runId} has no persisted child session to attach.`,
+		};
 	}
 	if (!targetStep.snapshot.persist) {
-		return { ok: false, level: "error", message: `Run ${run.runId} step ${targetStep.step} is not persisted and cannot be attached.` };
+		return {
+			ok: false,
+			level: "error",
+			message: `Run ${run.runId} step ${targetStep.step} is not persisted and cannot be attached.`,
+		};
 	}
 	const childSessionPath = targetStep.snapshot.childSessionPath;
 	if (!childSessionPath.trim()) {
@@ -3075,7 +3334,11 @@ async function attachTaskRunInTerminal(
 
 	const backendResolution = await resolveConfiguredTaskTerminalBackend();
 	if (!backendResolution.backend) {
-		return { ok: false, level: "warning", message: backendResolution.reason ?? "No task terminal backend is available." };
+		return {
+			ok: false,
+			level: "warning",
+			message: backendResolution.reason ?? "No task terminal backend is available.",
+		};
 	}
 	const title = `task ${run.runId} step ${targetStep.step}`;
 	const workspace = buildTaskSessionWorkspaceName(run, targetStep);
@@ -3114,13 +3377,26 @@ async function openTaskRunSession(
 	ctx: unknown,
 	run: TaskRunView,
 	preferredStep?: TaskRunStepView,
-): Promise<{ ok: boolean; opened?: boolean; level: "info" | "warning" | "error"; message?: string }> {
+): Promise<{
+	ok: boolean;
+	opened?: boolean;
+	level: "info" | "warning" | "error";
+	message?: string;
+}> {
 	const targetStep = selectTaskRunStepForOpen(run, preferredStep);
 	if (!targetStep) {
-		return { ok: false, level: "error", message: `Run ${run.runId} has no persisted child session to open.` };
+		return {
+			ok: false,
+			level: "error",
+			message: `Run ${run.runId} has no persisted child session to open.`,
+		};
 	}
 	if (!targetStep.snapshot.persist) {
-		return { ok: false, level: "error", message: `Run ${run.runId} step ${targetStep.step} is not persisted and cannot be opened.` };
+		return {
+			ok: false,
+			level: "error",
+			message: `Run ${run.runId} step ${targetStep.step} is not persisted and cannot be opened.`,
+		};
 	}
 	const childSessionPath = targetStep.snapshot.childSessionPath;
 	if (!childSessionPath.trim()) {
@@ -3163,13 +3439,21 @@ async function sendTaskSteeringMessage(
 	run: TaskRunView,
 	preferredStep: TaskRunStepView | undefined,
 	message: string,
-): Promise<{ ok: boolean; level: "info" | "warning" | "error"; message: string }> {
+): Promise<{
+	ok: boolean;
+	level: "info" | "warning" | "error";
+	message: string;
+}> {
 	const controllerResolution = resolveLiveTaskControllerForRun(run, preferredStep);
 	if (!controllerResolution.controller) {
-		return { ok: false, level: "error", message: controllerResolution.error ?? `Run ${run.runId} is not steerable right now.` };
+		return {
+			ok: false,
+			level: "error",
+			message: controllerResolution.error ?? `Run ${run.runId} is not steerable right now.`,
+		};
 	}
 	try {
-		const response = await sendLiveTaskRpcCommand(controllerResolution.controller, { type: "steer", message });
+		const response = await sendLiveTaskRpcCommand(controllerResolution.controller, { type: "steer", message }, { timeout: RPC_INTERACTION_TIMEOUT_MS });
 		if (response.success === false) {
 			return {
 				ok: false,
@@ -3191,11 +3475,7 @@ async function sendTaskSteeringMessage(
 	}
 }
 
-async function buildTaskViewerOverlayState(
-	scope: TasksScope,
-	run: TaskRunView,
-	preferredStep?: TaskRunStepView,
-): Promise<{ overlayState: TaskViewerOverlayState; step?: TaskRunStepView }> {
+async function buildTaskViewerOverlayState(scope: TasksScope, run: TaskRunView, preferredStep?: TaskRunStepView): Promise<{ overlayState: TaskViewerOverlayState; step?: TaskRunStepView }> {
 	const inspectStep = selectTaskRunStepForInspect(run, preferredStep);
 	const detailText = await formatTaskRunDetails(scope, run, inspectStep);
 	const transcript = await readTaskTranscriptPreview(run, inspectStep);
@@ -3218,7 +3498,13 @@ async function buildTaskViewerOverlayState(
 }
 
 async function openTaskViewerOverlay(
-	ctx: { hasUI?: boolean; ui: { custom: <T>(factory: any, options?: any) => Promise<T | undefined>; notify(text: string, level?: "info" | "warning" | "error"): void } },
+	ctx: {
+		hasUI?: boolean;
+		ui: {
+			custom: <T>(factory: any, options?: any) => Promise<T | undefined>;
+			notify(text: string, level?: "info" | "warning" | "error"): void;
+		};
+	},
 	scope: TasksScope,
 	run: TaskRunView,
 	preferredStep?: TaskRunStepView,
@@ -3229,11 +3515,15 @@ async function openTaskViewerOverlay(
 	}
 	const state = await buildTaskViewerOverlayState(scope, run, preferredStep);
 	const result = await ctx.ui.custom<TaskViewerOverlayResult | undefined>(
-		(_tui: unknown, theme: unknown, keybindings: unknown, done: (value: TaskViewerOverlayResult | undefined) => void) =>
-			new TaskViewerOverlay(theme, state.overlayState, keybindings as any, done),
+		(_tui: unknown, theme: unknown, keybindings: unknown, done: (value: TaskViewerOverlayResult | undefined) => void) => new TaskViewerOverlay(theme, state.overlayState, keybindings as any, done),
 		{
 			overlay: true,
-			overlayOptions: { anchor: "right-center", width: "55%", maxHeight: "85%", margin: 1 },
+			overlayOptions: {
+				anchor: "right-center",
+				width: "55%",
+				maxHeight: "85%",
+				margin: 1,
+			},
 		},
 	);
 	if (!result || result.action === "close") return;
@@ -3266,15 +3556,28 @@ async function revealTaskRunOrigin(
 		sessionManager: { getSessionFile?: () => string | undefined };
 		navigateTree?: (
 			targetId: string,
-			options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
+			options?: {
+				summarize?: boolean;
+				customInstructions?: string;
+				replaceInstructions?: boolean;
+				label?: string;
+			},
 		) => Promise<{ editorText?: string; cancelled: boolean }>;
 	},
 	run: TaskRunView,
 	preferredStep?: TaskRunStepView,
-): Promise<{ ok: boolean; level: "info" | "warning" | "error"; message: string }> {
+): Promise<{
+	ok: boolean;
+	level: "info" | "warning" | "error";
+	message: string;
+}> {
 	const origin = resolveTaskRunOriginSnapshot(run, preferredStep);
 	if (!origin) {
-		return { ok: false, level: "error", message: `Run ${run.runId} has no recorded origin metadata.` };
+		return {
+			ok: false,
+			level: "error",
+			message: `Run ${run.runId} has no recorded origin metadata.`,
+		};
 	}
 	const targetId = origin.originUserEntryId ?? origin.originEntryId;
 	const preview = origin.originPreview ?? "(origin preview unavailable)";
@@ -3288,9 +3591,16 @@ async function revealTaskRunOrigin(
 		normalizeSessionPathForComparison(currentSessionFile) === normalizeSessionPathForComparison(sourceSessionFile)
 	) {
 		try {
-			const result = await ctx.navigateTree(targetId, { summarize: false, label: "task-origin" });
+			const result = await ctx.navigateTree(targetId, {
+				summarize: false,
+				label: "task-origin",
+			});
 			if (result.cancelled) {
-				return { ok: false, level: "warning", message: `Origin navigation for run ${run.runId} was cancelled.` };
+				return {
+					ok: false,
+					level: "warning",
+					message: `Origin navigation for run ${run.runId} was cancelled.`,
+				};
 			}
 			return {
 				ok: true,
@@ -3391,8 +3701,7 @@ async function browseTaskRuns(ctx: any, scope: TasksScope, runs: TaskRunView[]):
 		let selectedStep = liveSteps[0];
 		if (liveSteps.length > 1) {
 			const stepOptions = liveSteps.map(
-				(candidate) =>
-					`step ${candidate.step} · ${candidate.snapshot.childSessionId.slice(0, 8)} · ${candidate.snapshot.taskPreview || candidate.snapshot.childSessionName || "running"}`,
+				(candidate) => `step ${candidate.step} · ${candidate.snapshot.childSessionId.slice(0, 8)} · ${candidate.snapshot.taskPreview || candidate.snapshot.childSessionName || "running"}`,
 			);
 			const selectedStepLabel = await ctx.ui.select(`Steer run ${selectedRun.runId}`, stepOptions);
 			if (!selectedStepLabel) return true;
@@ -3551,26 +3860,45 @@ function isExplicitSessionOpenSuccess(result: unknown): boolean {
 	return false;
 }
 
-async function tryOpenTaskSession(
-	ctx: unknown,
-	sessionPath: string,
-	options: TryOpenTaskSessionOptions = {},
-): Promise<{ opened: boolean; message: string }> {
+async function tryOpenTaskSession(ctx: unknown, sessionPath: string, options: TryOpenTaskSessionOptions = {}): Promise<{ opened: boolean; message: string }> {
 	if (!isRecord(ctx)) {
-		return { opened: false, message: "Session switching is unavailable in this extension context." };
+		return {
+			opened: false,
+			message: "Session switching is unavailable in this extension context.",
+		};
 	}
 
-	const descriptors: Array<{ owner: Record<string, unknown>; key: string; supportsOptionsArg: boolean }> = [
+	const descriptors: Array<{
+		owner: Record<string, unknown>;
+		key: string;
+		supportsOptionsArg: boolean;
+	}> = [
 		{ owner: ctx, key: "openSession", supportsOptionsArg: true },
 		{ owner: ctx, key: "resumeSession", supportsOptionsArg: true },
 		{ owner: ctx, key: "switchSession", supportsOptionsArg: true },
 	];
 	const sessionManager = isRecord(ctx.sessionManager) ? ctx.sessionManager : undefined;
 	if (sessionManager) {
-		descriptors.push({ owner: sessionManager, key: "openSession", supportsOptionsArg: true });
-		descriptors.push({ owner: sessionManager, key: "resumeSession", supportsOptionsArg: true });
-		descriptors.push({ owner: sessionManager, key: "switchSession", supportsOptionsArg: true });
-		descriptors.push({ owner: sessionManager, key: "open", supportsOptionsArg: false });
+		descriptors.push({
+			owner: sessionManager,
+			key: "openSession",
+			supportsOptionsArg: true,
+		});
+		descriptors.push({
+			owner: sessionManager,
+			key: "resumeSession",
+			supportsOptionsArg: true,
+		});
+		descriptors.push({
+			owner: sessionManager,
+			key: "switchSession",
+			supportsOptionsArg: true,
+		});
+		descriptors.push({
+			owner: sessionManager,
+			key: "open",
+			supportsOptionsArg: false,
+		});
 	}
 	let attempted = false;
 	let lastError: string | undefined;
@@ -3599,7 +3927,10 @@ async function tryOpenTaskSession(
 			try {
 				const result = await Promise.resolve((fn as (...fnArgs: unknown[]) => unknown).call(descriptor.owner, ...args));
 				if (openedWithVerifiedReplacementCtx || isExplicitSessionOpenSuccess(result)) {
-					return { opened: true, message: `Opened target session via ${descriptor.key}.` };
+					return {
+						opened: true,
+						message: `Opened target session via ${descriptor.key}.`,
+					};
 				}
 				if (isRecord(result) && (result.cancelled === true || result.canceled === true)) {
 					return { opened: false, message: "Session open canceled." };
@@ -3607,7 +3938,10 @@ async function tryOpenTaskSession(
 				if (result === false) continue;
 			} catch (error) {
 				if (openedWithVerifiedReplacementCtx) {
-					return { opened: true, message: `Opened target session via ${descriptor.key}.` };
+					return {
+						opened: true,
+						message: `Opened target session via ${descriptor.key}.`,
+					};
 				}
 				lastError = error instanceof Error ? error.message : String(error);
 			}
@@ -3615,7 +3949,10 @@ async function tryOpenTaskSession(
 	}
 
 	if (!attempted) {
-		return { opened: false, message: "Session switching is unavailable in this extension context." };
+		return {
+			opened: false,
+			message: "Session switching is unavailable in this extension context.",
+		};
 	}
 	return {
 		opened: false,
@@ -3633,14 +3970,28 @@ const TaskModeSchema = StringEnum(["single", "parallel", "chain"] as const, {
 });
 
 const TaskStep = Type.Object({
-	task: Type.String({ description: "Work request; chain steps may use {previous}." }),
-	agent: Type.Optional(Type.String({ description: "Agent name. Required unless `prompt` or a behavior-bearing `profile` is provided." })),
-	profile: Type.Optional(Type.String({ description: "Profile name. Can provide worker behavior when the profile has instructions." })),
+	task: Type.String({
+		description: "Work request; chain steps may use {previous}.",
+	}),
+	agent: Type.Optional(
+		Type.String({
+			description: "Agent name. Required unless `prompt` or a behavior-bearing `profile` is provided.",
+		}),
+	),
+	profile: Type.Optional(
+		Type.String({
+			description: "Profile name. Can provide worker behavior when the profile has instructions.",
+		}),
+	),
 	effort: Type.Optional(Type.String({ description: "Effort preset." })),
 	cwd: Type.Optional(Type.String({ description: "Working dir." })),
 	model: Type.Optional(Type.String({ description: "Model override." })),
 	skills: Type.Optional(Type.Array(Type.String(), { description: "Skill names." })),
-	prompt: Type.Optional(Type.String({ description: "Behavioral system prompt. Required for generic workers with no `agent`." })),
+	prompt: Type.Optional(
+		Type.String({
+			description: "Behavioral system prompt. Required for generic workers with no `agent`.",
+		}),
+	),
 	context: Type.Optional(ContextModeSchema),
 });
 
@@ -3651,30 +4002,26 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
 
 const SubagentParams = Type.Object({
 	mode: Type.Optional(TaskModeSchema),
-	steps: Type.Array(TaskStep, { description: "Task step(s). Single mode uses one step." }),
+	steps: Type.Array(TaskStep, {
+		description: "Task step(s). Single mode uses one step.",
+	}),
 	agentScope: Type.Optional(AgentScopeSchema),
 });
 
-export const AGENT_COMPLETIONS = [
-	{ value: "clear", label: "clear: clear current agent selection" },
-] as const;
+export const AGENT_COMPLETIONS = [{ value: "clear", label: "clear: clear current agent selection" }] as const;
 
-export const PROFILE_COMPLETIONS = [
-	{ value: "clear", label: "clear: clear current profile selection" },
-] as const;
+export const PROFILE_COMPLETIONS = [{ value: "clear", label: "clear: clear current profile selection" }] as const;
 
-export const EFFORT_COMPLETIONS = [
-	{ value: "clear", label: "clear: clear current effort selection" },
-] as const;
+export const EFFORT_COMPLETIONS = [{ value: "clear", label: "clear: clear current effort selection" }] as const;
 
 export const TASKS_COMPLETIONS = [
-	{ value: "list",   label: "list: list current task runs" },
-	{ value: "show",   label: "show: show details for a task run" },
-	{ value: "view",   label: "view: open viewer for a task run" },
-	{ value: "open",   label: "open: open a task run session" },
+	{ value: "list", label: "list: list current task runs" },
+	{ value: "show", label: "show: show details for a task run" },
+	{ value: "view", label: "view: open viewer for a task run" },
+	{ value: "open", label: "open: open a task run session" },
 	{ value: "attach", label: "attach: attach to a task run terminal" },
 	{ value: "origin", label: "origin: reveal the origin of a task run" },
-	{ value: "steer",  label: "steer: send a steering message to a task run" },
+	{ value: "steer", label: "steer: send a steering message to a task run" },
 	{ value: "parent", label: "parent: open the parent session" },
 	{ value: "toggle", label: "toggle: toggle the task widget" },
 ] as const;
@@ -3693,7 +4040,10 @@ export default function (pi: ExtensionAPI) {
 				"Trust all project-local configuration in this directory?",
 			].join("\n\n"),
 		);
-		return { trusted: trusted ? ("yes" as const) : ("no" as const), remember: true };
+		return {
+			trusted: trusted ? ("yes" as const) : ("no" as const),
+			remember: true,
+		};
 	});
 
 	const normalizeMainAgentSelection = (value: unknown): string | undefined => {
@@ -3742,9 +4092,7 @@ export default function (pi: ExtensionAPI) {
 		const rawCliAgent = pi.getFlag("agent");
 		const rawCliProfile = pi.getFlag("profile");
 		const rawCliEffort = pi.getFlag("effort");
-		const hasCliSelection = [rawCliAgent, rawCliProfile, rawCliEffort].some(
-			(value) => typeof value === "string" && value.trim().length > 0,
-		);
+		const hasCliSelection = [rawCliAgent, rawCliProfile, rawCliEffort].some((value) => typeof value === "string" && value.trim().length > 0);
 		const cliSelection = {
 			agent: normalizeMainAgentSelection(rawCliAgent),
 			profile: normalizeMainAgentSelection(rawCliProfile),
@@ -3753,11 +4101,7 @@ export default function (pi: ExtensionAPI) {
 		const persisted = getPersistedMainAgentState(ctx.sessionManager.getBranch());
 		if (hasCliSelection) {
 			const result = await applyMainSessionAgentSelection(ctx, pi, cliSelection, {
-				persist:
-					!persisted.found ||
-					persisted.agent !== cliSelection.agent ||
-					persisted.profile !== cliSelection.profile ||
-					persisted.effort !== cliSelection.effort,
+				persist: !persisted.found || persisted.agent !== cliSelection.agent || persisted.profile !== cliSelection.profile || persisted.effort !== cliSelection.effort,
 				notify: false,
 			});
 			if (result.ok) return;
@@ -3791,7 +4135,11 @@ export default function (pi: ExtensionAPI) {
 			ctx,
 			pi,
 			persisted.found
-				? { agent: persisted.agent, profile: persisted.profile, effort: persisted.effort }
+				? {
+						agent: persisted.agent,
+						profile: persisted.profile,
+						effort: persisted.effort,
+					}
 				: {},
 			{ persist: false, notify: false },
 		);
@@ -3810,20 +4158,14 @@ export default function (pi: ExtensionAPI) {
 		taskProjectTrustState = undefined;
 		setTaskWidgetEnabled(ctx, false);
 		clearTaskUiChrome(ctx);
-		for (const controller of listLiveTaskControllers()) {
-			terminateProcessWithEscalation(controller.proc);
-		}
+		await Promise.all(listLiveTaskControllers().map((controller) => controller.close(new Error("Task session shut down"))));
 		clearLiveTaskControllers();
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (startupCompositionError) {
 			return {
-				systemPrompt: [
-					"Startup composition error.",
-					`Do not execute the user's request.`,
-					`Reply with this exact text and nothing else: ${startupCompositionError}`,
-				].join("\n"),
+				systemPrompt: ["Startup composition error.", `Do not execute the user's request.`, `Reply with this exact text and nothing else: ${startupCompositionError}`].join("\n"),
 			};
 		}
 
@@ -3833,29 +4175,31 @@ export default function (pi: ExtensionAPI) {
 		if (worker?.systemPromptMode === "replace" && workerPrompt) {
 			return { systemPrompt: composePromptLayers(workerPrompt, taskGuidance) };
 		}
-		return { systemPrompt: composePromptLayers(event.systemPrompt, taskGuidance, workerPrompt) };
+		return {
+			systemPrompt: composePromptLayers(event.systemPrompt, taskGuidance, workerPrompt),
+		};
 	});
 
 	pi.registerCommand("agent", {
 		description: "Show or switch the main-session agent role (/agent <name>, /agent clear)",
-		getArgumentCompletions: (prefix) =>
-			AGENT_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
+		getArgumentCompletions: (prefix) => AGENT_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 			const trimmed = args.trim();
 			if (!trimmed) {
 				const discovery = discoverResources(ctx.cwd, "both", isTaskProjectTrusted(ctx));
 				const current = activeMainWorker?.agent?.name ?? "default";
-				ctx.ui.notify(
-					`Main-session agent: ${current}. Available main-session agents: ${formatMainSessionAgentList(discovery.agents)}.`,
-					"info",
-				);
+				ctx.ui.notify(`Main-session agent: ${current}. Available main-session agents: ${formatMainSessionAgentList(discovery.agents)}.`, "info");
 				return;
 			}
 			const result = await applyMainSessionAgentSelection(
 				ctx,
 				pi,
-				{ agent: normalizeMainAgentSelection(trimmed), profile: activeMainWorker?.profile?.name, effort: activeMainWorker?.effort?.name },
+				{
+					agent: normalizeMainAgentSelection(trimmed),
+					profile: activeMainWorker?.profile?.name,
+					effort: activeMainWorker?.effort?.name,
+				},
 				{ persist: true, notify: true },
 			);
 			if (result.ok) {
@@ -3867,8 +4211,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.registerCommand("profile", {
 		description: "Show or switch the main-session profile (/profile <name>, /profile clear)",
-		getArgumentCompletions: (prefix) =>
-			PROFILE_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
+		getArgumentCompletions: (prefix) => PROFILE_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 			const trimmed = args.trim();
@@ -3880,7 +4223,11 @@ export default function (pi: ExtensionAPI) {
 			const result = await applyMainSessionAgentSelection(
 				ctx,
 				pi,
-				{ agent: activeMainWorker?.agent?.name, profile: normalizeMainAgentSelection(trimmed), effort: activeMainWorker?.effort?.name },
+				{
+					agent: activeMainWorker?.agent?.name,
+					profile: normalizeMainAgentSelection(trimmed),
+					effort: activeMainWorker?.effort?.name,
+				},
 				{ persist: true, notify: true },
 			);
 			if (result.ok) {
@@ -3892,8 +4239,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.registerCommand("effort", {
 		description: "Show or switch the main-session effort (/effort <name>, /effort clear)",
-		getArgumentCompletions: (prefix) =>
-			EFFORT_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
+		getArgumentCompletions: (prefix) => EFFORT_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 			const trimmed = args.trim();
@@ -3905,7 +4251,11 @@ export default function (pi: ExtensionAPI) {
 			const result = await applyMainSessionAgentSelection(
 				ctx,
 				pi,
-				{ agent: activeMainWorker?.agent?.name, profile: activeMainWorker?.profile?.name, effort: normalizeMainAgentSelection(trimmed) },
+				{
+					agent: activeMainWorker?.agent?.name,
+					profile: activeMainWorker?.profile?.name,
+					effort: normalizeMainAgentSelection(trimmed),
+				},
 				{ persist: true, notify: true },
 			);
 			if (result.ok) {
@@ -3918,8 +4268,7 @@ export default function (pi: ExtensionAPI) {
 
 	const tasksCommand = {
 		description: `Inspect persisted task child sessions. Usage: ${TASKS_COMMAND_USAGE}`,
-		getArgumentCompletions: (prefix: string) =>
-			TASKS_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
+		getArgumentCompletions: (prefix: string) => TASKS_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			const parsed = parseTasksCommand(args);
 			if (parsed.action === "open" || parsed.action === "parent" || parsed.action === "origin") {
@@ -3948,19 +4297,14 @@ export default function (pi: ExtensionAPI) {
 			if (parsed.action === "parent") {
 				const currentSessionFile = ctx.sessionManager.getSessionFile?.();
 				if (!currentSessionFile) {
-					ctx.ui.notify(
-						"Current session is not persisted. No parent session can be resolved automatically (detached or non-persisted session).",
-						"error",
-					);
+					ctx.ui.notify("Current session is not persisted. No parent session can be resolved automatically (detached or non-persisted session).", "error");
 					return;
 				}
 
 				const parentResolution = await resolveParentSessionForCurrentSession(currentSessionFile, ctx.sessionManager.getBranch());
 				if (!parentResolution.resolved) {
 					const baseMessage = parentResolution.error ?? "Failed to resolve parent session.";
-					const guidance = parentResolution.noParent
-						? ""
-						: "\nIf you know the parent session file, open it via /resume or run: pi --session \"<parent-session-file>\"";
+					const guidance = parentResolution.noParent ? "" : '\nIf you know the parent session file, open it via /resume or run: pi --session "<parent-session-file>"';
 					ctx.ui.notify(`${baseMessage}${guidance}`, "error");
 					return;
 				}
@@ -3974,10 +4318,7 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				if (!fs.existsSync(parentSessionPath)) {
-					ctx.ui.notify(
-						`Resolved parent session is missing: ${shortenHomePath(parentSessionPath)}.\n${manualParentSessionOpenInstruction(parentSessionPath)}`,
-						"error",
-					);
+					ctx.ui.notify(`Resolved parent session is missing: ${shortenHomePath(parentSessionPath)}.\n${manualParentSessionOpenInstruction(parentSessionPath)}`, "error");
 					return;
 				}
 
@@ -4102,7 +4443,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use `task` for substantial focused delegation; skip it for trivial work.",
 			"Every `task` step must define worker behavior: set `agent` (for example `reviewer`, `thinker`, or `implementer`) or provide a behavioral `prompt`; do not send bare `{ task: ... }` steps.",
-			"Use `mode: \"parallel\"` for independent steps and `mode: \"chain\"` only when later steps need `{previous}`.",
+			'Use `mode: "parallel"` for independent steps and `mode: "chain"` only when later steps need `{previous}`.',
 		],
 		parameters: SubagentParams,
 		prepareArguments: prepareTaskToolArguments,
@@ -4152,7 +4493,12 @@ export default function (pi: ExtensionAPI) {
 			const invalidParameters = (message: string) => {
 				const available = callableAgents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
 				return {
-					content: [{ type: "text" as const, text: `${message}\nAvailable task agents: ${available}` }],
+					content: [
+						{
+							type: "text" as const,
+							text: `${message}\nAvailable task agents: ${available}`,
+						},
+					],
 					details: makeDetails(detailMode)([]),
 				};
 			};
@@ -4170,11 +4516,7 @@ export default function (pi: ExtensionAPI) {
 				return invalidParameters("Invalid parameters. Single mode requires exactly one step.");
 			}
 
-			const taskOrigin = resolveTaskOriginForBranch(
-				ctx.sessionManager.getBranch(),
-				createTaskPreview,
-				ctx.sessionManager.getLeafId?.(),
-			);
+			const taskOrigin = resolveTaskOriginForBranch(ctx.sessionManager.getBranch(), createTaskPreview, ctx.sessionManager.getLeafId?.());
 
 			if (hasRuntimePersistOverride(params)) {
 				throwTaskError("Invalid parameters. Runtime persist overrides are not supported.", makeDetails(mode)([]));
@@ -4183,18 +4525,12 @@ export default function (pi: ExtensionAPI) {
 			if (mode !== "chain") {
 				const invalidStep = stepsToRun.findIndex((step) => hasPreviousPlaceholder(step.task));
 				if (invalidStep !== -1) {
-					throwTaskError(
-						`Invalid task at step ${invalidStep + 1}: {previous} is only supported in chain mode.`,
-						makeDetails(mode)([]),
-					);
+					throwTaskError(`Invalid task at step ${invalidStep + 1}: {previous} is only supported in chain mode.`, makeDetails(mode)([]));
 				}
 			}
 
 			if (mode === "parallel" && stepsToRun.length > MAX_PARALLEL_TASKS) {
-				throwTaskError(
-					`Too many parallel tasks (${stepsToRun.length}). Max is ${MAX_PARALLEL_TASKS}.`,
-					makeDetails("parallel")([]),
-				);
+				throwTaskError(`Too many parallel tasks (${stepsToRun.length}). Max is ${MAX_PARALLEL_TASKS}.`, makeDetails("parallel")([]));
 			}
 
 			let preparedSteps: PreparedTaskStep[] = [];
@@ -4253,11 +4589,9 @@ export default function (pi: ExtensionAPI) {
 					});
 					results.push(result);
 
-					const isError =
-						result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+					const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 					if (isError) {
-						const errorMsg =
-							result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+						const errorMsg = result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
 						throwTaskError(
 							`Chain stopped at step ${preparedStep.step} (${preparedStep.rawStep.agent ?? preparedStep.rawStep.profile ?? "generic"}): ${errorMsg}\n\n${formatChainResults(results)}`,
 							makeDetails("chain")(results),
@@ -4286,7 +4620,15 @@ export default function (pi: ExtensionAPI) {
 						exitCode: -1,
 						messages: [],
 						stderr: "",
-						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							cost: 0,
+							contextTokens: 0,
+							turns: 0,
+						},
 						model: preparedStep.worker.model,
 						step: preparedStep.step,
 						sessionMode: preparedStep.session.mode,
@@ -4302,7 +4644,10 @@ export default function (pi: ExtensionAPI) {
 						const done = allResults.filter((r) => r.exitCode !== -1).length;
 						onUpdate({
 							content: [
-								{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running...` },
+								{
+									type: "text",
+									text: `Parallel: ${done}/${allResults.length} done, ${running} running...`,
+								},
 							],
 							details: makeDetails("parallel")([...allResults]),
 						});
@@ -4343,6 +4688,20 @@ export default function (pi: ExtensionAPI) {
 						emitParallelUpdate();
 						return result;
 					},
+					{
+						isCancelled: () => signal?.aborted === true,
+						onCancelled: (_preparedStep, index) => {
+							const cancelled = {
+								...allResults[index],
+								exitCode: 130,
+								stopReason: "aborted" as const,
+								errorMessage: "Task was aborted before starting",
+							};
+							allResults[index] = cancelled;
+							emitParallelUpdate();
+							return cancelled;
+						},
+					},
 				);
 
 				return {
@@ -4381,19 +4740,28 @@ export default function (pi: ExtensionAPI) {
 				});
 				const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 				if (isError) {
-					const errorMsg =
-						result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+					const errorMsg = result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
 					throwTaskError(`Agent ${result.stopReason || "failed"}: ${errorMsg}`, makeDetails("single")([result]));
 				}
 				return {
-					content: [{ type: "text", text: truncateOutput(getFinalOutput(result.messages)) || "(no output)" }],
+					content: [
+						{
+							type: "text",
+							text: truncateOutput(getFinalOutput(result.messages)) || "(no output)",
+						},
+					],
 					details: makeDetails("single")([result]),
 				};
 			}
 
 			const available = callableAgents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
 			return {
-				content: [{ type: "text", text: `Invalid parameters. Available task agents: ${available}` }],
+				content: [
+					{
+						type: "text",
+						text: `Invalid parameters. Available task agents: ${available}`,
+					},
+				],
 				details: makeDetails("single")([]),
 			};
 		},
@@ -4406,7 +4774,9 @@ export default function (pi: ExtensionAPI) {
 				const tasks = steps.map((step) => step.task.replace(/\{previous\}/g, "").trim());
 				const text =
 					formatTaskCallHeading("chain", theme, steps.length) +
-					formatTaskSnippetLines(tasks, theme.fg.bind(theme), { numbered: true });
+					formatTaskSnippetLines(tasks, theme.fg.bind(theme), {
+						numbered: true,
+					});
 				return new Text(text, 0, 0);
 			}
 			if (mode === "parallel" && steps.length > 0) {
@@ -4421,7 +4791,10 @@ export default function (pi: ExtensionAPI) {
 			const task = steps[0]?.task ?? "...";
 			const text =
 				formatTaskCallHeading("simple", theme) +
-				formatTaskSnippetLines([task], theme.fg.bind(theme), { maxItems: 1, maxLength: 80 });
+				formatTaskSnippetLines([task], theme.fg.bind(theme), {
+					maxItems: 1,
+					maxLength: 80,
+				});
 			return new Text(text, 0, 0);
 		},
 
@@ -4431,7 +4804,6 @@ export default function (pi: ExtensionAPI) {
 				const text = result.content[0];
 				return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
 			}
-
 
 			const renderDisplayItems = (items: DisplayItem[], limit?: number) => {
 				const toShow = limit ? items.slice(-limit) : items;
@@ -4498,7 +4870,13 @@ export default function (pi: ExtensionAPI) {
 				if (expanded) {
 					const container = new Container();
 					let header = formatTaskHeader(
-						{ leadingIcon: icon, agent: r.agent, agentColor: "toolTitle", boldAgent: true, taskResult: r },
+						{
+							leadingIcon: icon,
+							agent: r.agent,
+							agentColor: "toolTitle",
+							boldAgent: true,
+							taskResult: r,
+						},
 						theme,
 					);
 					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
@@ -4507,7 +4885,13 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				let text = formatTaskHeader(
-					{ leadingIcon: icon, agent: r.agent, agentColor: "toolTitle", boldAgent: true, taskResult: r },
+					{
+						leadingIcon: icon,
+						agent: r.agent,
+						agentColor: "toolTitle",
+						boldAgent: true,
+						taskResult: r,
+					},
 					theme,
 				);
 				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
@@ -4525,7 +4909,14 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const aggregateUsage = (results: SingleResult[]) => {
-				const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+				const total = {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					cost: 0,
+					turns: 0,
+				};
 				for (const r of results) {
 					total.input += r.usage.input;
 					total.output += r.usage.output;
@@ -4543,16 +4934,7 @@ export default function (pi: ExtensionAPI) {
 
 				if (expanded) {
 					const container = new Container();
-					container.addChild(
-						new Text(
-							icon +
-								" " +
-								theme.fg("toolTitle", theme.bold("chain ")) +
-								theme.fg("accent", `${successCount}/${details.results.length} steps`),
-							0,
-							0,
-						),
-					);
+					container.addChild(new Text(icon + " " + theme.fg("toolTitle", theme.bold("chain ")) + theme.fg("accent", `${successCount}/${details.results.length} steps`), 0, 0));
 
 					for (const r of details.results) {
 						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
@@ -4579,16 +4961,17 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				// Collapsed view
-				let text =
-					icon +
-					" " +
-					theme.fg("toolTitle", theme.bold("chain ")) +
-					theme.fg("accent", `${successCount}/${details.results.length} steps`);
+				let text = icon + " " + theme.fg("toolTitle", theme.bold("chain ")) + theme.fg("accent", `${successCount}/${details.results.length} steps`);
 				for (const r of details.results) {
 					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${formatTaskHeader(
-						{ prefix: theme.fg("muted", `─── Step ${r.step}: `), agent: r.agent, taskResult: r, suffix: ` ${rIcon}` },
+						{
+							prefix: theme.fg("muted", `─── Step ${r.step}: `),
+							agent: r.agent,
+							taskResult: r,
+							suffix: ` ${rIcon}`,
+						},
 						theme,
 					)}`;
 					if (r.childSession) text += `\n${formatChildSessionCompact(r.childSession, theme.fg.bind(theme))}`;
@@ -4607,36 +4990,24 @@ export default function (pi: ExtensionAPI) {
 				const successCount = details.results.filter((r) => r.exitCode === 0).length;
 				const failCount = details.results.filter((r) => r.exitCode > 0).length;
 				const isRunning = running > 0;
-				const icon = isRunning
-					? theme.fg("warning", "⏳")
-					: failCount > 0
-						? theme.fg("warning", "◐")
-						: theme.fg("success", "✓");
-				const status = isRunning
-					? `${successCount + failCount}/${details.results.length} done, ${running} running`
-					: `${successCount}/${details.results.length} tasks`;
+				const icon = isRunning ? theme.fg("warning", "⏳") : failCount > 0 ? theme.fg("warning", "◐") : theme.fg("success", "✓");
+				const status = isRunning ? `${successCount + failCount}/${details.results.length} done, ${running} running` : `${successCount}/${details.results.length} tasks`;
 
 				if (expanded) {
 					const container = new Container();
-					container.addChild(
-						new Text(
-							`${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`,
-							0,
-							0,
-						),
-					);
+					container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`, 0, 0));
 
 					for (const r of details.results) {
-						const rIcon =
-							r.exitCode === -1
-								? theme.fg("warning", "⏳")
-								: r.exitCode === 0
-									? theme.fg("success", "✓")
-									: theme.fg("error", "✗");
+						const rIcon = r.exitCode === -1 ? theme.fg("warning", "⏳") : r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
 
 						container.addChild(new Spacer(1));
 						const taskHeader = formatTaskHeader(
-							{ prefix: theme.fg("muted", "─── "), agent: r.agent, taskResult: r, suffix: ` ${rIcon}` },
+							{
+								prefix: theme.fg("muted", "─── "),
+								agent: r.agent,
+								taskResult: r,
+								suffix: ` ${rIcon}`,
+							},
 							theme,
 						);
 						appendExpandedTaskResult(container, r, taskHeader);
@@ -4653,21 +5024,20 @@ export default function (pi: ExtensionAPI) {
 				// Collapsed view (or still running)
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
 				for (const r of details.results) {
-					const rIcon =
-						r.exitCode === -1
-							? theme.fg("warning", "⏳")
-							: r.exitCode === 0
-								? theme.fg("success", "✓")
-								: theme.fg("error", "✗");
+					const rIcon = r.exitCode === -1 ? theme.fg("warning", "⏳") : r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${formatTaskHeader(
-						{ prefix: theme.fg("muted", "─── "), agent: r.agent, taskResult: r, suffix: ` ${rIcon}` },
+						{
+							prefix: theme.fg("muted", "─── "),
+							agent: r.agent,
+							taskResult: r,
+							suffix: ` ${rIcon}`,
+						},
 						theme,
 					)}`;
 					if (r.childSession) text += `\n${formatChildSessionCompact(r.childSession, theme.fg.bind(theme))}`;
 					if ((r.uiNotices?.length ?? 0) > 0) text += `\n${formatTaskInlineNoticeLines(r.uiNotices ?? [], theme.fg.bind(theme))}`;
-					if (displayItems.length === 0 && (r.uiNotices?.length ?? 0) === 0)
-						text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
+					if (displayItems.length === 0 && (r.uiNotices?.length ?? 0) === 0) text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
 				if (!isRunning) {
@@ -4717,11 +5087,13 @@ export const __test__ = {
 	resolveModelFromEffort,
 	formatTaskDelegationGuidance,
 	resolveParentSessionForCurrentSession,
-	resolveTaskOriginForBranch: (entries: readonly SessionEntry[], leafId?: string | null) =>
-		resolveTaskOriginForBranch(entries, createTaskPreview, leafId),
+	resolveTaskOriginForBranch: (entries: readonly SessionEntry[], leafId?: string | null) => resolveTaskOriginForBranch(entries, createTaskPreview, leafId),
 	resolveWorkerConfig,
 	resolveTaskSelector,
 	setTaskWidgetEnabled,
 	terminateProcessWithEscalation,
+	mapWithConcurrencyLimit,
+	createUtf8StreamDecoder,
+	mapTransportClose,
 	createRpcCompletionCoordinator,
 };

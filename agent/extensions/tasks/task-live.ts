@@ -18,6 +18,11 @@ interface PendingRpcResponse {
 	reject: (error: Error) => void;
 }
 
+export interface LiveTaskRpcCommandOptions {
+	timeout?: number;
+	signal?: AbortSignal;
+}
+
 export interface LiveTaskController {
 	key: string;
 	toolCallId: string;
@@ -40,6 +45,7 @@ export interface LiveTaskController {
 	pendingFollowUpCount: number;
 	lastMessageCount: number;
 	syncCursor: number;
+	close: (error?: Error) => Promise<void>;
 }
 
 export interface LiveTaskRuntimeInfo {
@@ -54,6 +60,9 @@ export interface LiveTaskRuntimeInfo {
 	lastAssistantText?: string;
 	syncCursor?: number;
 }
+
+/** Default bound for RPC commands that do not provide a timeout. */
+export const DEFAULT_LIVE_TASK_RPC_TIMEOUT_MS = 30_000;
 
 const liveTaskControllers = new Map<string, LiveTaskController>();
 
@@ -103,19 +112,64 @@ export function rejectPendingRpcResponses(controller: LiveTaskController, error:
 	controller.pendingResponses.clear();
 }
 
+/** Wraps a controller shutdown path so every caller observes the same closure. */
+export function createIdempotentControllerClose(
+	closePath: (error: Error) => Promise<void>,
+): (error?: Error) => Promise<void> {
+	let closePromise: Promise<void> | undefined;
+	return (error = new Error("Task controller closed")) => {
+		closePromise ??= closePath(error);
+		return closePromise;
+	};
+}
+
 export function sendLiveTaskRpcCommand(
 	controller: LiveTaskController,
 	command: Record<string, unknown>,
+	options: LiveTaskRpcCommandOptions = {},
 ): Promise<RpcResponseEnvelope> {
 	const id = createRpcRequestId(typeof command.type === "string" ? command.type : "cmd");
 	const payload = { ...command, id };
 	return new Promise<RpcResponseEnvelope>((resolve, reject) => {
-		controller.pendingResponses.set(id, { resolve, reject });
-		try {
-			controller.proc.stdin.write(`${JSON.stringify(payload)}\n`);
-		} catch (error) {
+		let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+		let settled = false;
+		const cleanup = () => {
+			if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+			options.signal?.removeEventListener("abort", onAbort);
+		};
+		const settle = (action: () => void) => {
+			if (settled) return;
+			settled = true;
 			controller.pendingResponses.delete(id);
-			reject(error instanceof Error ? error : new Error(String(error)));
+			cleanup();
+			action();
+		};
+		const onAbort = () => settle(() => reject(new Error("Live task RPC command aborted")));
+		const pending: PendingRpcResponse = {
+			resolve: (response) => settle(() => resolve(response)),
+			reject: (error) => settle(() => reject(error)),
+		};
+		controller.pendingResponses.set(id, pending);
+		if (options.signal?.aborted) {
+			onAbort();
+			return;
+		}
+		if (options.signal) options.signal.addEventListener("abort", onAbort, { once: true });
+		const timeoutMs = options.timeout === undefined ? DEFAULT_LIVE_TASK_RPC_TIMEOUT_MS : options.timeout;
+		if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+			timeoutHandle = setTimeout(() => settle(() => reject(new Error("Live task RPC command timed out"))), timeoutMs);
+		}
+		const stdin = controller.proc.stdin;
+		if (stdin.destroyed || stdin.writable === false) {
+			settle(() => reject(new Error("Live task RPC stdin is not writable")));
+			return;
+		}
+		try {
+			stdin.write(`${JSON.stringify(payload)}\n`, (error?: Error | null) => {
+				if (error) settle(() => reject(error));
+			});
+		} catch (error) {
+			settle(() => reject(error instanceof Error ? error : new Error(String(error))));
 		}
 	});
 }

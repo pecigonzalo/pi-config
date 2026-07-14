@@ -256,6 +256,34 @@ describe("tasks extension UI chrome", () => {
 		expect(statusCalls).toEqual([["tasks.runs", undefined], ["tasks.runs", undefined]]);
 	});
 
+	it("awaits live controller shutdown and rejects pending RPCs", async () => {
+		const { eventHandlers } = createExtensionHarness();
+		const live = await import("./task-live.js");
+		let rejectPending: ((error: Error) => void) | undefined;
+		const pending = new Promise((_resolve, reject) => { rejectPending = reject; });
+		let releaseClose: (() => void) | undefined;
+		live.setLiveTaskController({
+			key: "shutdown-test",
+			close: async (error: Error = new Error("closed")) => {
+				rejectPending?.(error);
+				await new Promise<void>((resolve) => { releaseClose = resolve; });
+			},
+		} as any);
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			ui: { setWidget: () => {}, setStatus: () => {} },
+			sessionManager: { getSessionId: () => "shutdown", getSessionFile: () => undefined },
+		};
+		let shutdownFinished = false;
+		const shutdown = eventHandlers.session_shutdown?.({}, ctx).then(() => { shutdownFinished = true; });
+		await expect(pending).rejects.toThrow("shut down");
+		expect(shutdownFinished).toBe(false);
+		releaseClose?.();
+		await shutdown;
+		expect(live.listLiveTaskControllers()).toHaveLength(0);
+	});
+
 	it("toggles the task widget for the current session", async () => {
 		const { commandHandlers } = createExtensionHarness();
 		const widgetCalls: any[][] = [];
@@ -2286,13 +2314,105 @@ describe("tasks process termination escalation", () => {
 
 	it("does not escalate once close is observed", async () => {
 		const proc = new FakeProcess();
-		__test__.terminateProcessWithEscalation(proc as any, { timeoutMs: 20 });
+		const closure = __test__.terminateProcessWithEscalation(proc as any, { timeoutMs: 20 });
 		setTimeout(() => {
 			proc.exitCode = 0;
 			proc.emit("close", 0);
 		}, 5);
-		await new Promise((resolve) => setTimeout(resolve, 40));
+		await closure;
 		expect(proc.signals).toEqual(["SIGTERM"]);
+	});
+
+	it("escalates from TERM to KILL and awaits process close", async () => {
+		const proc = new FakeProcess();
+		let resolved = false;
+		const closure = __test__.terminateProcessWithEscalation(proc as any, { timeoutMs: 5 }).then(() => {
+			resolved = true;
+		});
+		await new Promise((resolve) => setTimeout(resolve, 15));
+		expect(proc.signals).toEqual(["SIGTERM", "SIGKILL"]);
+		expect(resolved).toBe(false);
+		proc.emit("close", null, "SIGKILL");
+		await closure;
+		expect(resolved).toBe(true);
+	});
+});
+
+describe("parallel cancellation", () => {
+	it("does not start queued work after cancellation", async () => {
+		const abortController = new AbortController();
+		const started: number[] = [];
+		let release: (() => void) | undefined;
+		const resultsPromise = __test__.mapWithConcurrencyLimit(
+			[0, 1, 2],
+			1,
+			async (item: number) => {
+				started.push(item);
+				await new Promise<void>((resolve) => { release = resolve; });
+				return item;
+			},
+			{
+				isCancelled: () => abortController.signal.aborted,
+				onCancelled: () => -1,
+			},
+		);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		abortController.abort();
+		release?.();
+		expect(await resultsPromise).toEqual([0, -1, -1]);
+		expect(started).toEqual([0]);
+	});
+});
+
+describe("tasks transport helpers", () => {
+	it("decodes split UTF-8 stderr and flushes an incomplete final sequence", () => {
+		let output = "";
+		const decoder = __test__.createUtf8StreamDecoder((text: string) => {
+			output += text;
+		});
+		const bytes = Buffer.from("A€");
+
+		decoder.write(bytes.subarray(0, 2));
+		decoder.write(bytes.subarray(2));
+		decoder.write(Buffer.from([0xe2, 0x82]));
+		decoder.flush();
+
+		expect(output).toBe("A€�");
+	});
+
+	it("maps natural nonzero exits and signals", () => {
+		expect(
+			__test__.mapTransportClose(7, null, {
+				aborted: false,
+				transportLabel: "Task process",
+			}),
+		).toEqual({ exitCode: 7 });
+		expect(
+			__test__.mapTransportClose(null, "SIGKILL", {
+				aborted: false,
+				transportLabel: "Task process",
+			}),
+		).toEqual({
+			exitCode: 1,
+			signalMessage: "Task process terminated by signal SIGKILL",
+		});
+	});
+
+	it("maps intentional settlement termination and aborts", () => {
+		expect(
+			__test__.mapTransportClose(null, "SIGTERM", {
+				aborted: false,
+				intentionalSignal: "SIGTERM",
+				transportLabel: "Task RPC process",
+			}),
+		).toEqual({ exitCode: 0 });
+		expect(
+			__test__.mapTransportClose(null, "SIGTERM", {
+				aborted: true,
+				intentionalSignal: "SIGTERM",
+				transportLabel: "Task RPC process",
+			}),
+		).toEqual({ exitCode: 130 });
 	});
 });
 
@@ -2323,16 +2443,36 @@ describe("tasks RPC completion coordination", () => {
 		};
 	}
 
-	it("terminates after agent_end when no follow-up work appears", async () => {
+	it("waits for agent_settled after agent_end", async () => {
 		const harness = createCompletionHarness();
 		harness.coordinator.onAgentEnd();
 
+		await new Promise((resolve) => setTimeout(resolve, 30));
 		expect(harness.terminateCount).toBe(0);
+
+		harness.coordinator.onAgentSettled();
 		await new Promise((resolve) => setTimeout(resolve, 30));
 		expect(harness.terminateCount).toBe(1);
 	});
 
-	it("waits for queued follow-up work to drain after agent_end", async () => {
+	it("resets settlement authorization on every agent_start", async () => {
+		const harness = createCompletionHarness();
+		harness.coordinator.onAgentStart();
+		harness.coordinator.onAgentSettled();
+		harness.controller.isStreaming = true;
+		harness.coordinator.onAgentStart();
+		harness.controller.isStreaming = false;
+		harness.coordinator.onQueueUpdate(0, 0);
+
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(0);
+
+		harness.coordinator.onAgentSettled();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(1);
+	});
+
+	it("waits for queued continuation and its settlement", async () => {
 		const harness = createCompletionHarness();
 		harness.coordinator.onAgentEnd();
 		harness.coordinator.onQueueUpdate(0, 1);
@@ -2343,11 +2483,12 @@ describe("tasks RPC completion coordination", () => {
 		harness.controller.isStreaming = true;
 		harness.coordinator.onAgentStart();
 		harness.coordinator.onQueueUpdate(0, 0);
+		harness.controller.isStreaming = false;
+		harness.coordinator.onAgentEnd();
 		await new Promise((resolve) => setTimeout(resolve, 30));
 		expect(harness.terminateCount).toBe(0);
 
-		harness.controller.isStreaming = false;
-		harness.coordinator.onAgentEnd();
+		harness.coordinator.onAgentSettled();
 		await new Promise((resolve) => setTimeout(resolve, 30));
 		expect(harness.terminateCount).toBe(1);
 	});
