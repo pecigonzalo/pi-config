@@ -160,7 +160,7 @@
       },
       {
         "tool": "bash",
-        "match": "^(cd|cat|rg|find|wc|grep|head|uniq|ls|sort|tail|tee|echo|printf|pwd|which|file|diff|stat|du|df|date|uname|env|printenv|type|true|false|test|mktemp|tr|jq|readlink|pwd)\\b",
+        "match": "^(cd|cat|rg|find|wc|grep|head|uniq|ls|nl|sort|tail|tee|echo|printf|pwd|which|file|diff|stat|du|df|date|uname|env|printenv|type|true|false|test|mktemp|tr|jq|readlink|strings|fd|pwd)\\b",
         "action": "allow",
       },
       {
