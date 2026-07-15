@@ -525,6 +525,7 @@ export class DefaultLspManagerService implements LspManagerService {
 	private readonly pendingClients = new Set<LspClientState>();
 	private readonly spawning = new Map<string, Promise<LspClientState | undefined>>();
 	private shuttingDown = false;
+	private shutdownPromise: Promise<void> | undefined;
 
 	constructor(private readonly cwd: string) {}
 
@@ -760,13 +761,16 @@ export class DefaultLspManagerService implements LspManagerService {
 	}
 
 	async shutdown(): Promise<void> {
+		if (this.shutdownPromise) return this.shutdownPromise;
 		this.shuttingDown = true;
-		const clients = collectUniqueClients(this.clients.values(), this.pendingClients.values());
-		this.clients.clear();
-		this.pendingClients.clear();
-		this.spawning.clear();
-
-		await Promise.all(clients.map((client) => this.shutdownClient(client)));
+		this.shutdownPromise = (async () => {
+			const clients = collectUniqueClients(this.clients.values(), this.pendingClients.values());
+			this.clients.clear();
+			this.pendingClients.clear();
+			this.spawning.clear();
+			await Promise.all(clients.map((client) => this.shutdownClient(client)));
+		})();
+		return this.shutdownPromise;
 	}
 
 	private resolvePath(filePath: string): string {
@@ -862,18 +866,24 @@ export class DefaultLspManagerService implements LspManagerService {
 				}
 			});
 			connection.onError(() => undefined);
-			connection.onClose(() => {
+			const markClientClosed = () => {
 				client.closed = true;
-			});
-			child.on("exit", () => {
-				client.closed = true;
-			});
-			child.on("error", () => {
-				client.closed = true;
-			});
+				const key = this.clientKey(server, root);
+				if (this.clients.get(key) === client) this.clients.delete(key);
+				client.listeners.clear();
+				client.openFiles.clear();
+				client.diagnostics.clear();
+			};
+			connection.onClose(markClientClosed);
+			child.on("exit", markClientClosed);
+			child.on("error", markClientClosed);
 
-			connection.listen();
 			this.pendingClients.add(client);
+			if (this.shuttingDown) {
+				await this.shutdownClient(client);
+				return undefined;
+			}
+			connection.listen();
 			await withTimeout(
 				connection.sendRequest(InitializeRequest.method, {
 					processId: process.pid,
@@ -907,7 +917,11 @@ export class DefaultLspManagerService implements LspManagerService {
 			this.sendNotification(client, InitializedNotification.type, {});
 			return client;
 		} catch {
-			if (child) child.kill();
+			if (child) {
+				child.kill();
+				await this.waitForProcessExit(child, 1000);
+				if (child.exitCode === null) child.kill("SIGKILL");
+			}
 			return undefined;
 		} finally {
 			for (const client of this.pendingClients) {
@@ -1044,7 +1058,21 @@ export class DefaultLspManagerService implements LspManagerService {
 		} catch {
 			// Ignore shutdown failures from already-dead language servers.
 		}
-		client.process.kill();
+		if (client.process.exitCode === null) client.process.kill();
+		await this.waitForProcessExit(client.process, 1000);
+		if (client.process.exitCode === null) client.process.kill("SIGKILL");
+		await this.waitForProcessExit(client.process, 1000);
+	}
+
+	private async waitForProcessExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
+		if (child.exitCode !== null) return;
+		await new Promise<void>((resolvePromise) => {
+			const timer = setTimeout(resolvePromise, timeoutMs);
+			child.once("exit", () => {
+				clearTimeout(timer);
+				resolvePromise();
+			});
+		});
 	}
 }
 
