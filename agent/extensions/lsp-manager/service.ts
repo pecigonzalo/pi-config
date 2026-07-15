@@ -45,6 +45,7 @@ export interface LspManagerServiceRequest {
 
 const INIT_TIMEOUT_MS = 30_000;
 const DEFAULT_DIAGNOSTIC_TIMEOUT_MS = 3_000;
+const PROCESS_EXIT_TIMEOUT_MS = 1_000;
 const MAX_OPEN_FILES = 40;
 const CONFIGURATION_SECTION_ROOTS = new Set([
 	"gopls",
@@ -173,7 +174,7 @@ interface LspClientState {
 	process: ChildProcessWithoutNullStreams;
 	connection: MessageConnection;
 	diagnostics: Map<string, Diagnostic[]>;
-	listeners: Map<string, Set<() => void>>;
+	listeners: Map<string, Set<(received: boolean) => void>>;
 	openFiles: Map<string, OpenDocumentState>;
 	closed: boolean;
 }
@@ -515,14 +516,99 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string, s
 	);
 }
 
-function collectUniqueClients<T>(clients: Iterable<T>, pendingClients: Iterable<T>): T[] {
-	return [...new Set([...clients, ...pendingClients])];
+function collectUniqueClients<T>(...clientGroups: Iterable<T>[]): T[] {
+	return [...new Set(clientGroups.flatMap((clients) => [...clients]))];
+}
+
+const processTerminations = new WeakMap<ChildProcessWithoutNullStreams, Promise<void>>();
+
+function processHasExited(child: ChildProcessWithoutNullStreams): boolean {
+	return child.exitCode !== null || child.signalCode !== null;
+}
+
+function waitForProcessExit(child: ChildProcessWithoutNullStreams, timeoutMs?: number): Promise<boolean> {
+	if (processHasExited(child)) return Promise.resolve(true);
+	return new Promise<boolean>((resolvePromise) => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let settled = false;
+		const finish = (exited: boolean) => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			child.removeListener("exit", onExit);
+			resolvePromise(exited);
+		};
+		const onExit = () => finish(true);
+		child.once("exit", onExit);
+		if (processHasExited(child)) {
+			finish(true);
+			return;
+		}
+		if (timeoutMs !== undefined) {
+			timer = setTimeout(() => finish(processHasExited(child)), timeoutMs);
+			timer.unref?.();
+		}
+	});
+}
+
+function terminateProcess(child: ChildProcessWithoutNullStreams, timeoutMs = PROCESS_EXIT_TIMEOUT_MS): Promise<void> {
+	const existing = processTerminations.get(child);
+	if (existing) return existing;
+
+	const termination = Promise.resolve().then(async () => {
+		if (processHasExited(child)) return;
+		child.kill("SIGTERM");
+		if (await waitForProcessExit(child, timeoutMs)) return;
+		if (!processHasExited(child)) child.kill("SIGKILL");
+		await waitForProcessExit(child);
+	});
+	processTerminations.set(child, termination);
+	return termination;
+}
+
+function markClientClosed(
+	client: LspClientState,
+	clients: Map<string, LspClientState>,
+	pendingClients: Set<LspClientState>,
+): void {
+	client.closed = true;
+	const key = `${client.id}:${client.root}`;
+	if (clients.get(key) === client) clients.delete(key);
+	pendingClients.delete(client);
+	for (const listeners of client.listeners.values()) {
+		for (const listener of listeners) listener(false);
+	}
+	client.listeners.clear();
+	client.openFiles.clear();
+	client.diagnostics.clear();
+}
+
+function registerClientLifecycle(
+	client: LspClientState,
+	clients: Map<string, LspClientState>,
+	pendingClients: Set<LspClientState>,
+	ownedClients: Set<LspClientState>,
+): void {
+	const closeClient = () => markClientClosed(client, clients, pendingClients);
+	const closeAndTerminate = () => {
+		closeClient();
+		void terminateProcess(client.process).catch(() => undefined);
+	};
+	const releaseOwnership = () => {
+		closeClient();
+		ownedClients.delete(client);
+	};
+	client.connection.onClose(closeAndTerminate);
+	client.process.on("error", closeAndTerminate);
+	client.process.on("exit", releaseOwnership);
+	client.process.on("close", releaseOwnership);
 }
 
 /** LSP service implementation backed by stdio language servers. */
 export class DefaultLspManagerService implements LspManagerService {
 	private readonly clients = new Map<string, LspClientState>();
 	private readonly pendingClients = new Set<LspClientState>();
+	private readonly ownedClients = new Set<LspClientState>();
 	private readonly spawning = new Map<string, Promise<LspClientState | undefined>>();
 	private shuttingDown = false;
 	private shutdownPromise: Promise<void> | undefined;
@@ -760,11 +846,15 @@ export class DefaultLspManagerService implements LspManagerService {
 		return items;
 	}
 
-	async shutdown(): Promise<void> {
+	shutdown(): Promise<void> {
 		if (this.shutdownPromise) return this.shutdownPromise;
 		this.shuttingDown = true;
 		this.shutdownPromise = (async () => {
-			const clients = collectUniqueClients(this.clients.values(), this.pendingClients.values());
+			const clients = collectUniqueClients(
+				this.clients.values(),
+				this.pendingClients.values(),
+				this.ownedClients.values(),
+			);
 			this.clients.clear();
 			this.pendingClients.clear();
 			this.spawning.clear();
@@ -804,7 +894,8 @@ export class DefaultLspManagerService implements LspManagerService {
 
 		const key = this.clientKey(server, root);
 		const existing = this.clients.get(key);
-		if (existing && !existing.closed) return existing;
+		if (existing && !existing.closed && !processHasExited(existing.process)) return existing;
+		if (existing) this.clients.delete(key);
 
 		let spawning = this.spawning.get(key);
 		if (!spawning) {
@@ -814,7 +905,7 @@ export class DefaultLspManagerService implements LspManagerService {
 		}
 
 		const client = await withAbort(spawning, signal).catch(() => undefined);
-		if (this.shuttingDown || isAborted(signal)) {
+		if (this.shuttingDown || isAborted(signal) || client?.closed || (client && processHasExited(client.process))) {
 			if (client) await this.shutdownClient(client);
 			return undefined;
 		}
@@ -862,21 +953,12 @@ export class DefaultLspManagerService implements LspManagerService {
 				const file = uriToPath(params.uri);
 				client.diagnostics.set(file, params.diagnostics ?? []);
 				for (const listener of client.listeners.get(file) ?? []) {
-					listener();
+					listener(true);
 				}
 			});
 			connection.onError(() => undefined);
-			const markClientClosed = () => {
-				client.closed = true;
-				const key = this.clientKey(server, root);
-				if (this.clients.get(key) === client) this.clients.delete(key);
-				client.listeners.clear();
-				client.openFiles.clear();
-				client.diagnostics.clear();
-			};
-			connection.onClose(markClientClosed);
-			child.on("exit", markClientClosed);
-			child.on("error", markClientClosed);
+			this.ownedClients.add(client);
+			registerClientLifecycle(client, this.clients, this.pendingClients, this.ownedClients);
 
 			this.pendingClients.add(client);
 			if (this.shuttingDown) {
@@ -910,18 +992,14 @@ export class DefaultLspManagerService implements LspManagerService {
 				signal,
 			);
 			this.pendingClients.delete(client);
-			if (this.shuttingDown || isAborted(signal)) {
+			if (this.shuttingDown || isAborted(signal) || client.closed || processHasExited(client.process)) {
 				await this.shutdownClient(client);
 				return undefined;
 			}
 			this.sendNotification(client, InitializedNotification.type, {});
 			return client;
 		} catch {
-			if (child) {
-				child.kill();
-				await this.waitForProcessExit(child, 1000);
-				if (child.exitCode === null) child.kill("SIGKILL");
-			}
+			if (child) await terminateProcess(child);
 			return undefined;
 		} finally {
 			for (const client of this.pendingClients) {
@@ -999,7 +1077,7 @@ export class DefaultLspManagerService implements LspManagerService {
 				return;
 			}
 			let settled = false;
-			const listeners = client.listeners.get(absolutePath) ?? new Set<() => void>();
+			const listeners = client.listeners.get(absolutePath) ?? new Set<(received: boolean) => void>();
 			let timer: ReturnType<typeof setTimeout>;
 			const finish = (value: boolean) => {
 				if (settled) return;
@@ -1010,7 +1088,7 @@ export class DefaultLspManagerService implements LspManagerService {
 				if (listeners.size === 0) client.listeners.delete(absolutePath);
 				resolvePromise(value);
 			};
-			const listener = () => finish(true);
+			const listener = (received: boolean) => finish(received);
 			const abortListener = () => finish(false);
 			timer = setTimeout(() => finish(false), timeoutMs);
 			timer.unref?.();
@@ -1039,40 +1117,30 @@ export class DefaultLspManagerService implements LspManagerService {
 	}
 
 	private async shutdownClient(client: LspClientState): Promise<void> {
-		client.closed = true;
-		try {
-			await Promise.race([
-				client.connection.sendRequest("shutdown"),
-				new Promise((resolvePromise) => setTimeout(resolvePromise, 1000)),
-			]);
-		} catch {
-			// Ignore shutdown failures from already-dead language servers.
+		const wasClosed = client.closed;
+		markClientClosed(client, this.clients, this.pendingClients);
+		if (!wasClosed && !processHasExited(client.process)) {
+			try {
+				await withTimeout(
+					Promise.resolve(client.connection.sendRequest("shutdown")),
+					PROCESS_EXIT_TIMEOUT_MS,
+					`${client.id} shutdown`,
+				);
+			} catch {
+				// Ignore shutdown failures from already-dead language servers.
+			}
+			try {
+				void Promise.resolve(client.connection.sendNotification("exit")).catch(() => undefined);
+			} catch {
+				// Ignore shutdown failures from already-dead language servers.
+			}
+			try {
+				client.connection.end();
+			} catch {
+				// Ignore shutdown failures from already-dead language servers.
+			}
 		}
-		try {
-			void Promise.resolve(client.connection.sendNotification("exit")).catch(() => undefined);
-		} catch {
-			// Ignore shutdown failures from already-dead language servers.
-		}
-		try {
-			client.connection.end();
-		} catch {
-			// Ignore shutdown failures from already-dead language servers.
-		}
-		if (client.process.exitCode === null) client.process.kill();
-		await this.waitForProcessExit(client.process, 1000);
-		if (client.process.exitCode === null) client.process.kill("SIGKILL");
-		await this.waitForProcessExit(client.process, 1000);
-	}
-
-	private async waitForProcessExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
-		if (child.exitCode !== null) return;
-		await new Promise<void>((resolvePromise) => {
-			const timer = setTimeout(resolvePromise, timeoutMs);
-			child.once("exit", () => {
-				clearTimeout(timer);
-				resolvePromise();
-			});
-		});
+		await terminateProcess(client.process);
 	}
 }
 
@@ -1083,9 +1151,14 @@ export const __test__ = {
 	findNearestRoot,
 	collectUniqueClients,
 	isAborted,
+	markClientClosed,
 	normalizePath,
+	processHasExited,
+	registerClientLifecycle,
 	resolveWorkspaceConfiguration,
 	serverForFile,
 	severityName,
+	terminateProcess,
+	waitForProcessExit,
 	withAbort,
 };
