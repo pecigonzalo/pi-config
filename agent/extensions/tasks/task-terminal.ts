@@ -35,7 +35,9 @@ export interface TaskTerminalLaunchResult {
 }
 
 export type TaskTerminalProbeResult =
-	{ status: "alive" } | { status: "stale"; error?: string } | { status: "unknown"; error?: string };
+	| { status: "alive" }
+	| { status: "stale"; error?: string }
+	| { status: "unknown"; error?: string };
 
 export interface TaskTerminalOpenSessionOptions {
 	sessionPath: string;

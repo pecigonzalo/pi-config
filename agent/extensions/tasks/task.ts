@@ -1701,7 +1701,8 @@ async function applyMainSessionAgentSelection(
 			};
 		}
 		const model = ctx.modelRegistry.find(resolvedModel.provider, resolvedModel.modelId) as
-			{ provider: string; id: string } | undefined;
+			| { provider: string; id: string }
+			| undefined;
 		if (!model)
 			return {
 				ok: false,
@@ -1887,7 +1888,8 @@ function readSessionHeaderStringField(
 	field: "id" | "parentSession",
 ): string | undefined {
 	const header = entries.find((entry) => (entry as { type?: unknown }).type === "session") as
-		(SessionEntry & { id?: unknown; parentSession?: unknown }) | undefined;
+		| (SessionEntry & { id?: unknown; parentSession?: unknown })
+		| undefined;
 	if (!header) return undefined;
 	const value = header[field];
 	if (typeof value !== "string") return undefined;
