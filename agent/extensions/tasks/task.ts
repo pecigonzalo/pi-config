@@ -512,16 +512,53 @@ async function relayTaskExtensionUiRequest(options: {
 	trackedStatusKeys?: Set<string>;
 	trackedWidgetKeys?: Set<string>;
 }): Promise<void> {
-	const { request, controller, parentUi, dialogSignal, sendResponse, trackedStatusKeys, trackedWidgetKeys } = options;
+	const {
+		request,
+		controller,
+		parentUi,
+		dialogSignal,
+		sendResponse: rawSendResponse,
+		trackedStatusKeys,
+		trackedWidgetKeys,
+	} = options;
 	const hasParentUi = parentUi?.hasUI === true && parentUi.ui;
 	const ui = parentUi?.ui;
 	const title = formatTaskExtensionUiTitle(controller, request.title);
 	const prefix = getTaskUiPrefix(controller);
-	const dialogOptions = getTaskExtensionUiDialogOptions(request.timeout, dialogSignal);
+	const receivedAt = Date.now();
+	const timeoutMs =
+		typeof request.timeout === "number" && Number.isFinite(request.timeout) && request.timeout > 0
+			? request.timeout
+			: undefined;
+	const deadline = timeoutMs === undefined ? undefined : receivedAt + timeoutMs;
+	let responseSent = false;
+	const sendOnce = async (payload: Record<string, unknown>) => {
+		if (responseSent) return;
+		responseSent = true;
+		await rawSendResponse(payload);
+	};
+	const sendResponse = sendOnce;
+	const cancelledResponse = (confirmed = false) =>
+		sendOnce({
+			type: "extension_ui_response",
+			id: request.id,
+			...(confirmed ? { confirmed: false } : { cancelled: true }),
+		});
+	const enqueueDialog = (
+		action: (dialogOptions: { timeout?: number; signal?: AbortSignal } | undefined) => Promise<void>,
+	) =>
+		enqueueTaskDialogRelay(async () => {
+			const remaining = deadline === undefined ? undefined : deadline - Date.now();
+			if (dialogSignal?.aborted || (remaining !== undefined && remaining <= 0)) {
+				await cancelledResponse(request.method === "confirm");
+				return;
+			}
+			await action(getTaskExtensionUiDialogOptions(remaining, dialogSignal));
+		});
 
 	switch (request.method) {
 		case "select": {
-			await enqueueTaskDialogRelay(async () => {
+			await enqueueDialog(async (dialogOptions) => {
 				if (!hasParentUi || typeof ui?.select !== "function" || dialogSignal?.aborted) {
 					await sendResponse({
 						type: "extension_ui_response",
@@ -547,7 +584,7 @@ async function relayTaskExtensionUiRequest(options: {
 			return;
 		}
 		case "confirm": {
-			await enqueueTaskDialogRelay(async () => {
+			await enqueueDialog(async (dialogOptions) => {
 				if (!hasParentUi || typeof ui?.confirm !== "function" || dialogSignal?.aborted) {
 					await sendResponse({
 						type: "extension_ui_response",
@@ -570,7 +607,7 @@ async function relayTaskExtensionUiRequest(options: {
 			return;
 		}
 		case "input": {
-			await enqueueTaskDialogRelay(async () => {
+			await enqueueDialog(async (dialogOptions) => {
 				if (!hasParentUi || typeof ui?.input !== "function" || dialogSignal?.aborted) {
 					await sendResponse({
 						type: "extension_ui_response",
@@ -593,7 +630,7 @@ async function relayTaskExtensionUiRequest(options: {
 			return;
 		}
 		case "editor": {
-			await enqueueTaskDialogRelay(async () => {
+			await enqueueDialog(async (dialogOptions) => {
 				if (!hasParentUi || typeof ui?.editor !== "function" || dialogSignal?.aborted) {
 					await sendResponse({
 						type: "extension_ui_response",
@@ -3476,7 +3513,7 @@ function syncTaskUiChrome(ctx: TaskUiChromeContext): void {
 	});
 	if (typeof ctx.ui.setWidget === "function") {
 		ctx.ui.setWidget("tasks.runs", buildTaskWidgetLines(buildTaskWidgetSummary(runs), ctx.ui.theme), {
-			placement: "aboveEditor",
+			placement: "belowEditor",
 		});
 	}
 	if (typeof ctx.ui.setStatus === "function") {
@@ -3484,16 +3521,22 @@ function syncTaskUiChrome(ctx: TaskUiChromeContext): void {
 	}
 }
 
-async function withTaskWidgetTemporarilyHidden<T>(ctx: TaskUiChromeContext, action: () => Promise<T>): Promise<T> {
+async function withTaskWidgetTemporarilyHidden<T>(
+	ctx: TaskUiChromeContext,
+	action: (onReplacement: () => void) => Promise<T>,
+): Promise<T> {
 	const wasEnabled = isTaskWidgetEnabled(ctx);
+	let replaced = false;
 	if (wasEnabled) {
 		setTaskWidgetEnabled(ctx, false);
 		clearTaskUiChrome(ctx);
 	}
 	try {
-		return await action();
+		return await action(() => {
+			replaced = true;
+		});
 	} finally {
-		if (wasEnabled) {
+		if (wasEnabled && !replaced) {
 			setTaskWidgetEnabled(ctx, true);
 			syncTaskUiChrome(ctx);
 		}
@@ -3765,6 +3808,7 @@ async function openTaskRunSession(
 	ctx: unknown,
 	run: TaskRunView,
 	preferredStep?: TaskRunStepView,
+	onReplacement?: () => void,
 ): Promise<{
 	ok: boolean;
 	opened?: boolean;
@@ -3812,6 +3856,7 @@ async function openTaskRunSession(
 		withSession: async (replacementCtx) => {
 			await notifyTaskSessionOpened(replacementCtx, openedMessage);
 		},
+		onReplacement,
 	});
 	if (openResult.opened) {
 		return { ok: true, opened: true, level: "info" };
@@ -3896,6 +3941,8 @@ async function buildTaskViewerOverlayState(
 async function openTaskViewerOverlay(
 	ctx: {
 		hasUI?: boolean;
+		mode?: string;
+		waitForIdle?: () => Promise<void>;
 		ui: {
 			custom: <T>(factory: any, options?: any) => Promise<T | undefined>;
 			notify(text: string, level?: "info" | "warning" | "error"): void;
@@ -3910,6 +3957,15 @@ async function openTaskViewerOverlay(
 		return;
 	}
 	const state = await buildTaskViewerOverlayState(scope, run, preferredStep);
+	if (ctx.mode !== "tui") {
+		const transcript = state.overlayState.transcript;
+		ctx.ui.notify(
+			`${state.overlayState.detailText}${transcript.lines.length > 0 ? `\n\nTranscript:\n${transcript.lines.join("\n")}` : ""}`,
+			"info",
+		);
+		return;
+	}
+	await ctx.waitForIdle?.();
 	const result = await ctx.ui.custom<TaskViewerOverlayResult | undefined>(
 		(
 			_tui: unknown,
@@ -3954,7 +4010,11 @@ async function openTaskViewerOverlay(
 
 async function revealTaskRunOrigin(
 	ctx: {
-		sessionManager: { getSessionFile?: () => string | undefined };
+		waitForIdle?: () => Promise<void>;
+		sessionManager: {
+			getSessionFile?: () => string | undefined;
+			getSessionId?: () => string | undefined;
+		};
 		navigateTree?: (
 			targetId: string,
 			options?: {
@@ -3983,15 +4043,21 @@ async function revealTaskRunOrigin(
 	const targetId = origin.originUserEntryId ?? origin.originEntryId;
 	const preview = origin.originPreview ?? "(origin preview unavailable)";
 	const currentSessionFile = ctx.sessionManager.getSessionFile?.();
+	const currentSessionId = ctx.sessionManager.getSessionId?.();
 	const sourceSessionFile = run.sourceSessionFile;
 	if (
 		targetId &&
 		typeof ctx.navigateTree === "function" &&
 		currentSessionFile &&
 		sourceSessionFile &&
-		normalizeSessionPathForComparison(currentSessionFile) === normalizeSessionPathForComparison(sourceSessionFile)
+		sessionIdentityMatchesTarget(
+			{ sessionPath: currentSessionFile, sessionId: currentSessionId },
+			normalizeSessionPathForComparison(sourceSessionFile),
+			run.sourceSessionId,
+		)
 	) {
 		try {
+			await ctx.waitForIdle?.();
 			const result = await ctx.navigateTree(targetId, {
 				summarize: false,
 				label: "task-origin",
@@ -4032,7 +4098,12 @@ async function revealTaskRunOrigin(
 	return { ok: true, level: "info", message: lines.join("\n") };
 }
 
-async function browseTaskRuns(ctx: any, scope: TasksScope, runs: TaskRunView[]): Promise<boolean> {
+async function browseTaskRuns(
+	ctx: any,
+	scope: TasksScope,
+	runs: TaskRunView[],
+	onReplacement?: () => void,
+): Promise<boolean> {
 	if (!ctx.hasUI) return false;
 	const runOptions = runs.map((run, index) => formatTaskRunSummary(run, index + 1, false));
 	const selectedRunLabel = await ctx.ui.select("Task runs", runOptions);
@@ -4148,7 +4219,7 @@ async function browseTaskRuns(ctx: any, scope: TasksScope, runs: TaskRunView[]):
 		}
 		targetStep = persistedSteps[stepIndex];
 	}
-	const openResult = await openTaskRunSession(ctx, selectedRun, targetStep);
+	const openResult = await openTaskRunSession(ctx, selectedRun, targetStep, onReplacement);
 	if (!openResult.opened) {
 		if (openResult.message) ctx.ui.notify(openResult.message, openResult.level);
 		syncTaskUiChrome(ctx);
@@ -4161,6 +4232,7 @@ type TaskSessionWithSessionCallback = (ctx: unknown) => Promise<void> | void;
 interface TryOpenTaskSessionOptions {
 	withSession?: TaskSessionWithSessionCallback;
 	targetSessionId?: string;
+	onReplacement?: () => void;
 }
 
 interface SessionIdentity {
@@ -4247,50 +4319,26 @@ function sessionIdentityMatchesTarget(
 	targetPath: string,
 	targetSessionId?: string,
 ): boolean {
-	if (identity.sessionPath) {
-		const candidatePath = normalizeSessionPathForComparison(identity.sessionPath);
-		if (candidatePath === targetPath) return true;
-	}
-	if (identity.sessionId && targetSessionId) {
-		const candidateId = identity.sessionId.trim();
-		const expectedId = targetSessionId.trim();
-		if (
-			candidateId &&
-			expectedId &&
-			(candidateId === expectedId || candidateId.startsWith(expectedId) || expectedId.startsWith(candidateId))
-		) {
-			return true;
-		}
-	}
-	return false;
-}
+	const hasPath = Boolean(identity.sessionPath);
+	const hasId = Boolean(identity.sessionId && targetSessionId);
+	if (!hasPath && !hasId) return false;
 
-function isExplicitSessionOpenSuccess(result: unknown): boolean {
-	if (result === true) return true;
-	if (!isRecord(result)) return false;
-	if (result.cancelled === true || result.canceled === true) return false;
-	if (
-		result.opened === true ||
-		result.ok === true ||
-		result.success === true ||
-		result.switched === true ||
-		result.resumed === true
-	) {
-		return true;
-	}
-	if (typeof result.status === "string") {
-		const status = result.status.toLowerCase();
-		if (
-			status === "opened" ||
-			status === "ok" ||
-			status === "success" ||
-			status === "switched" ||
-			status === "resumed"
-		) {
-			return true;
-		}
-	}
-	return false;
+	const pathMatches = hasPath && normalizeSessionPathForComparison(identity.sessionPath!) === targetPath;
+	const idMatches =
+		hasId &&
+		(() => {
+			const candidateId = identity.sessionId!.trim();
+			const expectedId = targetSessionId!.trim();
+			return (
+				candidateId.length > 0 &&
+				expectedId.length > 0 &&
+				(candidateId === expectedId || candidateId.startsWith(expectedId) || expectedId.startsWith(candidateId))
+			);
+		})();
+
+	// When both pieces of identity are available, accepting either one could
+	// mistake an unrelated session for the requested replacement.
+	return hasPath && hasId ? pathMatches && idMatches : Boolean(pathMatches || idMatches);
 }
 
 async function tryOpenTaskSession(
@@ -4351,6 +4399,7 @@ async function tryOpenTaskSession(
 			const replacementIdentity = readSessionIdentity(replacementCtx);
 			if (!sessionIdentityMatchesTarget(replacementIdentity, targetPath, options.targetSessionId)) return;
 			openedWithVerifiedReplacementCtx = true;
+			options.onReplacement?.();
 			await options.withSession?.(replacementCtx);
 		};
 
@@ -4362,10 +4411,13 @@ async function tryOpenTaskSession(
 
 		for (const args of argsToTry) {
 			try {
+				if (typeof (ctx as { waitForIdle?: () => Promise<void> }).waitForIdle === "function") {
+					await (ctx as { waitForIdle: () => Promise<void> }).waitForIdle();
+				}
 				const result = await Promise.resolve(
 					(fn as (...fnArgs: unknown[]) => unknown).call(descriptor.owner, ...args),
 				);
-				if (openedWithVerifiedReplacementCtx || isExplicitSessionOpenSuccess(result)) {
+				if (openedWithVerifiedReplacementCtx) {
 					return {
 						opened: true,
 						message: `Opened target session via ${descriptor.key}.`,
@@ -4376,12 +4428,9 @@ async function tryOpenTaskSession(
 				}
 				if (result === false) continue;
 			} catch (error) {
-				if (openedWithVerifiedReplacementCtx) {
-					return {
-						opened: true,
-						message: `Opened target session via ${descriptor.key}.`,
-					};
-				}
+				// Once replacement was verified, the old context is stale. Do not
+				// retry or report success after replacement-context callback failure.
+				if (openedWithVerifiedReplacementCtx) throw error;
 				lastError = error instanceof Error ? error.message : String(error);
 			}
 		}
@@ -4825,7 +4874,11 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (parsed.action === "list") {
-				if (await withTaskWidgetTemporarilyHidden(ctx, async () => browseTaskRuns(ctx, parsed.scope, runs)))
+				if (
+					await withTaskWidgetTemporarilyHidden(ctx, (onReplacement) =>
+						browseTaskRuns(ctx, parsed.scope, runs, onReplacement),
+					)
+				)
 					return;
 				ctx.ui.notify(formatTaskRunList(parsed.scope, runs), "info");
 				return;
@@ -4911,7 +4964,12 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(TASKS_NO_CURRENT_RUNS_MESSAGE, "info");
 				return;
 			}
-			if (await withTaskWidgetTemporarilyHidden(ctx, async () => browseTaskRuns(ctx, "current", runs))) return;
+			if (
+				await withTaskWidgetTemporarilyHidden(ctx, (onReplacement) =>
+					browseTaskRuns(ctx, "current", runs, onReplacement),
+				)
+			)
+				return;
 			ctx.ui.notify(formatTaskRunList("current", runs), "info");
 		},
 	});
@@ -5200,8 +5258,13 @@ export default function (pi: ExtensionAPI) {
 					{
 						isCancelled: () => signal?.aborted === true,
 						onCancelled: (_preparedStep, index) => {
-							const cancelled = {
-								...allResults[index],
+							const pendingResult = allResults[index];
+							if (!pendingResult)
+								throw new Error(
+									`Internal error: missing pending result for parallel step ${index + 1}.`,
+								);
+							const cancelled: SingleResult = {
+								...pendingResult,
 								exitCode: 130,
 								stopReason: "aborted" as const,
 								errorMessage: "Task was aborted before starting",
@@ -5662,4 +5725,10 @@ export const __test__ = {
 	createRpcCompletionCoordinator,
 	runTaskStepWithMetadata,
 	attachTaskRunInTerminal,
+	// Narrow seams for deterministic replacement-safety tests.
+	tryOpenTaskSession,
+	openTaskRunSession,
+	revealTaskRunOrigin,
+	openTaskViewerOverlay,
+	withTaskWidgetTemporarilyHidden,
 };

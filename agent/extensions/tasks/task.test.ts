@@ -345,7 +345,7 @@ describe("tasks extension UI chrome", () => {
 				"No task runs in current session.",
 				"Use /tasks or Ctrl+Shift+T to browse · /tasks toggle hide",
 			],
-			{ placement: "aboveEditor" },
+			{ placement: "belowEditor" },
 		]);
 		expect(statusCalls[0]).toEqual(["tasks.runs", undefined]);
 		expect(notifications[0]).toEqual({ message: "Tasks widget enabled for this session.", level: "info" });
@@ -1787,6 +1787,109 @@ describe("tasks extension RPC UI relay", () => {
 		]);
 	});
 
+	it("expires queued dialogs without invoking the parent UI", async () => {
+		const responses: Record<string, unknown>[] = [];
+		let release: (() => void) | undefined;
+		let started!: () => void;
+		const startedPromise = new Promise<void>((resolve) => (started = resolve));
+		const confirm = async (title: string) => {
+			if (title.includes("step 1")) {
+				started();
+				await new Promise<void>((resolve) => (release = resolve));
+			}
+			return true;
+		};
+		const parentUi = { hasUI: true, ui: { confirm } };
+		const first = __test__.relayTaskExtensionUiRequest({
+			request: { type: "extension_ui_request", id: "queued-1", method: "confirm", title: "blocker" },
+			controller: { agent: "a", step: 1, key: "queued:1" },
+			parentUi,
+			sendResponse: async (p: Record<string, unknown>) => responses.push(p),
+		});
+		await startedPromise;
+		const second = __test__.relayTaskExtensionUiRequest({
+			request: { type: "extension_ui_request", id: "queued-2", method: "confirm", title: "expires", timeout: 1 },
+			controller: { agent: "a", step: 2, key: "queued:2" },
+			parentUi,
+			sendResponse: async (p: Record<string, unknown>) => responses.push(p),
+		});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		release?.();
+		await Promise.all([first, second]);
+		expect(responses.filter((p) => p.id === "queued-2")).toEqual([
+			{ type: "extension_ui_response", id: "queued-2", confirmed: false },
+		]);
+	});
+
+	it("cancels an aborted queued dialog before dequeue", async () => {
+		const responses: Record<string, unknown>[] = [];
+		let release!: () => void;
+		let started!: () => void;
+		const startedPromise = new Promise<void>((resolve) => (started = resolve));
+		const parentUi = {
+			hasUI: true,
+			ui: {
+				confirm: async (title: string) => {
+					if (title.includes("step 1")) {
+						started();
+						await new Promise<void>((resolve) => (release = resolve));
+					}
+					return true;
+				},
+			},
+		};
+		const first = __test__.relayTaskExtensionUiRequest({
+			request: { type: "extension_ui_request", id: "abort-1", method: "confirm", title: "blocker" },
+			controller: { agent: "a", step: 1, key: "abort:1" },
+			parentUi,
+			sendResponse: async (p: Record<string, unknown>) => responses.push(p),
+		});
+		await startedPromise;
+		const abort = new AbortController();
+		const second = __test__.relayTaskExtensionUiRequest({
+			request: { type: "extension_ui_request", id: "abort-2", method: "confirm", title: "aborted" },
+			controller: { agent: "a", step: 2, key: "abort:2" },
+			parentUi,
+			dialogSignal: abort.signal,
+			sendResponse: async (p: Record<string, unknown>) => responses.push(p),
+		});
+		abort.abort();
+		release();
+		await Promise.all([first, second]);
+		expect(responses.filter((p) => p.id === "abort-2")).toEqual([
+			{ type: "extension_ui_response", id: "abort-2", confirmed: false },
+		]);
+	});
+
+	it("sends exactly one response when dialog resolution races cancellation", async () => {
+		const responses: Record<string, unknown>[] = [];
+		const abort = new AbortController();
+		let resolveConfirm!: (value: boolean) => void;
+		let confirmStarted!: () => void;
+		const confirmStartedPromise = new Promise<void>((resolve) => (confirmStarted = resolve));
+		const relay = __test__.relayTaskExtensionUiRequest({
+			request: { type: "extension_ui_request", id: "race", method: "confirm", title: "race" },
+			controller: { agent: "a", step: 1, key: "race:1" },
+			parentUi: {
+				hasUI: true,
+				ui: {
+					confirm: async () =>
+						new Promise<boolean>((resolve) => {
+							resolveConfirm = resolve;
+							confirmStarted();
+						}),
+				},
+			},
+			dialogSignal: abort.signal,
+			sendResponse: async (p: Record<string, unknown>) => responses.push(p),
+		});
+		await confirmStartedPromise;
+		resolveConfirm(true);
+		abort.abort();
+		await relay;
+		expect(responses).toHaveLength(1);
+	});
+
 	it("cancels dialog requests when no parent UI is available", async () => {
 		const responses: Record<string, unknown>[] = [];
 
@@ -1805,6 +1908,72 @@ describe("tasks extension RPC UI relay", () => {
 		});
 
 		expect(responses).toEqual([{ type: "extension_ui_response", id: "req-missing-ui", cancelled: true }]);
+	});
+
+	it("falls back to a notification for non-TUI task viewing", async () => {
+		const notifications: Array<{ text: string; level?: string }> = [];
+		await __test__.openTaskViewerOverlay(
+			{
+				hasUI: true,
+				mode: "rpc",
+				ui: {
+					custom: async () => {
+						throw new Error("custom must not be called");
+					},
+					notify: (text: string, level?: string) => notifications.push({ text, level }),
+				},
+			},
+			"current",
+			{
+				runId: "run-fallback",
+				mode: "single",
+				status: "succeeded",
+				stepCount: 0,
+				persistedStepCount: 0,
+				steps: [],
+				warnings: [],
+				internalRunKey: "run-fallback",
+				toolCallId: "tool",
+				createdAt: "2026-01-01T00:00:00Z",
+				updatedAt: "2026-01-01T00:00:00Z",
+				latestSourceOrder: 1,
+			},
+		);
+		expect(notifications[0]?.text).toContain("Run: run-fallback");
+		expect(notifications[0]?.text).toContain("No task steps available.");
+	});
+
+	it("uses the custom task viewer in TUI mode", async () => {
+		let customCalls = 0;
+		await __test__.openTaskViewerOverlay(
+			{
+				hasUI: true,
+				mode: "tui",
+				ui: {
+					custom: async () => {
+						customCalls++;
+						return undefined;
+					},
+					notify: () => {},
+				},
+			},
+			"current",
+			{
+				runId: "run-tui",
+				mode: "single",
+				status: "succeeded",
+				stepCount: 0,
+				persistedStepCount: 0,
+				steps: [],
+				warnings: [],
+				internalRunKey: "run-tui",
+				toolCallId: "tool",
+				createdAt: "2026-01-01T00:00:00Z",
+				updatedAt: "2026-01-01T00:00:00Z",
+				latestSourceOrder: 1,
+			},
+		);
+		expect(customCalls).toBe(1);
 	});
 
 	it("namespaces status and widget updates from child tasks", async () => {
