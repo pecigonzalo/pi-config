@@ -24,6 +24,7 @@ let mockHasCoreProjectResources = false;
 let mockSavedProjectTrust: boolean | null = null;
 const mockSavedProjectTrustByCwd = new Map<string, boolean>();
 let lastDiscoveryProjectTrusted: boolean | undefined;
+let mockSkillResolution: { paths: string[]; missing: string[] } = { paths: [], missing: [] };
 
 beforeAll(async () => {
 	testAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tasks-ext-test-"));
@@ -133,7 +134,7 @@ beforeAll(async () => {
 			return mockResources ?? createResources();
 		},
 		hasProjectTaskResources: () => mockHasProjectTaskResources,
-		resolveSkillPaths: () => ({ paths: [], missing: [] }),
+		resolveSkillPaths: () => mockSkillResolution,
 	}));
 
 	const mod = await import("./task");
@@ -620,6 +621,15 @@ describe("tasks extension compact schema", () => {
 		expect(tool.parameters.properties.chain).toBeUndefined();
 	});
 
+	it("describes step skills as required preloaded instructions", () => {
+		const tool = createTaskTool();
+		const description = tool.parameters.properties.steps.items.properties.skills.description;
+
+		expect(description).toContain("Required skills preloaded");
+		expect(description).toContain("Overrides the agent's defaultSkills");
+		expect(description).toContain("empty array disables defaults");
+	});
+
 	it("normalizes legacy task shapes before validation", () => {
 		const tool = createTaskTool();
 
@@ -974,6 +984,116 @@ describe("tasks worker tool configuration", () => {
 			if (previousProfile === undefined) delete process.env.PI_PROFILE_NAME;
 			else process.env.PI_PROFILE_NAME = previousProfile;
 		}
+	});
+});
+
+describe("required task skill instructions", () => {
+	let skillRoot: string;
+
+	beforeEach(async () => {
+		skillRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-task-required-skills-"));
+	});
+
+	afterEach(async () => {
+		await fs.rm(skillRoot, { recursive: true, force: true });
+	});
+
+	async function createSkill(name: string, body: string): Promise<string> {
+		const skillPath = path.join(skillRoot, name, "SKILL.md");
+		await fs.mkdir(path.dirname(skillPath), { recursive: true });
+		await fs.writeFile(skillPath, `---\nname: ${name}\ndescription: Test skill\n---\n\n${body}\n`, "utf-8");
+		return skillPath;
+	}
+
+	it("loads full required skill instructions with their source paths", async () => {
+		const reviewPath = await createSkill("review", "Follow the review checklist.");
+		const typescriptPath = await createSkill("typescript", "Apply strict TypeScript rules.");
+
+		const prompt = await __test__.loadRequiredSkillInstructions([reviewPath, typescriptPath]);
+
+		expect(prompt).toContain(`path="${reviewPath}"`);
+		expect(prompt).toContain("Follow the review checklist.");
+		expect(prompt).toContain(`path="${typescriptPath}"`);
+		expect(prompt).toContain("Apply strict TypeScript rules.");
+		expect(prompt).toContain("already loaded");
+	});
+
+	it("deduplicates required skill files", async () => {
+		const skillPath = await createSkill("review", "Unique required instruction.");
+
+		const prompt = await __test__.loadRequiredSkillInstructions([skillPath, skillPath]);
+
+		expect(prompt.split("Unique required instruction.")).toHaveLength(2);
+	});
+
+	it("returns no prompt section when no skills are required", async () => {
+		expect(await __test__.loadRequiredSkillInstructions([])).toBe("");
+	});
+
+	it("reports an actionable error when a required skill cannot be read", async () => {
+		const missingPath = path.join(skillRoot, "missing", "SKILL.md");
+
+		await expect(__test__.loadRequiredSkillInstructions([missingPath])).rejects.toThrow(
+			`Failed to read required skill at "${missingPath}"`,
+		);
+	});
+
+	it("composes required skills with configured worker behavior", async () => {
+		const skillPath = await createSkill("review", "Mandatory review behavior.");
+		const requiredSkills = await __test__.loadRequiredSkillInstructions([skillPath]);
+
+		const prompt = __test__.composeWorkerSystemPrompt("Configured worker behavior.", requiredSkills);
+
+		expect(prompt).toContain("Configured worker behavior.");
+		expect(prompt).toContain("Mandatory review behavior.");
+	});
+
+	it("prepares the worker prompt from resolved explicit skills without requiring read", async () => {
+		const skillPath = await createSkill("review", "Preloaded without child file access.");
+		mockSkillResolution = { paths: [skillPath], missing: [] };
+		const worker = {
+			skills: ["review"],
+			systemPrompt: "Review carefully.",
+			displayAgentName: "reviewer",
+			excludeTools: ["read"],
+		};
+
+		try {
+			const prompt = await __test__.prepareWorkerSystemPrompt(worker, process.cwd(), false);
+			expect(prompt).toContain("Review carefully.");
+			expect(prompt).toContain("Preloaded without child file access.");
+		} finally {
+			mockSkillResolution = { paths: [], missing: [] };
+		}
+	});
+
+	it("uses explicit task skills instead of agent defaults, including an empty list", () => {
+		const resources = createResources({
+			agents: [
+				{
+					name: "reviewer",
+					description: "Review worker",
+					enabled: true,
+					availability: "task",
+					defaultSkills: ["default-review"],
+					systemPromptMode: "append",
+					systemPrompt: "Review code.",
+					source: "user",
+					filePath: "/tmp/reviewer.md",
+				},
+			],
+		});
+
+		expect(__test__.resolveWorkerConfig({ agent: "reviewer", task: "Review" }, resources).config.skills).toEqual([
+			"default-review",
+		]);
+		expect(
+			__test__.resolveWorkerConfig({ agent: "reviewer", task: "Review", skills: ["explicit-review"] }, resources)
+				.config.skills,
+		).toEqual(["explicit-review"]);
+		expect(
+			__test__.resolveWorkerConfig({ agent: "reviewer", task: "Review", skills: [] }, resources).config.skills,
+		).toEqual([]);
 	});
 });
 

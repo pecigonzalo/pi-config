@@ -1064,6 +1064,50 @@ function composePromptLayers(...layers: string[]): string {
 	return trimmed.join("\n\n---\n\n");
 }
 
+function escapeXmlAttribute(value: string): string {
+	return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+async function loadRequiredSkillInstructions(skillPaths: string[]): Promise<string> {
+	const sections: string[] = [];
+	for (const skillPath of new Set(skillPaths)) {
+		let content: string;
+		try {
+			content = await fs.promises.readFile(skillPath, "utf-8");
+		} catch (error) {
+			const detail = error instanceof Error ? `: ${error.message}` : "";
+			throw new Error(`Failed to read required skill at "${skillPath}"${detail}`);
+		}
+		sections.push(`<required_skill path="${escapeXmlAttribute(skillPath)}">\n${content.trim()}\n</required_skill>`);
+	}
+	if (sections.length === 0) return "";
+	return [
+		"The following skills are required for this task and are already loaded.",
+		"Follow their instructions. Resolve relative paths against the directory containing each listed skill path.",
+		...sections,
+	].join("\n\n");
+}
+
+function composeWorkerSystemPrompt(systemPrompt: string, requiredSkillInstructions: string): string {
+	return composePromptLayers(systemPrompt, requiredSkillInstructions);
+}
+
+async function prepareWorkerSystemPrompt(
+	worker: Pick<ResolvedWorkerConfig, "displayAgentName" | "skills" | "systemPrompt">,
+	launchCwd: string,
+	projectTrusted: boolean,
+): Promise<string> {
+	if (!worker.skills || worker.skills.length === 0) return worker.systemPrompt;
+	const { paths, missing } = resolveSkillPaths(worker.skills, launchCwd, projectTrusted);
+	if (missing.length > 0) {
+		throw new Error(
+			`Failed to resolve required skills for worker "${worker.displayAgentName}": ${missing.join(", ")}.`,
+		);
+	}
+	const requiredSkillInstructions = await loadRequiredSkillInstructions(paths);
+	return composeWorkerSystemPrompt(worker.systemPrompt, requiredSkillInstructions);
+}
+
 function firstDefined<T>(...values: Array<T | undefined>): T | undefined {
 	for (const value of values) {
 		if (value !== undefined) return value;
@@ -2309,7 +2353,11 @@ async function runSingleAgentViaJson(
 	};
 
 	try {
-		const composedPrompt = worker.systemPrompt;
+		const composedPrompt = await prepareWorkerSystemPrompt(
+			worker,
+			preparedStep.launchCwd,
+			preparedStep.projectTrusted,
+		);
 		if (composedPrompt.trim()) {
 			const tmp = await writePromptToTempFile(worker.displayAgentName, composedPrompt);
 			tmpPromptDir = tmp.dir;
@@ -2570,7 +2618,11 @@ async function runSingleAgentViaRpc(
 	};
 
 	try {
-		const composedPrompt = worker.systemPrompt;
+		const composedPrompt = await prepareWorkerSystemPrompt(
+			worker,
+			preparedStep.launchCwd,
+			preparedStep.projectTrusted,
+		);
 		if (composedPrompt.trim()) {
 			const tmp = await writePromptToTempFile(worker.displayAgentName, composedPrompt);
 			tmpPromptDir = tmp.dir;
@@ -4649,7 +4701,12 @@ const TaskStep = Type.Object({
 	effort: Type.Optional(Type.String({ description: "Effort preset." })),
 	cwd: Type.Optional(Type.String({ description: "Working dir." })),
 	model: Type.Optional(Type.String({ description: "Model override." })),
-	skills: Type.Optional(Type.Array(Type.String(), { description: "Skill names." })),
+	skills: Type.Optional(
+		Type.Array(Type.String(), {
+			description:
+				"Required skills preloaded into the worker system prompt. Overrides the agent's defaultSkills; an empty array disables defaults.",
+		}),
+	),
 	prompt: Type.Optional(
 		Type.String({
 			description: "Behavioral system prompt. Required for generic workers with no `agent`.",
@@ -5893,6 +5950,9 @@ export const __test__ = {
 	resolveTaskOriginForBranch: (entries: readonly SessionEntry[], leafId?: string | null) =>
 		resolveTaskOriginForBranch(entries, createTaskPreview, leafId),
 	resolveWorkerConfig,
+	loadRequiredSkillInstructions,
+	composeWorkerSystemPrompt,
+	prepareWorkerSystemPrompt,
 	resolveTaskSelector,
 	setTaskWidgetEnabled,
 	terminateProcessWithEscalation,
