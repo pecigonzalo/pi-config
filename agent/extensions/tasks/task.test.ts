@@ -1093,15 +1093,18 @@ describe("required task skill instructions", () => {
 				expect(__test__.appendWorkerSkillFlags(args, worker, process.cwd(), false)).toBeUndefined();
 
 				const promptFile = await __test__.appendWorkerPromptFlags(args, worker, process.cwd(), false);
-				expect(promptFile.filePath).not.toBeNull();
-				const prompt = await fs.readFile(promptFile.filePath!, "utf-8");
+				try {
+					expect(promptFile.filePath).not.toBeNull();
+					const prompt = await fs.readFile(promptFile.filePath!, "utf-8");
 
-				expect(args).toContain("--skill");
-				expect(args).toContain(path.dirname(skillPath));
-				expect(args).toContain(mode === "append" ? "--append-system-prompt" : "--system-prompt");
-				expect(prompt).toContain("Configured launch behavior.");
-				expect(prompt).toContain("Launch-level required instruction.");
-				await fs.rm(promptFile.dir!, { recursive: true, force: true });
+					expect(args).toContain("--skill");
+					expect(args).toContain(path.dirname(skillPath));
+					expect(args).toContain(mode === "append" ? "--append-system-prompt" : "--system-prompt");
+					expect(prompt).toContain("Configured launch behavior.");
+					expect(prompt).toContain("Launch-level required instruction.");
+				} finally {
+					if (promptFile.dir) await fs.rm(promptFile.dir, { recursive: true, force: true });
+				}
 			}
 		} finally {
 			mockSkillResolution = { paths: [], missing: [] };

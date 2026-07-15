@@ -916,13 +916,18 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-task-"));
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
 	const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
-	await withFileMutationQueue(filePath, async () => {
-		await fs.promises.writeFile(filePath, prompt, {
-			encoding: "utf-8",
-			mode: 0o600,
+	try {
+		await withFileMutationQueue(filePath, async () => {
+			await fs.promises.writeFile(filePath, prompt, {
+				encoding: "utf-8",
+				mode: 0o600,
+			});
 		});
-	});
-	return { dir: tmpDir, filePath };
+		return { dir: tmpDir, filePath };
+	} catch (error) {
+		await fs.promises.rm(tmpDir, { recursive: true, force: true });
+		throw error;
+	}
 }
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
