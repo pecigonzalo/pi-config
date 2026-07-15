@@ -235,11 +235,12 @@ function mapTransportClose(
 	options: {
 		aborted: boolean;
 		intentionalSignal?: NodeJS.Signals;
+		intentionalExitCode?: number;
 		transportLabel: string;
 	},
 ): { exitCode: number; signalMessage?: string } {
 	if (options.aborted) return { exitCode: 130 };
-	if (signal === options.intentionalSignal) return { exitCode: 0 };
+	if (signal === options.intentionalSignal || code === options.intentionalExitCode) return { exitCode: 0 };
 	if (code !== null) return { exitCode: code };
 	return {
 		exitCode: 1,
@@ -248,11 +249,13 @@ function mapTransportClose(
 }
 
 function createRpcCompletionCoordinator(options: {
-	controller: Pick<LiveTaskController, "isStreaming" | "pendingSteeringCount" | "pendingFollowUpCount">;
+	controller: Pick<LiveTaskController, "isStreaming" | "pendingSteeringCount" | "pendingFollowUpCount"> & { pendingResponses?: Map<string, unknown> };
 	isClosed: () => boolean;
 	terminate: () => void;
 	delayMs?: number;
 }) {
+	let sawAgentStart = false;
+	let sawAgentEnd = false;
 	let sawAgentSettled = false;
 	let completionTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -269,6 +272,7 @@ function createRpcCompletionCoordinator(options: {
 			if (options.isClosed()) return;
 			if (options.controller.isStreaming) return;
 			if (options.controller.pendingSteeringCount > 0 || options.controller.pendingFollowUpCount > 0) return;
+			if (options.controller.pendingResponses && options.controller.pendingResponses.size > 0) return;
 			options.terminate();
 		}, options.delayMs ?? RPC_COMPLETION_GRACE_MS);
 		completionTimer.unref?.();
@@ -277,13 +281,17 @@ function createRpcCompletionCoordinator(options: {
 	return {
 		dispose: clear,
 		onAgentStart() {
+			sawAgentStart = true;
+			sawAgentEnd = false;
 			sawAgentSettled = false;
 			clear();
 		},
 		onAgentEnd() {
 			// agent_end can be followed by retry, compaction, or queued continuation.
+			if (sawAgentStart) sawAgentEnd = true;
 		},
 		onAgentSettled() {
+			if (!sawAgentStart || !sawAgentEnd) return;
 			sawAgentSettled = true;
 			schedule();
 		},
@@ -294,7 +302,7 @@ function createRpcCompletionCoordinator(options: {
 				clear();
 				return;
 			}
-			if (sawAgentSettled && !options.controller.isStreaming) schedule();
+			if (sawAgentEnd && sawAgentSettled && !options.controller.isStreaming) schedule();
 		},
 	};
 }
@@ -1808,46 +1816,9 @@ async function preflightTaskRun(
 	}
 
 	const sessionRunId = needsPersistedSessions ? createTaskRunId() : undefined;
-
-	for (let i = 0; i < preparedSteps.length; i++) {
-		const preparedStep = preparedSteps[i];
-		if (!preparedStep) return { error: `Internal error: missing prepared step ${i + 1}.` };
+	for (const preparedStep of preparedSteps) {
 		if (!preparedStep.session.persist) continue;
-
-		const sessionName = buildTaskChildSessionName(preparedStep.worker.displayAgentName, preparedStep.rawStep.task);
-		let sessionId: string;
-		let sessionFile: string;
-		try {
-			if (preparedStep.session.mode === "fresh") {
-				const createdSession = await createManagedFreshTaskSession({
-					childCwd: preparedStep.launchCwd,
-					parentSessionFile,
-					sessionName,
-				});
-				sessionId = createdSession.sessionId;
-				sessionFile = createdSession.sessionFile;
-			} else {
-				if (!parentSessionFile) {
-					return {
-						error: `Step ${i + 1} cannot fork because parent session is unavailable.`,
-					};
-				}
-				const createdSession = await createManagedForkedTaskSession({
-					parentSessionFile,
-					childCwd: preparedStep.launchCwd,
-					sessionName,
-				});
-				sessionId = createdSession.sessionId;
-				sessionFile = createdSession.sessionFile;
-			}
-		} catch (error) {
-			return {
-				error: `Failed to create child session for step ${i + 1}: ${error instanceof Error ? error.message : String(error)}`,
-			};
-		}
-		preparedStep.session.sessionFile = sessionFile;
-		preparedStep.session.sessionId = sessionId;
-		preparedStep.session.sessionName = sessionName;
+		preparedStep.session.sessionName = buildTaskChildSessionName(preparedStep.worker.displayAgentName, preparedStep.rawStep.task);
 		preparedStep.session.parentSessionFile = parentSessionFile;
 		preparedStep.session.parentSessionId = parentSessionId;
 	}
@@ -2365,6 +2336,7 @@ async function runSingleAgentViaRpc(
 					if (pending) {
 						controller.pendingResponses.delete(response.id);
 						pending.resolve(response);
+						if (controller.pendingResponses.size === 0) completionCoordinator.onQueueUpdate(controller.pendingSteeringCount, controller.pendingFollowUpCount);
 					}
 				}
 				return;
@@ -2488,6 +2460,7 @@ async function runSingleAgentViaRpc(
 			const outcome = mapTransportClose(code, closeSignal, {
 				aborted: rpcAborted,
 				intentionalSignal: intentionallyTerminatedAfterSettlement ? "SIGTERM" : undefined,
+				intentionalExitCode: intentionallyTerminatedAfterSettlement ? 143 : undefined,
 				transportLabel: "Task RPC process",
 			});
 			if (outcome.signalMessage) {
@@ -2593,7 +2566,7 @@ function appendTaskChildSessionMetadata(
 	snapshot: ChildSessionSnapshot,
 ): string | undefined {
 	try {
-		if (!sessionManager.appendCustomEntry) return undefined;
+		if (!sessionManager.appendCustomEntry) return `Session manager does not support ${TASK_CHILD_SESSION_CUSTOM_TYPE} metadata.`;
 		sessionManager.appendCustomEntry(TASK_CHILD_SESSION_CUSTOM_TYPE, snapshot);
 		return undefined;
 	} catch (error) {
@@ -2619,11 +2592,25 @@ async function runTaskStepWithMetadata(options: {
 	refreshUi?: () => Promise<void> | void;
 	enableRpcControl?: boolean;
 	parentUiContext?: TaskRpcUiContext;
+	runAgent?: typeof runSingleAgent;
 }): Promise<SingleResult> {
-	const { preparedStep, task, mode, step, toolCallId, runId, signal, onUpdate, makeDetails, sessionManager, origin, refreshUi, enableRpcControl, parentUiContext } = options;
+	const { preparedStep, task, mode, step, toolCallId, runId, signal, onUpdate, makeDetails, sessionManager, origin, refreshUi, enableRpcControl, parentUiContext, runAgent = runSingleAgent } = options;
 	const metadataRunId = runId ?? `${toolCallId}-run`;
 
 	let createdSnapshot: ChildSessionSnapshot | undefined;
+	if (preparedStep.session.persist && !preparedStep.session.sessionFile) {
+		try {
+			const createdSession = preparedStep.session.mode === "fresh"
+				? await createManagedFreshTaskSession({ childCwd: preparedStep.launchCwd, parentSessionFile: preparedStep.session.parentSessionFile, sessionName: preparedStep.session.sessionName ?? buildTaskChildSessionName(preparedStep.worker.displayAgentName, task) })
+				: preparedStep.session.parentSessionFile
+					? await createManagedForkedTaskSession({ parentSessionFile: preparedStep.session.parentSessionFile, childCwd: preparedStep.launchCwd, sessionName: preparedStep.session.sessionName ?? buildTaskChildSessionName(preparedStep.worker.displayAgentName, task) })
+					: (() => { throw new Error("Parent session is unavailable for forked task."); })();
+			preparedStep.session.sessionFile = createdSession.sessionFile;
+			preparedStep.session.sessionId = createdSession.sessionId;
+		} catch (error) {
+			return { agent: preparedStep.worker.displayAgentName, agentSource: preparedStep.worker.agent?.source ?? "unknown", task, exitCode: 1, messages: [], stderr: `Failed to create child session: ${error instanceof Error ? error.message : String(error)}`, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }, model: preparedStep.worker.model, step, sessionMode: preparedStep.session.mode, sessionPersist: true, stopReason: "error" };
+		}
+	}
 	if (preparedStep.session.persist && preparedStep.session.sessionFile && preparedStep.session.sessionId) {
 		createdSnapshot = {
 			v: TASK_CHILD_SESSION_METADATA_VERSION,
@@ -2653,6 +2640,13 @@ async function runTaskStepWithMetadata(options: {
 			const metadataError =
 				`Failed to append initial ${TASK_CHILD_SESSION_CUSTOM_TYPE} metadata (status="created"). ` + "Persisted child step was not started because parent metadata is authoritative.";
 			const fullError = `${metadataError}\n${appendError}`;
+			try {
+				if (createdSnapshot.childSessionPath && fs.existsSync(createdSnapshot.childSessionPath)) await fs.promises.unlink(createdSnapshot.childSessionPath);
+			} catch {
+				// Best-effort cleanup of the unused child session.
+			}
+			preparedStep.session.sessionFile = undefined;
+			preparedStep.session.sessionId = undefined;
 			return {
 				agent: preparedStep.worker.displayAgentName,
 				agentSource: preparedStep.worker.agent?.source ?? "unknown",
@@ -2693,7 +2687,7 @@ async function runTaskStepWithMetadata(options: {
 
 	let result: SingleResult;
 	try {
-		result = await runSingleAgent(preparedStep, task, step, signal, onUpdate, makeDetails, createdSnapshot, enableRpcControl === true, toolCallId, parentUiContext);
+		result = await runAgent(preparedStep, task, step, signal, onUpdate, makeDetails, createdSnapshot, enableRpcControl === true, toolCallId, parentUiContext);
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error);
 		const aborted = /aborted/i.test(errorMessage);
@@ -5096,4 +5090,5 @@ export const __test__ = {
 	createUtf8StreamDecoder,
 	mapTransportClose,
 	createRpcCompletionCoordinator,
+	runTaskStepWithMetadata,
 };

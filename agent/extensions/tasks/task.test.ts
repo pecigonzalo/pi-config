@@ -1204,18 +1204,8 @@ describe("tasks extension persisted-session guardrails", () => {
 		expect(preflight.prepared?.steps[0]?.session.parentSessionId).toBe(parentSessionId);
 		expect(preflight.prepared?.steps[0]?.worker.agent?.name).toBe("task-worker");
 		expect(preflight.prepared?.steps[0]?.worker.systemPrompt).toBe("TASK WORKER PROMPT");
-		const childSessionFile = preflight.prepared?.steps[0]?.session.sessionFile;
-		expect(childSessionFile).toBeTruthy();
-		const childRaw = await fs.readFile(childSessionFile!, "utf-8");
-		const childEntries = childRaw.trim().split("\n").map((line) => JSON.parse(line));
-		expect(childEntries[0]).toMatchObject({ type: "session", parentSession: parentSessionFile });
-		expect(childEntries).toContainEqual(inheritedComposition);
-		expect(childEntries).toContainEqual(parentMessage);
-		const childComposition = __test__.getPersistedMainAgentState(childEntries);
-		expect(childComposition.found).toBe(true);
-		expect(childComposition.agent).toBeUndefined();
-		expect(childComposition.profile).toBeUndefined();
-		expect(childComposition.effort).toBeUndefined();
+		expect(preflight.prepared?.steps[0]?.session.sessionFile).toBeUndefined();
+		expect(preflight.prepared?.steps[0]?.session.sessionId).toBeUndefined();
 	});
 
 	it("reads parentSessionId from the persisted header when runtime identity is unavailable", async () => {
@@ -1258,22 +1248,8 @@ describe("tasks extension persisted-session guardrails", () => {
 		);
 
 		expect(preflight.error).toBeUndefined();
-		const childSessionFile = preflight.prepared?.steps[0]?.session.sessionFile;
-		expect(childSessionFile).toBeTruthy();
-		expect(childSessionFile).toContain(`${path.sep}sessions${path.sep}`);
-
-		const raw = await fs.readFile(childSessionFile!, "utf-8");
-		const entries = raw.trim().split("\n").map((line) => JSON.parse(line));
-		expect(entries[0]).toMatchObject({
-			type: "session",
-			id: preflight.prepared?.steps[0]?.session.sessionId,
-			parentSession: parentSessionFile,
-		});
-		expect(entries[1]).toMatchObject({
-			type: "session_info",
-			name: preflight.prepared?.steps[0]?.session.sessionName,
-		});
-		expect(entries).toHaveLength(2);
+		expect(preflight.prepared?.steps[0]?.session.sessionFile).toBeUndefined();
+		expect(preflight.prepared?.steps[0]?.session.parentSessionFile).toBe(parentSessionFile);
 	});
 
 	it("resolves parent session from child session headers", async () => {
@@ -2338,15 +2314,67 @@ describe("tasks process termination escalation", () => {
 	});
 });
 
+describe("persisted child metadata lifecycle", () => {
+	function preparedPersistedStep() {
+		return {
+			launchCwd: process.cwd(),
+			rawStep: { task: "metadata task" },
+			worker: { displayAgentName: "worker", agent: { source: "user", name: "worker" } },
+			session: { mode: "fresh", persist: true, sessionName: "metadata-child" },
+		} as any;
+	}
+
+	function fakeResult() {
+		return {
+			agent: "worker", agentSource: "user", task: "metadata task", exitCode: 0,
+		messages: [], stderr: "", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		model: undefined, step: 1, sessionMode: "fresh", sessionPersist: true, stopReason: "completed",
+		};
+	}
+
+	for (const appendCustomEntry of [undefined, () => { throw new Error("append failed"); }]) {
+		it(`cleans up a child when initial metadata ${appendCustomEntry ? "throws" : "is unavailable"}`, async () => {
+			const preparedStep = preparedPersistedStep();
+			const result = await __test__.runTaskStepWithMetadata({
+				preparedStep, task: "metadata task", mode: "single", step: 1, toolCallId: "tool-call",
+				signal: undefined, onUpdate: undefined, makeDetails: () => ({}) as any,
+				sessionManager: { appendCustomEntry },
+				runAgent: async () => { throw new Error("must not launch"); },
+			});
+			expect(result.exitCode).toBe(1);
+			expect(preparedStep.session.sessionFile).toBeUndefined();
+		});
+	}
+
+	it("writes created metadata before launch and terminal metadata after launch", async () => {
+		const entries: any[] = [];
+		const preparedStep = preparedPersistedStep();
+		const result = await __test__.runTaskStepWithMetadata({
+			preparedStep, task: "metadata task", mode: "single", step: 1, toolCallId: "tool-call",
+			signal: undefined, onUpdate: undefined, makeDetails: () => ({}) as any,
+			sessionManager: { appendCustomEntry: (_type: string, data: unknown) => { entries.push(data); return "entry"; } },
+			runAgent: async (_step: unknown, _task: string, _number: number | undefined, _signal: AbortSignal | undefined, _update: unknown, _details: unknown, snapshot: unknown) => {
+				expect(entries[0].status).toBe("created");
+				expect(snapshot).toEqual(entries[0]);
+				return fakeResult();
+			},
+		});
+		expect(result.exitCode).toBe(0);
+		expect(entries.map((entry) => entry.status)).toEqual(["created", "succeeded"]);
+	});
+});
+
 describe("parallel cancellation", () => {
 	it("does not start queued work after cancellation", async () => {
 		const abortController = new AbortController();
 		const started: number[] = [];
+		let queuedCallbackInvoked = false;
 		let release: (() => void) | undefined;
 		const resultsPromise = __test__.mapWithConcurrencyLimit(
 			[0, 1, 2],
 			1,
 			async (item: number) => {
+				if (item > 0) queuedCallbackInvoked = true;
 				started.push(item);
 				await new Promise<void>((resolve) => { release = resolve; });
 				return item;
@@ -2361,6 +2389,7 @@ describe("parallel cancellation", () => {
 		release?.();
 		expect(await resultsPromise).toEqual([0, -1, -1]);
 		expect(started).toEqual([0]);
+		expect(queuedCallbackInvoked).toBe(false);
 	});
 });
 
@@ -2398,6 +2427,16 @@ describe("tasks transport helpers", () => {
 		});
 	});
 
+	it("maps intentional numeric exit 143 to success", () => {
+		expect(
+			__test__.mapTransportClose(143, null, {
+				aborted: false,
+				intentionalExitCode: 143,
+				transportLabel: "Task RPC process",
+			}),
+		).toEqual({ exitCode: 0 });
+	});
+
 	it("maps intentional settlement termination and aborts", () => {
 		expect(
 			__test__.mapTransportClose(null, "SIGTERM", {
@@ -2422,6 +2461,7 @@ describe("tasks RPC completion coordination", () => {
 			isStreaming: false,
 			pendingSteeringCount: 0,
 			pendingFollowUpCount: 0,
+			pendingResponses: new Map<string, unknown>(),
 		};
 		let closed = false;
 		let terminateCount = 0;
@@ -2443,8 +2483,31 @@ describe("tasks RPC completion coordination", () => {
 		};
 	}
 
+	it("ignores agent_end and agent_settled before agent_start", async () => {
+		const harness = createCompletionHarness();
+		harness.coordinator.onAgentEnd();
+		harness.coordinator.onAgentSettled();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(0);
+	});
+
+	it("waits for pending responses until cleanup reschedules completion", async () => {
+		const harness = createCompletionHarness();
+		(harness.controller as { pendingResponses: Map<string, unknown> }).pendingResponses = new Map([["response", {}]]);
+		harness.coordinator.onAgentStart();
+		harness.coordinator.onAgentEnd();
+		harness.coordinator.onAgentSettled();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(0);
+		(harness.controller as { pendingResponses: Map<string, unknown> }).pendingResponses.clear();
+		harness.coordinator.onQueueUpdate(0, 0);
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(1);
+	});
+
 	it("waits for agent_settled after agent_end", async () => {
 		const harness = createCompletionHarness();
+		harness.coordinator.onAgentStart();
 		harness.coordinator.onAgentEnd();
 
 		await new Promise((resolve) => setTimeout(resolve, 30));
@@ -2463,6 +2526,7 @@ describe("tasks RPC completion coordination", () => {
 		harness.coordinator.onAgentStart();
 		harness.controller.isStreaming = false;
 		harness.coordinator.onQueueUpdate(0, 0);
+		harness.coordinator.onAgentEnd();
 
 		await new Promise((resolve) => setTimeout(resolve, 30));
 		expect(harness.terminateCount).toBe(0);
