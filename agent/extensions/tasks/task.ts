@@ -1069,16 +1069,29 @@ function escapeXmlAttribute(value: string): string {
 }
 
 async function loadRequiredSkillInstructions(skillPaths: string[]): Promise<string> {
-	const sections: string[] = [];
-	for (const skillPath of new Set(skillPaths)) {
-		let content: string;
+	const instructionPaths: string[] = [];
+	for (const skillPath of skillPaths) {
 		try {
-			content = await fs.promises.readFile(skillPath, "utf-8");
+			const stats = await fs.promises.stat(skillPath);
+			instructionPaths.push(stats.isDirectory() ? path.join(skillPath, "SKILL.md") : skillPath);
 		} catch (error) {
 			const detail = error instanceof Error ? `: ${error.message}` : "";
 			throw new Error(`Failed to read required skill at "${skillPath}"${detail}`);
 		}
-		sections.push(`<required_skill path="${escapeXmlAttribute(skillPath)}">\n${content.trim()}\n</required_skill>`);
+	}
+
+	const sections: string[] = [];
+	for (const instructionPath of new Set(instructionPaths)) {
+		let content: string;
+		try {
+			content = await fs.promises.readFile(instructionPath, "utf-8");
+		} catch (error) {
+			const detail = error instanceof Error ? `: ${error.message}` : "";
+			throw new Error(`Failed to read required skill at "${instructionPath}"${detail}`);
+		}
+		sections.push(
+			`<required_skill path="${escapeXmlAttribute(instructionPath)}">\n${content.trim()}\n</required_skill>`,
+		);
 	}
 	if (sections.length === 0) return "";
 	return [

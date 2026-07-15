@@ -1048,9 +1048,9 @@ describe("required task skill instructions", () => {
 		expect(prompt).toContain("Mandatory review behavior.");
 	});
 
-	it("prepares the worker prompt from resolved explicit skills without requiring read", async () => {
+	it("prepares the worker prompt from resolved skill directories without requiring read", async () => {
 		const skillPath = await createSkill("review", "Preloaded without child file access.");
-		mockSkillResolution = { paths: [skillPath], missing: [] };
+		mockSkillResolution = { paths: [path.dirname(skillPath)], missing: [] };
 		const worker = {
 			skills: ["review"],
 			systemPrompt: "Review carefully.",
@@ -1065,6 +1065,15 @@ describe("required task skill instructions", () => {
 		} finally {
 			mockSkillResolution = { paths: [], missing: [] };
 		}
+	});
+
+	it("deduplicates directory and file references to the same skill instructions", async () => {
+		const skillPath = await createSkill("review", "One canonical instruction.");
+
+		const prompt = await __test__.loadRequiredSkillInstructions([path.dirname(skillPath), skillPath]);
+
+		expect(prompt.split("One canonical instruction.")).toHaveLength(2);
+		expect(prompt).toContain(`path="${skillPath}"`);
 	});
 
 	it("uses explicit task skills instead of agent defaults, including an empty list", () => {
