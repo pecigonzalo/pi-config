@@ -4,8 +4,8 @@ import type { ContextMode } from "./agents.js";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 
-const MAX_OUTPUT_BYTES = 200 * 1024; // 200 KB
-const MAX_OUTPUT_LINES = 5000;
+export const MAX_OUTPUT_BYTES = 50 * 1024;
+export const MAX_OUTPUT_LINES = 2000;
 const HIDDEN_TASK_NOTICE_PREFIXES = ["Shell parser active:", "Bash sandbox active"];
 
 export interface UsageStats {
@@ -50,26 +50,52 @@ export type DisplayItem =
 	| { type: "toolCall"; name: string; args: Record<string, unknown> }
 	| { type: "toolResult"; name: string; text?: string; diff?: string; isError: boolean };
 
+function truncateUtf8Prefix(text: string, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	let low = 0;
+	let high = text.length;
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		if (Buffer.byteLength(text.slice(0, middle), "utf8") <= maxBytes) low = middle;
+		else high = middle - 1;
+	}
+	return text.slice(0, low);
+}
+
+function truncateUtf8Suffix(text: string, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	let low = 0;
+	let high = text.length;
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		if (Buffer.byteLength(text.slice(text.length - middle), "utf8") <= maxBytes) low = middle;
+		else high = middle - 1;
+	}
+	return text.slice(text.length - low);
+}
+
 export function truncateOutput(text: string): string {
 	const lines = text.split("\n");
-	const bytes = Buffer.byteLength(text, "utf-8");
+	const bytes = Buffer.byteLength(text, "utf8");
 	if (bytes <= MAX_OUTPUT_BYTES && lines.length <= MAX_OUTPUT_LINES) return text;
 
-	let truncated = lines.length > MAX_OUTPUT_LINES ? lines.slice(0, MAX_OUTPUT_LINES) : lines;
-	let result = truncated.join("\n");
-	if (Buffer.byteLength(result, "utf-8") > MAX_OUTPUT_BYTES) {
-		let lo = 0;
-		let hi = result.length;
-		while (lo < hi) {
-			const mid = Math.floor((lo + hi + 1) / 2);
-			if (Buffer.byteLength(result.slice(0, mid), "utf-8") <= MAX_OUTPUT_BYTES) lo = mid;
-			else hi = mid - 1;
-		}
-		result = result.slice(0, lo);
-	}
-	const keptLines = result.split("\n").length;
-	const keptBytes = Buffer.byteLength(result, "utf-8");
-	return `[TRUNCATED: showing first ${keptLines} of ${lines.length} lines, ${keptBytes} of ${bytes} bytes]\n${result}`;
+	const marker = `[TRUNCATED: showing head and tail of ${lines.length} lines, ${bytes} bytes]`;
+	const markerBytes = Buffer.byteLength(marker, "utf8");
+	const separatorBytes = Buffer.byteLength("\n", "utf8");
+	const bodyBudget = Math.max(0, MAX_OUTPUT_BYTES - markerBytes - separatorBytes);
+	const shownLineCount = Math.min(lines.length, MAX_OUTPUT_LINES - 1);
+	const headCount = Math.ceil(shownLineCount / 2);
+	const tailCount = Math.floor(shownLineCount / 2);
+	const head = lines.slice(0, headCount).join("\n");
+	const tail = tailCount > 0 ? lines.slice(-tailCount).join("\n") : "";
+	const joinBytes = head && tail ? separatorBytes : 0;
+	const availableBody = Math.max(0, bodyBudget - joinBytes);
+	const headBudget = Math.ceil(availableBody / 2);
+	const tailBudget = availableBody - headBudget;
+	const boundedHead = truncateUtf8Prefix(head, headBudget).replace(/\n+$/, "");
+	const boundedTail = truncateUtf8Suffix(tail, tailBudget).replace(/^\n+/, "");
+	const body = boundedHead && boundedTail ? `${boundedHead}\n${boundedTail}` : boundedHead || boundedTail;
+	return `${marker}\n${body}`;
 }
 
 function formatTokens(count: number): string {
@@ -451,21 +477,21 @@ function formatTaskResultSection(result: TaskDisplayResult): string {
 	const lines = [`### ${step} — ${result.agent} (${status})`];
 	if (result.task) lines.push(`Task: ${createTaskPreview(result.task, 240)}`);
 	const output = getTaskResultOutput(result);
-	lines.push(output ? truncateOutput(output) : "(no output)");
+	lines.push(output || "(no output)");
 	return lines.join("\n");
 }
 
 export function formatParallelResults(results: TaskDisplayResult[]): string {
 	const successCount = results.filter((result) => result.exitCode === 0).length;
 	const sections = results.map(formatTaskResultSection);
-	return [`Parallel: ${successCount}/${results.length} succeeded`, ...sections].join("\n\n");
+	return truncateOutput([`Parallel: ${successCount}/${results.length} succeeded`, ...sections].join("\n\n"));
 }
 
 export function formatChainResults(results: TaskDisplayResult[]): string {
 	if (results.length === 0) return "Chain: 0/0 succeeded";
 	const successCount = results.filter((result) => result.exitCode === 0).length;
 	const sections = results.map(formatTaskResultSection);
-	return [`Chain: ${successCount}/${results.length} succeeded`, ...sections].join("\n\n");
+	return truncateOutput([`Chain: ${successCount}/${results.length} succeeded`, ...sections].join("\n\n"));
 }
 
 export function createTaskPreview(task: string, maxLength = 120): string {

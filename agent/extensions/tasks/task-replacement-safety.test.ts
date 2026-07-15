@@ -1,8 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { __test__ } from "./task.js";
+import { setTaskSessionRootForTests } from "./task-session-validation.js";
 
 const session = (file: string, id: string) => ({
 	getSessionFile: () => file,
@@ -44,16 +45,26 @@ const runFor = (file: string, id: string) => ({
 });
 
 describe("task session replacement safety", () => {
+	let sessionRoot: string;
+
+	beforeEach(async () => {
+		sessionRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "task-replacement-root-"));
+		setTaskSessionRootForTests(sessionRoot);
+	});
+
+	afterEach(() => {
+		setTaskSessionRootForTests(undefined);
+	});
 	it("waits before switching and only uses the verified replacement callback context", async () => {
-		const file = path.join(os.tmpdir(), `task-replacement-${Date.now()}`);
-		fs.writeFileSync(file, "");
+		const file = path.join(sessionRoot, `task-replacement-${Date.now()}-${Math.random()}.jsonl`);
+		fs.writeFileSync(file, JSON.stringify({ type: "session", id: "child" }) + "\n");
 		const calls: string[] = [];
 		const ctx: any = {
-			...session("old.jsonl", "old"),
+			...session(path.join(sessionRoot, "old.jsonl"), "old"),
 			waitForIdle: async () => calls.push("wait"),
 			switchSession: async (_path: string, options: any) => {
 				calls.push("switch");
-				await options.withSession({ sessionManager: session("wrong.jsonl", "wrong") });
+				await options.withSession({ sessionManager: session(path.join(sessionRoot, "wrong.jsonl"), "wrong") });
 				await options.withSession({ sessionManager: session(file, "child") });
 			},
 		};
@@ -68,11 +79,11 @@ describe("task session replacement safety", () => {
 	});
 
 	it("rejects a replacement with a wrong path even when its id matches", async () => {
-		const file = path.join(os.tmpdir(), `task-replacement-${Date.now()}`);
-		fs.writeFileSync(file, "");
+		const file = path.join(sessionRoot, `task-replacement-${Date.now()}-${Math.random()}.jsonl`);
+		fs.writeFileSync(file, JSON.stringify({ type: "session", id: "child" }) + "\n");
 		const ctx: any = {
 			switchSession: async (_path: string, options: any) => {
-				await options.withSession({ sessionManager: session("wrong.jsonl", "child") });
+				await options.withSession({ sessionManager: session(path.join(sessionRoot, "wrong.jsonl"), "child") });
 			},
 		};
 		const result = await __test__.openTaskRunSession(ctx, runFor(file, "child") as any);
@@ -81,8 +92,8 @@ describe("task session replacement safety", () => {
 	});
 
 	it("rejects a replacement with a wrong id even when its path matches", async () => {
-		const file = path.join(os.tmpdir(), `task-replacement-${Date.now()}`);
-		fs.writeFileSync(file, "");
+		const file = path.join(sessionRoot, `task-replacement-${Date.now()}-${Math.random()}.jsonl`);
+		fs.writeFileSync(file, JSON.stringify({ type: "session", id: "child" }) + "\n");
 		const ctx: any = {
 			switchSession: async (_path: string, options: any) => {
 				await options.withSession({ sessionManager: session(file, "wrong") });
@@ -94,8 +105,8 @@ describe("task session replacement safety", () => {
 	});
 
 	it("does not trust success without a verified replacement callback", async () => {
-		const file = path.join(os.tmpdir(), `task-replacement-${Date.now()}`);
-		fs.writeFileSync(file, "");
+		const file = path.join(sessionRoot, `task-replacement-${Date.now()}-${Math.random()}.jsonl`);
+		fs.writeFileSync(file, JSON.stringify({ type: "session", id: "child" }) + "\n");
 		const ctx: any = { switchSession: async () => true };
 		const result = await __test__.openTaskRunSession(ctx, runFor(file, "child") as any);
 		fs.unlinkSync(file);
@@ -103,8 +114,8 @@ describe("task session replacement safety", () => {
 	});
 
 	it("propagates callback errors after replacement without retrying the old context", async () => {
-		const file = path.join(os.tmpdir(), `task-replacement-${Date.now()}`);
-		fs.writeFileSync(file, "");
+		const file = path.join(sessionRoot, `task-replacement-${Date.now()}-${Math.random()}.jsonl`);
+		fs.writeFileSync(file, JSON.stringify({ type: "session", id: "child" }) + "\n");
 		const ctx: any = {
 			switchSession: async (_path: string, options: any) =>
 				options.withSession({ sessionManager: session(file, "child") }),

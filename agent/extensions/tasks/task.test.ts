@@ -11,6 +11,7 @@ import {
 	resolveTaskTerminalBackendById,
 	setTaskTerminalCommandRunnerForTests,
 } from "./task-terminal.js";
+import { setTaskSessionRootForTests } from "./task-session-validation.js";
 
 let taskExtension: (typeof import("./task"))["default"];
 let __test__: any;
@@ -1313,6 +1314,11 @@ describe("tasks extension persisted-session guardrails", () => {
 		const parentSessionFile = path.join(testAgentDir, "sessions", "workspace", "main", "parent.jsonl");
 		const childSessionFile = path.join(testAgentDir, "sessions", "workspace", "child", "task-child.jsonl");
 		await fs.mkdir(path.dirname(childSessionFile), { recursive: true });
+		await fs.mkdir(path.dirname(parentSessionFile), { recursive: true });
+		await fs.writeFile(
+			parentSessionFile,
+			JSON.stringify({ type: "session", version: 3, id: "parent-session-id" }) + "\n",
+		);
 		await fs.writeFile(
 			childSessionFile,
 			[
@@ -1340,10 +1346,8 @@ describe("tasks extension persisted-session guardrails", () => {
 		]);
 
 		expect(resolved.error).toBeUndefined();
-		expect(resolved.resolved).toMatchObject({
-			parentSessionPath: parentSessionFile,
-			source: "header",
-		});
+		expect(resolved.resolved?.source).toBe("header");
+		expect(syncFs.statSync(resolved.resolved!.parentSessionPath).ino).toBe(syncFs.statSync(parentSessionFile).ino);
 	});
 
 	it("falls back to the session file when the in-memory branch omits the session header", async () => {
@@ -1356,6 +1360,11 @@ describe("tasks extension persisted-session guardrails", () => {
 			"task-child-from-file.jsonl",
 		);
 		await fs.mkdir(path.dirname(childSessionFile), { recursive: true });
+		await fs.mkdir(path.dirname(parentSessionFile), { recursive: true });
+		await fs.writeFile(
+			parentSessionFile,
+			JSON.stringify({ type: "session", version: 3, id: "parent-from-file" }) + "\n",
+		);
 		await fs.writeFile(
 			childSessionFile,
 			JSON.stringify({
@@ -1372,10 +1381,8 @@ describe("tasks extension persisted-session guardrails", () => {
 		const resolved = await __test__.resolveParentSessionForCurrentSession(childSessionFile, []);
 
 		expect(resolved.error).toBeUndefined();
-		expect(resolved.resolved).toMatchObject({
-			parentSessionPath: parentSessionFile,
-			source: "header",
-		});
+		expect(resolved.resolved?.source).toBe("header");
+		expect(syncFs.statSync(resolved.resolved!.parentSessionPath).ino).toBe(syncFs.statSync(parentSessionFile).ino);
 	});
 
 	it("does not resolve a parent session without a parentSession header", async () => {
@@ -1400,6 +1407,104 @@ describe("tasks extension persisted-session guardrails", () => {
 		expect(resolved.resolved).toBeUndefined();
 		expect(resolved.noParent).toBe(true);
 		expect(resolved.error).toContain("has no parentSession header");
+	});
+});
+
+describe("parent session reference security", () => {
+	let sessionRoot: string;
+
+	beforeEach(async () => {
+		sessionRoot = await fs.mkdtemp(path.join(testAgentDir, "parent-validation-"));
+		await fs.mkdir(path.join(sessionRoot, "nested"), { recursive: true });
+		setTaskSessionRootForTests(sessionRoot);
+	});
+
+	afterEach(() => setTaskSessionRootForTests(undefined));
+
+	async function writeSession(file: string, id: string, parentSession?: string): Promise<void> {
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		await fs.writeFile(
+			file,
+			JSON.stringify({ type: "session", version: 3, id, ...(parentSession ? { parentSession } : {}) }) + "\n",
+			"utf8",
+		);
+	}
+
+	async function resolve(current: string) {
+		return __test__.resolveParentSessionForCurrentSession(current, []);
+	}
+
+	it.each([
+		["outside-root absolute parent", () => path.join(os.tmpdir(), "outside-parent.jsonl")],
+		["relative traversal escaping root", () => path.join(sessionRoot, "nested", "../../outside-parent.jsonl")],
+	])("rejects %s", async (_name, parentPath) => {
+		const current = path.join(sessionRoot, "nested", "current.jsonl");
+		const outside = parentPath();
+		await writeSession(outside, "outside-parent");
+		await writeSession(current, "current", outside);
+
+		const result = await resolve(current);
+
+		expect(result.resolved).toBeUndefined();
+		expect(result.error).toMatch(/outside|root/i);
+	});
+
+	it("rejects a symlink escaping the session root", async () => {
+		const current = path.join(sessionRoot, "current.jsonl");
+		const outside = path.join(os.tmpdir(), `symlink-parent-${Date.now()}.jsonl`);
+		const link = path.join(sessionRoot, "parent.jsonl");
+		await writeSession(outside, "outside-parent");
+		await fs.symlink(outside, link);
+		await writeSession(current, "current", link);
+
+		const result = await resolve(current);
+
+		expect(result.resolved).toBeUndefined();
+		expect(result.error).toMatch(/outside.*root/i);
+		await fs.rm(outside, { force: true });
+	});
+
+	it.each([
+		["directory", "directory"],
+		["non-JSONL file", "parent.txt"],
+		["malformed JSONL", "malformed.jsonl"],
+	])("rejects a %s parent", async (_name, parentName) => {
+		const current = path.join(sessionRoot, "current.jsonl");
+		const parent = path.join(sessionRoot, parentName);
+		if (parentName === "directory") await fs.mkdir(parent);
+		else await fs.writeFile(parent, parentName === "malformed.jsonl" ? "not json\n" : "{}\n", "utf8");
+		await writeSession(current, "current", parent);
+
+		const result = await resolve(current);
+
+		expect(result.resolved).toBeUndefined();
+		expect(result.error).toMatch(/regular file|JSONL|header/i);
+	});
+
+	it("rejects a two-file parent cycle", async () => {
+		const current = path.join(sessionRoot, "current.jsonl");
+		const first = path.join(sessionRoot, "first.jsonl");
+		const second = path.join(sessionRoot, "second.jsonl");
+		await writeSession(first, "first", second);
+		await writeSession(second, "second", first);
+		await writeSession(current, "current", first);
+
+		const result = await resolve(current);
+
+		expect(result.resolved).toBeUndefined();
+		expect(result.error).toMatch(/cycle/i);
+	});
+
+	it("resolves an inside-root relative parent to its canonical path", async () => {
+		const current = path.join(sessionRoot, "nested", "current.jsonl");
+		const parent = path.join(sessionRoot, "parent.jsonl");
+		await writeSession(parent, "parent");
+		await writeSession(current, "current", "../parent.jsonl");
+
+		const result = await resolve(current);
+
+		expect(result.error).toBeUndefined();
+		expect(result.resolved?.parentSessionPath).toBe(syncFs.realpathSync(parent));
 	});
 });
 
@@ -1715,7 +1820,8 @@ describe("tasks extension RPC UI relay", () => {
 		expect(selectCalls).toHaveLength(1);
 		expect(selectCalls[0]?.title).toBe("Task thinker step 1 · Permission required");
 		expect(selectCalls[0]?.options).toEqual(["Allow once", "Block"]);
-		expect(selectCalls[0]?.dialogOptions?.timeout).toBe(5000);
+		expect(selectCalls[0]?.dialogOptions?.timeout).toBeGreaterThan(0);
+		expect(selectCalls[0]?.dialogOptions?.timeout).toBeLessThanOrEqual(5000);
 		expect(responses).toEqual([{ type: "extension_ui_response", id: "req-select", value: "Allow once" }]);
 	});
 
@@ -2134,6 +2240,40 @@ describe("task result formatting", () => {
 		expect(output).toContain("Chain: 2/2 succeeded");
 		expect(output).toContain("first step analysis");
 		expect(output).toContain("second step synthesis");
+	});
+
+	it("bounds output with fewer than 2000 very long lines", () => {
+		const output = __test__.truncateOutput(
+			Array.from({ length: 1999 }, (_, index) => `${index}:${"界".repeat(30_000)}`).join("\n"),
+		);
+
+		expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(50 * 1024);
+		expect(output.split("\n").length).toBeLessThanOrEqual(2000);
+		expect(output).toContain("[TRUNCATED:");
+		expect(output).toContain("0:");
+	});
+
+	it("bounds aggregate parallel and chain summaries", () => {
+		const large = Array.from({ length: 9000 }, (_, index) => `line-${index}`).join("\n");
+		const results = Array.from({ length: 8 }, (_, index) => assistantResult(`agent-${index}`, index + 1, large));
+
+		for (const output of [__test__.formatParallelResults(results), __test__.formatChainResults(results)]) {
+			expect(Buffer.byteLength(output)).toBeLessThanOrEqual(50 * 1024);
+			expect(output.split("\n").length).toBeLessThanOrEqual(2000);
+			expect(output).toContain("[TRUNCATED:");
+			expect(output).toContain("line-8999");
+		}
+	});
+
+	it("bounds huge child errors while preserving small output", () => {
+		const error = "stderr\n" + "x".repeat(200 * 1024);
+		const output = __test__.formatParallelResults([
+			{ ...assistantResult("failed", 1, ""), exitCode: 1, stderr: error, errorMessage: error },
+		]);
+
+		expect(Buffer.byteLength(output)).toBeLessThanOrEqual(50 * 1024);
+		expect(output).toContain("[TRUNCATED:");
+		expect(__test__.formatChainResults([assistantResult("small", 1, "unchanged")])).toContain("unchanged");
 	});
 
 	it("joins multiple text parts in the final assistant message", () => {
@@ -2562,10 +2702,15 @@ describe("deterministic task terminal ownership", () => {
 	const previousBackend = process.env.PI_TASKS_TERMINAL_BACKEND;
 	const previousDomain = process.env.PI_TASKS_WEZTERM_DOMAIN;
 	const makeFixture = async (attachment?: Record<string, unknown>) => {
-		const childSessionPath = path.join(testAgentDir, `terminal-child-${Date.now()}-${Math.random()}.jsonl`);
-		await fs.writeFile(childSessionPath, "{}\n");
 		const fixtureId = `${Date.now()}-${Math.random()}`;
-		const run = makeRun(`terminal-run-${fixtureId}`, `terminal-child-${fixtureId}`);
+		const childSessionId = `terminal-child-${fixtureId}`;
+		const childSessionPath = path.join(testAgentDir, "sessions", `${childSessionId}.jsonl`);
+		await fs.mkdir(path.dirname(childSessionPath), { recursive: true });
+		await fs.writeFile(
+			childSessionPath,
+			JSON.stringify({ type: "session", version: 3, id: childSessionId }) + "\n",
+		);
+		const run = makeRun(`terminal-run-${fixtureId}`, childSessionId);
 		run.sourceSessionFile = childSessionPath;
 		run.steps[0].snapshot.childSessionPath = childSessionPath;
 		Object.assign(run.steps[0].snapshot, attachment);

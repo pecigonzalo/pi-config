@@ -113,6 +113,7 @@ import {
 	type LiveTaskRuntimeInfo,
 	type RpcResponseEnvelope,
 } from "./task-live.js";
+import { validateTaskSessionReference } from "./task-session-validation.js";
 import {
 	TaskViewerOverlay,
 	type TaskTranscriptPreview,
@@ -377,6 +378,22 @@ interface SingleResult {
 	sessionFile?: string;
 	childSession?: ChildSessionSnapshot;
 	uiNotices?: TaskInlineNotice[];
+}
+
+function boundParentResult(result: SingleResult): SingleResult {
+	return {
+		...result,
+		stderr: truncateOutput(result.stderr),
+		errorMessage: result.errorMessage ? truncateOutput(result.errorMessage) : undefined,
+		childSession: result.childSession
+			? {
+					...result.childSession,
+					errorMessage: result.childSession.errorMessage
+						? createTaskPreview(truncateOutput(result.childSession.errorMessage), 240)
+						: undefined,
+				}
+			: undefined,
+	};
 }
 
 interface TaskDetails {
@@ -1791,24 +1808,30 @@ async function resolveParentSessionForCurrentSession(
 }> {
 	const headerParentSession = readSessionHeaderParentSession(entries);
 	if (headerParentSession) {
-		return {
-			resolved: {
-				parentSessionPath: resolveSessionReferencePath(headerParentSession, currentSessionFile),
-				source: "header",
-			},
-		};
+		const parentSessionPath = resolveSessionReferencePath(headerParentSession, currentSessionFile);
+		const validation = validateTaskSessionReference(parentSessionPath);
+		if (validation.error || !validation.reference) {
+			return { error: `Invalid parent session reference: ${validation.error ?? "unknown validation error"}` };
+		}
+		if (validation.reference.path === fs.realpathSync(currentSessionFile)) {
+			return { error: "Invalid parent session reference: session references itself." };
+		}
+		return { resolved: { parentSessionPath: validation.reference.path, source: "header" } };
 	}
 
 	let fileReadError: string | undefined;
 	try {
 		const fileHeaderParentSession = readSessionHeaderParentSession(readSessionEntriesFromFile(currentSessionFile));
 		if (fileHeaderParentSession) {
-			return {
-				resolved: {
-					parentSessionPath: resolveSessionReferencePath(fileHeaderParentSession, currentSessionFile),
-					source: "header",
-				},
-			};
+			const parentSessionPath = resolveSessionReferencePath(fileHeaderParentSession, currentSessionFile);
+			const validation = validateTaskSessionReference(parentSessionPath);
+			if (validation.error || !validation.reference) {
+				return { error: `Invalid parent session reference: ${validation.error ?? "unknown validation error"}` };
+			}
+			if (validation.reference.path === fs.realpathSync(currentSessionFile)) {
+				return { error: "Invalid parent session reference: session references itself." };
+			}
+			return { resolved: { parentSessionPath: validation.reference.path, source: "header" } };
 		}
 	} catch (error) {
 		fileReadError = error instanceof Error ? error.message : String(error);
@@ -3049,7 +3072,7 @@ async function runTaskStepWithMetadata(options: {
 		result.childSession = terminalSnapshot;
 	}
 
-	return result;
+	return boundParentResult(result);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -3336,7 +3359,18 @@ async function readTaskTranscriptPreview(
 			};
 		}
 	}
-	if (!inspectStep.snapshot.childSessionPath || !fs.existsSync(inspectStep.snapshot.childSessionPath)) {
+	const sessionValidation = validateTaskSessionReference(
+		inspectStep.snapshot.childSessionPath,
+		inspectStep.snapshot.childSessionId,
+	);
+	if (!sessionValidation.reference) {
+		return {
+			lines: [`Persisted transcript is unavailable: ${sessionValidation.error}`],
+			sourceLabel: "persisted session",
+			truncated: false,
+		};
+	}
+	if (!fs.existsSync(sessionValidation.reference.path)) {
 		return {
 			lines: ["Persisted transcript file is unavailable."],
 			sourceLabel: "persisted session",
@@ -3344,7 +3378,7 @@ async function readTaskTranscriptPreview(
 		};
 	}
 	try {
-		const entries = readSessionEntriesFromFile(inspectStep.snapshot.childSessionPath);
+		const entries = readSessionEntriesFromFile(sessionValidation.reference.path);
 		const messages = extractMessagesFromSessionEntries(entries);
 		const truncated = messages.length > 12;
 		return {
@@ -3647,13 +3681,11 @@ async function attachTaskRunInTerminalInternal(
 			message: `Run ${run.runId} step ${targetStep.step} has missing child session path metadata (stale metadata).`,
 		};
 	}
-	if (!fs.existsSync(childSessionPath)) {
-		return {
-			ok: false,
-			level: "error",
-			message: `Run ${run.runId} step ${targetStep.step} child session is missing: ${shortenHomePath(childSessionPath)}.`,
-		};
+	const sessionValidation = validateTaskSessionReference(childSessionPath, targetStep.snapshot.childSessionId);
+	if (!sessionValidation.reference) {
+		return { ok: false, level: "error", message: `Cannot attach child session: ${sessionValidation.error}` };
 	}
+	const canonicalChildSessionPath = sessionValidation.reference.path;
 
 	const liveController = getLiveTaskController(makeTaskRunStepKey(run.runId, targetStep.step));
 	const ownershipKey = taskTerminalOwnershipKey(run, targetStep);
@@ -3728,10 +3760,10 @@ async function attachTaskRunInTerminalInternal(
 	}
 	const title = `task ${run.runId} step ${targetStep.step}`;
 	const workspace = buildTaskSessionWorkspaceName(run, targetStep);
-	const invocation = getPiInvocation(["--session", childSessionPath]);
+	const invocation = getPiInvocation(["--session", canonicalChildSessionPath]);
 	const launchResult = await backendResolution.backend.openSession({
-		sessionPath: childSessionPath,
-		cwd: path.dirname(childSessionPath),
+		sessionPath: canonicalChildSessionPath,
+		cwd: path.dirname(canonicalChildSessionPath),
 		title,
 		workspace,
 		command: invocation.command,
@@ -3838,20 +3870,18 @@ async function openTaskRunSession(
 			message: `Run ${run.runId} step ${targetStep.step} has missing child session path metadata (stale metadata).`,
 		};
 	}
-	if (!fs.existsSync(childSessionPath)) {
-		return {
-			ok: false,
-			level: "error",
-			message: `Run ${run.runId} step ${targetStep.step} child session is missing: ${shortenHomePath(childSessionPath)}.`,
-		};
+	const sessionValidation = validateTaskSessionReference(childSessionPath, targetStep.snapshot.childSessionId);
+	if (!sessionValidation.reference) {
+		return { ok: false, level: "error", message: `Cannot open child session: ${sessionValidation.error}` };
 	}
+	const canonicalChildSessionPath = sessionValidation.reference.path;
 
 	let openedMessage = `Opened run ${run.runId} step ${targetStep.step} (${targetStep.snapshot.childSessionId.slice(0, 8)}).`;
 	if (!preferredStep && run.persistedStepCount > 1) {
 		openedMessage += " Use a child session id prefix selector to open a different step.";
 	}
 
-	const openResult = await tryOpenTaskSession(ctx, childSessionPath, {
+	const openResult = await tryOpenTaskSession(ctx, canonicalChildSessionPath, {
 		targetSessionId: targetStep.snapshot.childSessionId,
 		withSession: async (replacementCtx) => {
 			await notifyTaskSessionOpened(replacementCtx, openedMessage);
@@ -5018,8 +5048,9 @@ export default function (pi: ExtensionAPI) {
 						childSessions: childSessions.length > 0 ? childSessions : undefined,
 					};
 				};
+			const previewTaskError = (message: string): string => truncateOutput(message);
 			const throwTaskError = (message: string, details: TaskDetails): never => {
-				const error = new Error(message) as Error & { details?: TaskDetails };
+				const error = new Error(previewTaskError(message)) as Error & { details?: TaskDetails };
 				error.details = details;
 				throw error;
 			};
@@ -5157,8 +5188,9 @@ export default function (pi: ExtensionAPI) {
 					const isError =
 						result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 					if (isError) {
-						const errorMsg =
-							result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+						const errorMsg = previewTaskError(
+							result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)",
+						);
 						throwTaskError(
 							`Chain stopped at step ${preparedStep.step} (${preparedStep.rawStep.agent ?? preparedStep.rawStep.profile ?? "generic"}): ${errorMsg}\n\n${formatChainResults(results)}`,
 							makeDetails("chain")(results),
@@ -5313,8 +5345,9 @@ export default function (pi: ExtensionAPI) {
 				const isError =
 					result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 				if (isError) {
-					const errorMsg =
-						result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+					const errorMsg = previewTaskError(
+						result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)",
+					);
 					throwTaskError(
 						`Agent ${result.stopReason || "failed"}: ${errorMsg}`,
 						makeDetails("single")([result]),
@@ -5692,6 +5725,7 @@ export const __test__ = {
 	formatTaskRunList,
 	formatParallelResults,
 	formatChainResults,
+	truncateOutput,
 	formatTaskHeader,
 	formatTaskConfigurationLines,
 	formatToolCall,
