@@ -36,7 +36,9 @@ describe("controller close", () => {
 		let finish: (() => void) | undefined;
 		const close = createIdempotentControllerClose(async () => {
 			calls += 1;
-			await new Promise<void>((resolve) => { finish = resolve; });
+			await new Promise<void>((resolve) => {
+				finish = resolve;
+			});
 		});
 
 		const first = close();

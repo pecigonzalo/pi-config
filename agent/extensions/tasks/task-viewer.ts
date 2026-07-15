@@ -165,18 +165,28 @@ export class TaskViewerOverlay implements Focusable {
 		};
 		const summaryLines = this.state.detailText.split("\n").slice(0, 9);
 		const viewport = this.getTranscriptViewportSize();
-		const transcriptLines = this.state.transcript.lines.slice(this.transcriptScroll, this.transcriptScroll + viewport);
+		const transcriptLines = this.state.transcript.lines.slice(
+			this.transcriptScroll,
+			this.transcriptScroll + viewport,
+		);
 
 		lines.push(border);
 		pushWrapped(this.theme.bold(this.theme.fg("accent", `Task viewer · ${this.state.runId}`)));
-		pushWrapped(this.theme.fg("muted", `status:${this.state.runStatus} · mode:${this.state.runMode} · ${this.state.transcript.sourceLabel}`));
+		pushWrapped(
+			this.theme.fg(
+				"muted",
+				`status:${this.state.runStatus} · mode:${this.state.runMode} · ${this.state.transcript.sourceLabel}`,
+			),
+		);
 		lines.push(row());
 		for (const summary of summaryLines) pushWrapped(summary);
 		lines.push(row());
 		pushWrapped(this.theme.fg("muted", "Transcript"));
 		for (const line of transcriptLines) pushWrapped(line);
-		if (this.state.transcript.error) pushWrapped(this.theme.fg("warning", `Transcript note: ${this.state.transcript.error}`));
-		if (this.state.transcript.truncated) pushWrapped(this.theme.fg("dim", "Showing the latest transcript messages."));
+		if (this.state.transcript.error)
+			pushWrapped(this.theme.fg("warning", `Transcript note: ${this.state.transcript.error}`));
+		if (this.state.transcript.truncated)
+			pushWrapped(this.theme.fg("dim", "Showing the latest transcript messages."));
 		lines.push(row());
 
 		const scrollHint = `${this.bindingHint("tui.select.up", "↑")}/${this.bindingHint("tui.select.down", "↓")}`;

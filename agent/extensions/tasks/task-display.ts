@@ -125,7 +125,13 @@ function formatTaskExecutionContext(
 }
 
 function formatTaskExecutionMetadata(
-	taskResult: { agentSource?: string; sessionMode?: ContextMode; profile?: string; effort?: string; skills?: string[] },
+	taskResult: {
+		agentSource?: string;
+		sessionMode?: ContextMode;
+		profile?: string;
+		effort?: string;
+		skills?: string[];
+	},
 	themeFg: (color: any, text: string) => string,
 ): string {
 	const context = formatTaskExecutionContext(taskResult.agentSource, taskResult.sessionMode, themeFg);
@@ -152,7 +158,8 @@ export function formatTaskConfigurationLines(
 	},
 	themeFg: (color: any, text: string) => string,
 ): string {
-	const agentSource = taskResult.agentSource && taskResult.agentSource !== "unknown" ? ` (${taskResult.agentSource})` : "";
+	const agentSource =
+		taskResult.agentSource && taskResult.agentSource !== "unknown" ? ` (${taskResult.agentSource})` : "";
 	const skills = (taskResult.skills ?? []).filter((skill) => skill.trim().length > 0);
 	const lines = [
 		`${themeFg("muted", "agent: ")}${themeFg("accent", `${taskResult.agent}${agentSource}`)}`,
@@ -168,7 +175,13 @@ export function formatTaskConfigurationLines(
 export function formatTaskHeader(
 	options: {
 		agent: string;
-		taskResult: { agentSource?: string; sessionMode?: ContextMode; profile?: string; effort?: string; skills?: string[] };
+		taskResult: {
+			agentSource?: string;
+			sessionMode?: ContextMode;
+			profile?: string;
+			effort?: string;
+			skills?: string[];
+		};
 		prefix?: string;
 		leadingIcon?: string;
 		suffix?: string;
@@ -235,7 +248,9 @@ export function appendTaskOutputSection(
 		}
 		if (item.type === "toolResult") {
 			const icon = item.isError ? themeFg("error", "✗") : themeFg("success", "✓");
-			container.addChild(new Text(`${themeFg("muted", "↳ ")}${icon} ${themeFg("muted", `${item.name} result`)}`, 0, 0));
+			container.addChild(
+				new Text(`${themeFg("muted", "↳ ")}${icon} ${themeFg("muted", `${item.name} result`)}`, 0, 0),
+			);
 			if (item.text) {
 				container.addChild(new Text(themeFg(item.isError ? "error" : "dim", item.text), 0, 0));
 			}
@@ -309,12 +324,20 @@ export function formatToolCall(
 		case "find": {
 			const pattern = (args.pattern || "*") as string;
 			const rawPath = (args.path || ".") as string;
-			return themeFg("muted", "find: ") + themeFg("accent", pattern) + themeFg("dim", ` in ${shortenHomePath(rawPath)}`);
+			return (
+				themeFg("muted", "find: ") +
+				themeFg("accent", pattern) +
+				themeFg("dim", ` in ${shortenHomePath(rawPath)}`)
+			);
 		}
 		case "grep": {
 			const pattern = (args.pattern || "") as string;
 			const rawPath = (args.path || ".") as string;
-			return themeFg("muted", "grep: ") + themeFg("accent", `/${pattern}/`) + themeFg("dim", ` in ${shortenHomePath(rawPath)}`);
+			return (
+				themeFg("muted", "grep: ") +
+				themeFg("accent", `/${pattern}/`) +
+				themeFg("dim", ` in ${shortenHomePath(rawPath)}`)
+			);
 		}
 		default: {
 			const argsStr = JSON.stringify(args);
@@ -401,7 +424,10 @@ export function getFinalOutput(messages: Message[]): string {
 		const msg = messages[i];
 		if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
 		const textParts = msg.content
-			.filter((part): part is { type: "text"; text: string } => typeof part === "object" && part !== null && part.type === "text" && typeof part.text === "string")
+			.filter(
+				(part): part is { type: "text"; text: string } =>
+					typeof part === "object" && part !== null && part.type === "text" && typeof part.text === "string",
+			)
 			.map((part) => part.text)
 			.filter((text) => text.length > 0);
 		if (textParts.length > 0) return textParts.join("\n");
@@ -465,7 +491,9 @@ export function addTaskInlineNotice(
 	if (lines.length === 0) return;
 	const nextNotice: TaskInlineNotice = { level, lines, updatedAt: Date.now() };
 	const existing = result.uiNotices ?? [];
-	const deduped = existing.filter((notice) => notice.lines.join("\n") !== nextNotice.lines.join("\n") || notice.level !== nextNotice.level);
+	const deduped = existing.filter(
+		(notice) => notice.lines.join("\n") !== nextNotice.lines.join("\n") || notice.level !== nextNotice.level,
+	);
 	result.uiNotices = [...deduped, nextNotice].slice(-5);
 }
 

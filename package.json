@@ -5,11 +5,14 @@
   "scripts": {
     "generate:footer-schema": "cd agent/extensions/footer && bun run generate:footer-schema",
     "lefthook:install": "lefthook install",
+    "format": "prettier --ignore-path .prettierignore --write \"agent/extensions/tasks/**/*.ts\"",
+    "format:check": "prettier --ignore-path .prettierignore --check \"agent/extensions/tasks/**/*.ts\"",
     "test": "bun run --filter './agent/extensions/*' test --only-failures"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.80.6",
     "@types/bun": "^1.3.14",
-    "lefthook": "^2.1.6"
+    "lefthook": "^2.1.6",
+    "prettier": "3.9.5"
   }
 }

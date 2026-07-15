@@ -82,7 +82,14 @@ export function parseTasksCommand(args: string): ParsedTasksCommand {
 		return { scope: "current", action: "toggle", error: `Unsupported /tasks arguments: ${args}` };
 	}
 
-	if ((lower[0] === "show" || lower[0] === "open" || lower[0] === "attach" || lower[0] === "origin" || lower[0] === "view") && tokens.length >= 2) {
+	if (
+		(lower[0] === "show" ||
+			lower[0] === "open" ||
+			lower[0] === "attach" ||
+			lower[0] === "origin" ||
+			lower[0] === "view") &&
+		tokens.length >= 2
+	) {
 		return {
 			scope: "current",
 			action: lower[0] as TasksAction,
@@ -123,7 +130,11 @@ export function resolveTaskSelector<
 	if (runIdMatches.length === 1) return { resolution: { run: runIdMatches[0]!, matchedBy: "runId" } };
 	if (runIdMatches.length > 1) {
 		return {
-			error: formatAmbiguousSelectorError(trimmed, "runId prefix", runIdMatches.map((run) => formatRunCandidate(run, runs))),
+			error: formatAmbiguousSelectorError(
+				trimmed,
+				"runId prefix",
+				runIdMatches.map((run) => formatRunCandidate(run, runs)),
+			),
 		};
 	}
 

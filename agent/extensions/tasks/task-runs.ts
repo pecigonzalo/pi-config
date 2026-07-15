@@ -3,11 +3,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { ContextMode } from "./agents.js";
-import {
-	getTaskTerminalAttachment,
-	isTaskTerminalBackendId,
-	type TaskTerminalBackendId,
-} from "./task-terminal.js";
+import { getTaskTerminalAttachment, isTaskTerminalBackendId, type TaskTerminalBackendId } from "./task-terminal.js";
 
 export type TaskExecutionMode = "single" | "parallel" | "chain";
 export type ChildSessionStatus = "created" | "succeeded" | "failed" | "aborted";
@@ -172,7 +168,10 @@ export function resolveTaskOriginForBranch(
 	return { originEntryId, originUserEntryId, originPreview };
 }
 
-export function normalizeChildSessionSnapshot(data: unknown, metadataVersion: number): ChildSessionSnapshot | undefined {
+export function normalizeChildSessionSnapshot(
+	data: unknown,
+	metadataVersion: number,
+): ChildSessionSnapshot | undefined {
 	if (!isRecord(data)) return undefined;
 	if (!isTaskExecutionMode(data.mode)) return undefined;
 	if (typeof data.runId !== "string" || !data.runId.trim()) return undefined;
@@ -250,10 +249,7 @@ export function collectTaskMetadataRecordsFromEntries(
 	return records;
 }
 
-export function collectLiveTaskRunSteps(
-	entries: readonly SessionEntry[],
-	metadataVersion: number,
-): Set<string> {
+export function collectLiveTaskRunSteps(entries: readonly SessionEntry[], metadataVersion: number): Set<string> {
 	const live = new Set<string>();
 	for (const entry of entries) {
 		if (entry.type !== "message") continue;
@@ -296,7 +292,10 @@ export function getSnapshotEventTimestamp(snapshot: ChildSessionSnapshot): strin
 export function formatTimestampCompact(value: string): string {
 	const date = new Date(value);
 	if (Number.isNaN(date.getTime())) return value;
-	return date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "Z");
+	return date
+		.toISOString()
+		.replace("T", " ")
+		.replace(/\.\d{3}Z$/, "Z");
 }
 
 async function listSessionFiles(rootDir: string): Promise<string[]> {
@@ -341,7 +340,11 @@ async function collectTaskMetadataRecordsFromSessionFile(
 			if (lineNumber === 1) {
 				try {
 					const parsedHeader = JSON.parse(line) as unknown;
-					if (isRecord(parsedHeader) && parsedHeader.type === "session" && typeof parsedHeader.id === "string") {
+					if (
+						isRecord(parsedHeader) &&
+						parsedHeader.type === "session" &&
+						typeof parsedHeader.id === "string"
+					) {
 						sourceSessionId = parsedHeader.id;
 					}
 				} catch {
@@ -408,7 +411,9 @@ export function buildTaskRunViews(records: TaskChildSessionRecord[], liveStepKey
 
 	const runs: TaskRunView[] = [];
 	for (const [internalRunKey, byStep] of byRun.entries()) {
-		const orderedRecords = Array.from(byStep.values()).sort((left, right) => left.snapshot.step - right.snapshot.step);
+		const orderedRecords = Array.from(byStep.values()).sort(
+			(left, right) => left.snapshot.step - right.snapshot.step,
+		);
 		if (orderedRecords.length === 0) continue;
 
 		const steps: TaskRunStepView[] = orderedRecords.map((record) => {
@@ -420,7 +425,8 @@ export function buildTaskRunViews(records: TaskChildSessionRecord[], liveStepKey
 
 			if (snapshot.persist) {
 				if (!snapshot.childSessionPath.trim()) warnings.push("missing child session path (stale metadata)");
-				else if (!fs.existsSync(snapshot.childSessionPath)) warnings.push("child session file missing (stale metadata)");
+				else if (!fs.existsSync(snapshot.childSessionPath))
+					warnings.push("child session file missing (stale metadata)");
 			}
 			if (!hasTerminalMetadata && !isLive) warnings.push("no terminal metadata; treated as interrupted");
 			if (!snapshot.persist) warnings.push("legacy non-persisted child session metadata");
@@ -436,7 +442,10 @@ export function buildTaskRunViews(records: TaskChildSessionRecord[], liveStepKey
 			};
 		});
 
-		const latestStep = steps.reduce((latest, current) => (current.sourceOrder > latest.sourceOrder ? current : latest), steps[0]!);
+		const latestStep = steps.reduce(
+			(latest, current) => (current.sourceOrder > latest.sourceOrder ? current : latest),
+			steps[0]!,
+		);
 		const createdAt = steps.reduce((minValue, step) => {
 			const value = toMillis(step.snapshot.createdAt);
 			if (value === 0) return minValue;
@@ -461,7 +470,8 @@ export function buildTaskRunViews(records: TaskChildSessionRecord[], liveStepKey
 			stepCount: steps.length,
 			persistedStepCount: steps.filter((step) => step.snapshot.persist).length,
 			createdAt: createdAt > 0 ? new Date(createdAt).toISOString() : latestStep.snapshot.createdAt,
-			updatedAt: updatedAt > 0 ? new Date(updatedAt).toISOString() : getSnapshotEventTimestamp(latestStep.snapshot),
+			updatedAt:
+				updatedAt > 0 ? new Date(updatedAt).toISOString() : getSnapshotEventTimestamp(latestStep.snapshot),
 			status,
 			warnings: runWarnings,
 			latestSourceOrder: Math.max(...steps.map((step) => step.sourceOrder)),
@@ -480,7 +490,11 @@ export async function reconstructRecentTaskRuns(options: {
 	maxConcurrency: number;
 	customType: string;
 	metadataVersion: number;
-	mapWithConcurrencyLimit: <T, U>(items: readonly T[], concurrency: number, fn: (item: T, index: number) => Promise<U>) => Promise<U[]>;
+	mapWithConcurrencyLimit: <T, U>(
+		items: readonly T[],
+		concurrency: number,
+		fn: (item: T, index: number) => Promise<U>,
+	) => Promise<U[]>;
 }): Promise<TaskRunView[]> {
 	if (!fs.existsSync(options.rootDir)) return [];
 	const sessionFiles = await listSessionFiles(options.rootDir);
@@ -514,14 +528,19 @@ export function reconstructCurrentTaskRuns(options: {
 	return buildTaskRunViews(records, liveSteps);
 }
 
-export function resolveTaskRunOriginSnapshot(run: TaskRunView, selectedStep?: TaskRunStepView): TaskOriginSnapshot | undefined {
+export function resolveTaskRunOriginSnapshot(
+	run: TaskRunView,
+	selectedStep?: TaskRunStepView,
+): TaskOriginSnapshot | undefined {
 	if (selectedStep) {
 		const { originEntryId, originUserEntryId, originPreview } = selectedStep.snapshot;
-		if (originEntryId || originUserEntryId || originPreview) return { originEntryId, originUserEntryId, originPreview };
+		if (originEntryId || originUserEntryId || originPreview)
+			return { originEntryId, originUserEntryId, originPreview };
 	}
 	for (const step of run.steps) {
 		const { originEntryId, originUserEntryId, originPreview } = step.snapshot;
-		if (originEntryId || originUserEntryId || originPreview) return { originEntryId, originUserEntryId, originPreview };
+		if (originEntryId || originUserEntryId || originPreview)
+			return { originEntryId, originUserEntryId, originPreview };
 	}
 	return undefined;
 }

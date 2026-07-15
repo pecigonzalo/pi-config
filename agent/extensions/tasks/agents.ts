@@ -153,7 +153,8 @@ function parseContextDefaults(value: unknown, hasValue = false): ContextDefaults
 		Object.prototype.hasOwnProperty.call(record, "mode") && mode === undefined && record.mode !== undefined
 			? record.mode
 			: undefined;
-	if (mode === undefined && project === undefined && skills === undefined && invalidModeValue === undefined) return undefined;
+	if (mode === undefined && project === undefined && skills === undefined && invalidModeValue === undefined)
+		return undefined;
 	return {
 		...(mode !== undefined ? { mode } : {}),
 		...(project !== undefined ? { project } : {}),
@@ -168,13 +169,19 @@ function parseString(value: unknown): string | undefined {
 
 function parseCsvList(value: unknown): string[] | undefined {
 	if (Array.isArray(value)) {
-		const items = value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean);
+		const items = value
+			.filter((item): item is string => typeof item === "string")
+			.map((item) => item.trim())
+			.filter(Boolean);
 		return items.length > 0 ? items : undefined;
 	}
 	if (typeof value !== "string") return undefined;
 	const normalized = value.trim().toLowerCase();
 	if (normalized === "none") return [];
-	const items = value.split(",").map((item) => item.trim()).filter(Boolean);
+	const items = value
+		.split(",")
+		.map((item) => item.trim())
+		.filter(Boolean);
 	return items.length > 0 ? items : undefined;
 }
 
@@ -236,7 +243,8 @@ function findNearestProjectDir(cwd: string, parts: string[]): string | null {
 	let currentDir = cwd;
 	while (true) {
 		const candidate = path.join(currentDir, ...parts);
-		if (!hasSymbolicPathComponent(currentDir, parts) && (isDirectory(candidate) || isFile(candidate))) return candidate;
+		if (!hasSymbolicPathComponent(currentDir, parts) && (isDirectory(candidate) || isFile(candidate)))
+			return candidate;
 		const parentDir = path.dirname(currentDir);
 		if (parentDir === currentDir) return null;
 		currentDir = parentDir;
@@ -389,7 +397,12 @@ function findSkillInDirectory(root: string, skillName: string): string | null {
 function loadMarkdownConfigs<TConfig>(
 	dir: string,
 	source: ConfigSource,
-	parse: (frontmatter: Record<string, unknown>, body: string, filePath: string, source: ConfigSource) => TConfig | null,
+	parse: (
+		frontmatter: Record<string, unknown>,
+		body: string,
+		filePath: string,
+		source: ConfigSource,
+	) => TConfig | null,
 ): TConfig[] {
 	const results: TConfig[] = [];
 	if (!isDirectory(dir)) return results;
@@ -442,11 +455,17 @@ function parseAgentConfig(
 		excludeTools: parseCsvList(frontmatter.excludeTools ?? frontmatter.exclude_tools),
 		model: parseString(frontmatter.model),
 		systemPromptMode: parseSystemPromptMode(frontmatter.systemPromptMode),
-		context: parseContextDefaults(frontmatter.context, Object.prototype.hasOwnProperty.call(frontmatter, "context")),
+		context: parseContextDefaults(
+			frontmatter.context,
+			Object.prototype.hasOwnProperty.call(frontmatter, "context"),
+		),
 		persist: parseOptionalBoolean(frontmatter.persist),
 		inheritProjectContext:
-			frontmatter.inheritProjectContext === undefined ? undefined : parseBoolean(frontmatter.inheritProjectContext, false),
-		inheritSkills: frontmatter.inheritSkills === undefined ? undefined : parseBoolean(frontmatter.inheritSkills, false),
+			frontmatter.inheritProjectContext === undefined
+				? undefined
+				: parseBoolean(frontmatter.inheritProjectContext, false),
+		inheritSkills:
+			frontmatter.inheritSkills === undefined ? undefined : parseBoolean(frontmatter.inheritSkills, false),
 		allowDelegation: parseOptionalBoolean(frontmatter.allowDelegation ?? frontmatter.allow_delegation),
 		systemPrompt: body,
 		source,
@@ -470,13 +489,21 @@ function parseProfileConfig(
 		enabled: parseBoolean(frontmatter.enabled, true),
 		tools: parseCsvList(frontmatter.tools),
 		excludeTools: parseCsvList(frontmatter.excludeTools ?? frontmatter.exclude_tools),
-		context: parseContextDefaults(frontmatter.context, Object.prototype.hasOwnProperty.call(frontmatter, "context")),
+		context: parseContextDefaults(
+			frontmatter.context,
+			Object.prototype.hasOwnProperty.call(frontmatter, "context"),
+		),
 		persist: parseOptionalBoolean(frontmatter.persist),
 		inheritProjectContext:
-			frontmatter.inheritProjectContext === undefined ? undefined : parseBoolean(frontmatter.inheritProjectContext, false),
-		inheritSkills: frontmatter.inheritSkills === undefined ? undefined : parseBoolean(frontmatter.inheritSkills, false),
+			frontmatter.inheritProjectContext === undefined
+				? undefined
+				: parseBoolean(frontmatter.inheritProjectContext, false),
+		inheritSkills:
+			frontmatter.inheritSkills === undefined ? undefined : parseBoolean(frontmatter.inheritSkills, false),
 		allowDelegation: parseOptionalBoolean(frontmatter.allowDelegation ?? frontmatter.allow_delegation),
-		permissionsProfile: parseString(frontmatter.permissionsProfile ?? frontmatter.permissions ?? frontmatter.permissionProfile),
+		permissionsProfile: parseString(
+			frontmatter.permissionsProfile ?? frontmatter.permissions ?? frontmatter.permissionProfile,
+		),
 		systemPromptMode: parseSystemPromptMode(frontmatter.systemPromptMode),
 		systemPrompt: body,
 		source,
@@ -535,7 +562,11 @@ function parseTasksConfig(raw: unknown, filePath: string, source: ConfigSource):
 	const skills = parsedContext?.skills ?? legacySkills;
 	const efforts = parseEffortEntries(record.efforts, filePath, source);
 	const context =
-		mode === undefined && project === undefined && skills === undefined && invalidModeValue === undefined && invalidShapeValue === undefined
+		mode === undefined &&
+		project === undefined &&
+		skills === undefined &&
+		invalidModeValue === undefined &&
+		invalidShapeValue === undefined
 			? undefined
 			: {
 					...(mode !== undefined ? { mode } : {}),
@@ -566,7 +597,11 @@ function mergeByName<T extends { name: string }>(items: T[]): T[] {
 	return Array.from(map.values());
 }
 
-export function resolveSkillPaths(skillNames: string[], cwd: string, projectTrusted = false): { paths: string[]; missing: string[] } {
+export function resolveSkillPaths(
+	skillNames: string[],
+	cwd: string,
+	projectTrusted = false,
+): { paths: string[]; missing: string[] } {
 	const roots = getSkillRoots(cwd, projectTrusted);
 	const resolvedPaths: string[] = [];
 	const missing: string[] = [];
@@ -596,7 +631,9 @@ export function resolveSkillPaths(skillNames: string[], cwd: string, projectTrus
 }
 
 export function hasProjectTaskResources(cwd: string): boolean {
-	return Boolean(findNearestProjectAgentsDir(cwd) || findNearestProjectProfilesDir(cwd) || findNearestProjectTasksFile(cwd));
+	return Boolean(
+		findNearestProjectAgentsDir(cwd) || findNearestProjectProfilesDir(cwd) || findNearestProjectTasksFile(cwd),
+	);
 }
 
 export function discoverResources(cwd: string, scope: AgentScope, projectTrusted = false): ResourceDiscoveryResult {
@@ -613,12 +650,20 @@ export function discoverResources(cwd: string, scope: AgentScope, projectTrusted
 	const userAgents = includeUser ? loadAgentsFromDir(userAgentsDir, "user") : [];
 	const projectAgents = includeProject && projectAgentsDir ? loadAgentsFromDir(projectAgentsDir, "project") : [];
 	const userProfiles = includeUser ? loadProfilesFromDir(userProfilesDir, "user") : [];
-	const projectProfiles = includeProject && projectProfilesDir ? loadProfilesFromDir(projectProfilesDir, "project") : [];
+	const projectProfiles =
+		includeProject && projectProfilesDir ? loadProfilesFromDir(projectProfilesDir, "project") : [];
 	const globalTasksConfig = loadTasksConfigFromFile(globalTasksFile, "user");
-	const projectTasksConfig = includeProject && projectTasksFile ? loadTasksConfigFromFile(projectTasksFile, "project") : null;
+	const projectTasksConfig =
+		includeProject && projectTasksFile ? loadTasksConfigFromFile(projectTasksFile, "project") : null;
 
-	const agents = scope === "both" ? mergeByName([...userAgents, ...projectAgents]) : mergeByName([...(scope === "user" ? userAgents : projectAgents)]);
-	const profiles = scope === "both" ? mergeByName([...userProfiles, ...projectProfiles]) : mergeByName([...(scope === "user" ? userProfiles : projectProfiles)]);
+	const agents =
+		scope === "both"
+			? mergeByName([...userAgents, ...projectAgents])
+			: mergeByName([...(scope === "user" ? userAgents : projectAgents)]);
+	const profiles =
+		scope === "both"
+			? mergeByName([...userProfiles, ...projectProfiles])
+			: mergeByName([...(scope === "user" ? userProfiles : projectProfiles)]);
 	const efforts = mergeByName([
 		...(includeUser ? (globalTasksConfig?.efforts ?? []) : []),
 		...(includeProject ? (projectTasksConfig?.efforts ?? []) : []),
@@ -657,7 +702,9 @@ export function formatAgentList(agents: AgentConfig[], maxItems: number): { text
 	const listed = agents.slice(0, maxItems);
 	const remaining = agents.length - listed.length;
 	return {
-		text: listed.map((a) => `${a.name} (${a.source}, ${a.availability}${a.enabled ? "" : ", disabled"}): ${a.description}`).join("; "),
+		text: listed
+			.map((a) => `${a.name} (${a.source}, ${a.availability}${a.enabled ? "" : ", disabled"}): ${a.description}`)
+			.join("; "),
 		remaining,
 	};
 }

@@ -70,7 +70,10 @@ describe("task resource project trust", () => {
 		const outsideProfile = path.join(cwd, "outside-profile.md");
 		await fs.mkdir(path.join(cwd, ".pi", "agents"), { recursive: true });
 		await fs.mkdir(path.join(cwd, ".pi", "profiles"), { recursive: true });
-		await fs.writeFile(outsideAgent, "---\nname: escaped-agent\ndescription: Escaped\navailability: task\n---\noutside\n");
+		await fs.writeFile(
+			outsideAgent,
+			"---\nname: escaped-agent\ndescription: Escaped\navailability: task\n---\noutside\n",
+		);
 		await fs.writeFile(outsideProfile, "---\nname: escaped-profile\ndescription: Escaped\n---\noutside\n");
 		await fs.symlink(outsideAgent, path.join(cwd, ".pi", "agents", "escaped.md"));
 		await fs.symlink(outsideProfile, path.join(cwd, ".pi", "profiles", "escaped.md"));
@@ -212,6 +215,9 @@ describe("task skill path security", () => {
 		await fs.writeFile(path.join(skillDir, "SKILL.md"), "safe");
 
 		expect(resolveSkillPaths(["safe-skill"], cwd, false)).toEqual({ paths: [], missing: ["safe-skill"] });
-		expect(resolveSkillPaths(["safe-skill"], cwd, true)).toEqual({ paths: [await fs.realpath(skillDir)], missing: [] });
+		expect(resolveSkillPaths(["safe-skill"], cwd, true)).toEqual({
+			paths: [await fs.realpath(skillDir)],
+			missing: [],
+		});
 	});
 });

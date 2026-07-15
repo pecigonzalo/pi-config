@@ -26,7 +26,11 @@ beforeAll(async () => {
 
 	mock.module("typebox", () => ({
 		Type: {
-			Object: (properties: unknown, options?: Record<string, unknown>) => ({ type: "object", properties, ...options }),
+			Object: (properties: unknown, options?: Record<string, unknown>) => ({
+				type: "object",
+				properties,
+				...options,
+			}),
 			String: (options?: Record<string, unknown>) => ({ type: "string", ...options }),
 			Optional: (value: unknown) => value,
 			Number: (options?: Record<string, unknown>) => ({ type: "number", ...options }),
@@ -100,7 +104,11 @@ beforeAll(async () => {
 					cwd: targetCwd,
 					parentSession: sourcePath,
 				};
-				syncFs.writeFileSync(sessionFile, `${[header, ...rest].map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf-8");
+				syncFs.writeFileSync(
+					sessionFile,
+					`${[header, ...rest].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+					"utf-8",
+				);
 				const lastEntry = rest[rest.length - 1] as { id?: string } | undefined;
 				return {
 					getSessionFile: () => sessionFile,
@@ -252,21 +260,31 @@ describe("tasks extension UI chrome", () => {
 		expect(statusCalls).toEqual([["tasks.runs", undefined]]);
 
 		await eventHandlers.session_shutdown?.({}, ctx);
-		expect(widgetCalls).toEqual([["tasks.runs", undefined], ["tasks.runs", undefined]]);
-		expect(statusCalls).toEqual([["tasks.runs", undefined], ["tasks.runs", undefined]]);
+		expect(widgetCalls).toEqual([
+			["tasks.runs", undefined],
+			["tasks.runs", undefined],
+		]);
+		expect(statusCalls).toEqual([
+			["tasks.runs", undefined],
+			["tasks.runs", undefined],
+		]);
 	});
 
 	it("awaits live controller shutdown and rejects pending RPCs", async () => {
 		const { eventHandlers } = createExtensionHarness();
 		const live = await import("./task-live.js");
 		let rejectPending: ((error: Error) => void) | undefined;
-		const pending = new Promise((_resolve, reject) => { rejectPending = reject; });
+		const pending = new Promise((_resolve, reject) => {
+			rejectPending = reject;
+		});
 		let releaseClose: (() => void) | undefined;
 		live.setLiveTaskController({
 			key: "shutdown-test",
 			close: async (error: Error = new Error("closed")) => {
 				rejectPending?.(error);
-				await new Promise<void>((resolve) => { releaseClose = resolve; });
+				await new Promise<void>((resolve) => {
+					releaseClose = resolve;
+				});
 			},
 		} as any);
 		const ctx = {
@@ -276,7 +294,9 @@ describe("tasks extension UI chrome", () => {
 			sessionManager: { getSessionId: () => "shutdown", getSessionFile: () => undefined },
 		};
 		let shutdownFinished = false;
-		const shutdown = eventHandlers.session_shutdown?.({}, ctx).then(() => { shutdownFinished = true; });
+		const shutdown = eventHandlers.session_shutdown?.({}, ctx).then(() => {
+			shutdownFinished = true;
+		});
 		await expect(pending).rejects.toThrow("shut down");
 		expect(shutdownFinished).toBe(false);
 		releaseClose?.();
@@ -483,7 +503,12 @@ describe("tasks project trust integration", () => {
 		lastDiscoveryProjectTrusted = undefined;
 		try {
 			const { eventHandlers, tool } = createExtensionHarness();
-			const createContext = (cwd: string, sessionId: string, hasUI: boolean, confirm: () => Promise<boolean>) => ({
+			const createContext = (
+				cwd: string,
+				sessionId: string,
+				hasUI: boolean,
+				confirm: () => Promise<boolean>,
+			) => ({
 				cwd,
 				hasUI,
 				isProjectTrusted: () => true,
@@ -507,15 +532,21 @@ describe("tasks project trust integration", () => {
 			expect(lastDiscoveryProjectTrusted as boolean | undefined).toBe(false);
 
 			mockResources = createResources({
-				projectTasksConfig: { source: "project", filePath: path.join(projectB, ".pi", "tasks.json"), persist: false },
+				projectTasksConfig: {
+					source: "project",
+					filePath: path.join(projectB, ".pi", "tasks.json"),
+					persist: false,
+				},
 			});
-			await expect(tool.execute(
-				"tool-b",
-				{ steps: [{ task: "Do work", prompt: "Worker prompt" }], agentScope: "both" },
-				new AbortController().signal,
-				() => {},
-				contextB,
-			)).rejects.toThrow("Project task resources require a trusted project");
+			await expect(
+				tool.execute(
+					"tool-b",
+					{ steps: [{ task: "Do work", prompt: "Worker prompt" }], agentScope: "both" },
+					new AbortController().signal,
+					() => {},
+					contextB,
+				),
+			).rejects.toThrow("Project task resources require a trusted project");
 		} finally {
 			mockHasProjectTaskResources = false;
 			mockSavedProjectTrust = null;
@@ -625,7 +656,12 @@ describe("tasks extension compact schema", () => {
 
 		const result = await tool.execute(
 			"tc-compact",
-			{ steps: [{ task: "First", prompt: "Worker" }, { task: "Second", prompt: "Worker" }] },
+			{
+				steps: [
+					{ task: "First", prompt: "Worker" },
+					{ task: "Second", prompt: "Worker" },
+				],
+			},
 			undefined,
 			undefined,
 			{
@@ -647,8 +683,12 @@ describe("tasks extension compact schema", () => {
 
 		expect(tool.promptSnippet).toContain("each step needs `agent` or behavioral `prompt`");
 		expect(tool.promptGuidelines.join("\n")).toContain("do not send bare `{ task: ... }` steps");
-		expect(tool.parameters.properties.steps.items.properties.agent.description).toContain("Required unless `prompt`");
-		expect(tool.parameters.properties.steps.items.properties.prompt.description).toContain("Required for generic workers");
+		expect(tool.parameters.properties.steps.items.properties.agent.description).toContain(
+			"Required unless `prompt`",
+		);
+		expect(tool.parameters.properties.steps.items.properties.prompt.description).toContain(
+			"Required for generic workers",
+		);
 	});
 
 	it("injects exact task agent and effort choices into the system prompt", async () => {
@@ -709,8 +749,12 @@ describe("tasks extension compact schema", () => {
 		expect(result.systemPrompt).toContain("`balanced` (openai-codex/gpt-5.6-terra)");
 		expect(result.systemPrompt).toContain("`smart` (openai-codex/gpt-5.6-sol, thinking: `high`)");
 		expect(result.systemPrompt).toContain("do not use a thinking level such as `high` as an effort");
-		expect(result.systemPrompt).toContain('omit `agent` and provide a behavioral `prompt`; do not set `agent: "generic"`');
-		expect(result.systemPrompt).toContain("Child workers cannot use `task` unless their selected agent or profile declares `allowDelegation: true`");
+		expect(result.systemPrompt).toContain(
+			'omit `agent` and provide a behavioral `prompt`; do not set `agent: "generic"`',
+		);
+		expect(result.systemPrompt).toContain(
+			"Child workers cannot use `task` unless their selected agent or profile declares `allowDelegation: true`",
+		);
 	});
 
 	it("rejects bare generic task steps with actionable recovery guidance", async () => {
@@ -939,16 +983,18 @@ describe("tasks project resource execution guardrails", () => {
 
 	it("rejects an explicitly selected project profile when untrusted", async () => {
 		const resources = createResources({
-			profiles: [{
-				name: "project-profile",
-				description: "project profile",
-				enabled: true,
-				systemPromptMode: "append",
-				systemPrompt: "Project behavior",
-				source: "project",
-				filePath: "/project/profiles/project-profile.md",
-				persist: false,
-			}],
+			profiles: [
+				{
+					name: "project-profile",
+					description: "project profile",
+					enabled: true,
+					systemPromptMode: "append",
+					systemPrompt: "Project behavior",
+					source: "project",
+					filePath: "/project/profiles/project-profile.md",
+					persist: false,
+				},
+			],
 		});
 
 		const preflight = await __test__.preflightTaskRun(
@@ -985,16 +1031,18 @@ describe("tasks project resource execution guardrails", () => {
 
 	it("allows project profiles and efforts after project trust is established", async () => {
 		const resources = createResources({
-			profiles: [{
-				name: "project-profile",
-				description: "project profile",
-				enabled: true,
-				systemPromptMode: "append",
-				systemPrompt: "Project behavior",
-				source: "project",
-				filePath: "/project/profiles/project-profile.md",
-				persist: false,
-			}],
+			profiles: [
+				{
+					name: "project-profile",
+					description: "project profile",
+					enabled: true,
+					systemPromptMode: "append",
+					systemPrompt: "Project behavior",
+					source: "project",
+					filePath: "/project/profiles/project-profile.md",
+					persist: false,
+				},
+			],
 			efforts: [{ name: "project-effort", model: "model", source: "project", filePath: "/project/tasks.json" }],
 		});
 
@@ -1026,21 +1074,15 @@ describe("tasks extension persisted-session guardrails", () => {
 		const tool = createTaskTool();
 
 		await expect(
-			tool.execute(
-				"tc-1",
-				{ task: "Do work", prompt: "Be concise", persist: true },
-				undefined,
-				undefined,
-				{
-					cwd: process.cwd(),
-					hasUI: false,
-					sessionManager: {
-						getSessionFile: () => undefined,
-						getBranch: () => [],
-						appendCustomEntry: () => "entry-id",
-					},
+			tool.execute("tc-1", { task: "Do work", prompt: "Be concise", persist: true }, undefined, undefined, {
+				cwd: process.cwd(),
+				hasUI: false,
+				sessionManager: {
+					getSessionFile: () => undefined,
+					getBranch: () => [],
+					appendCustomEntry: () => "entry-id",
 				},
-			),
+			}),
 		).rejects.toThrow("Runtime persist overrides are not supported");
 	});
 
@@ -1171,7 +1213,9 @@ describe("tasks extension persisted-session guardrails", () => {
 				},
 				inheritedComposition,
 				parentMessage,
-			].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+			]
+				.map((entry) => JSON.stringify(entry))
+				.join("\n")}\n`,
 			"utf-8",
 		);
 
@@ -1214,7 +1258,13 @@ describe("tasks extension persisted-session guardrails", () => {
 		await fs.mkdir(path.dirname(parentSessionFile), { recursive: true });
 		await fs.writeFile(
 			parentSessionFile,
-			JSON.stringify({ type: "session", version: 3, id: parentSessionId, timestamp: new Date().toISOString(), cwd: process.cwd() }) + "\n",
+			JSON.stringify({
+				type: "session",
+				version: 3,
+				id: parentSessionId,
+				timestamp: new Date().toISOString(),
+				cwd: process.cwd(),
+			}) + "\n",
 			"utf-8",
 		);
 
@@ -1243,7 +1293,8 @@ describe("tasks extension persisted-session guardrails", () => {
 			process.cwd(),
 			{
 				getSessionFile: () => parentSessionFile,
-				getBranch: () => [{ type: "session", id: parentSessionId, version: 3, timestamp: new Date().toISOString() }] as any,
+				getBranch: () =>
+					[{ type: "session", id: parentSessionId, version: 3, timestamp: new Date().toISOString() }] as any,
 			},
 		);
 
@@ -1291,7 +1342,13 @@ describe("tasks extension persisted-session guardrails", () => {
 
 	it("falls back to the session file when the in-memory branch omits the session header", async () => {
 		const parentSessionFile = path.join(testAgentDir, "sessions", "workspace", "main", "parent-from-file.jsonl");
-		const childSessionFile = path.join(testAgentDir, "sessions", "workspace", "child", "task-child-from-file.jsonl");
+		const childSessionFile = path.join(
+			testAgentDir,
+			"sessions",
+			"workspace",
+			"child",
+			"task-child-from-file.jsonl",
+		);
 		await fs.mkdir(path.dirname(childSessionFile), { recursive: true });
 		await fs.writeFile(
 			childSessionFile,
@@ -1316,7 +1373,13 @@ describe("tasks extension persisted-session guardrails", () => {
 	});
 
 	it("does not resolve a parent session without a parentSession header", async () => {
-		const currentSessionFile = path.join(testAgentDir, "sessions", "workspace", "child", "task-child-without-parent.jsonl");
+		const currentSessionFile = path.join(
+			testAgentDir,
+			"sessions",
+			"workspace",
+			"child",
+			"task-child-without-parent.jsonl",
+		);
 		await fs.mkdir(path.dirname(currentSessionFile), { recursive: true });
 		await fs.writeFile(
 			currentSessionFile,
@@ -1340,17 +1403,23 @@ describe("effort resolution", () => {
 	});
 
 	it("uses provider to qualify bare effort models", () => {
-		const resolved = __test__.resolveModelFromEffort(undefined, "smart", createResources({
-			efforts: [{
-				name: "smart",
-				description: "smart effort",
-				provider: "github-copilot",
-				model: "gpt-5.4",
-				thinkingLevel: "high",
-				source: "user",
-				filePath: "/tmp/tasks.json",
-			}],
-		}) as any);
+		const resolved = __test__.resolveModelFromEffort(
+			undefined,
+			"smart",
+			createResources({
+				efforts: [
+					{
+						name: "smart",
+						description: "smart effort",
+						provider: "github-copilot",
+						model: "gpt-5.4",
+						thinkingLevel: "high",
+						source: "user",
+						filePath: "/tmp/tasks.json",
+					},
+				],
+			}) as any,
+		);
 
 		expect(resolved.error).toBeUndefined();
 		expect(resolved.model).toBe("github-copilot/gpt-5.4");
@@ -1358,17 +1427,23 @@ describe("effort resolution", () => {
 	});
 
 	it("rejects mismatched provider and fully qualified effort model", () => {
-		const resolved = __test__.resolveModelFromEffort(undefined, "smart", createResources({
-			efforts: [{
-				name: "smart",
-				description: "smart effort",
-				provider: "openrouter",
-				model: "github-copilot/gpt-5.4",
-				thinkingLevel: "high",
-				source: "user",
-				filePath: "/tmp/tasks.json",
-			}],
-		}) as any);
+		const resolved = __test__.resolveModelFromEffort(
+			undefined,
+			"smart",
+			createResources({
+				efforts: [
+					{
+						name: "smart",
+						description: "smart effort",
+						provider: "openrouter",
+						model: "github-copilot/gpt-5.4",
+						thinkingLevel: "high",
+						source: "user",
+						filePath: "/tmp/tasks.json",
+					},
+				],
+			}) as any,
+		);
 
 		expect(resolved.model).toBeUndefined();
 		expect(resolved.error).toContain('provider "openrouter"');
@@ -1382,15 +1457,17 @@ describe("main-session effort command", () => {
 
 	it("applies effort thinking level when switching the main session", async () => {
 		mockResources = createResources({
-			efforts: [{
-				name: "smart",
-				description: "smart effort",
-				provider: "github-copilot",
-				model: "gpt-5.4",
-				thinkingLevel: "high",
-				source: "user",
-				filePath: "/tmp/tasks.json",
-			}],
+			efforts: [
+				{
+					name: "smart",
+					description: "smart effort",
+					provider: "github-copilot",
+					model: "gpt-5.4",
+					thinkingLevel: "high",
+					source: "user",
+					filePath: "/tmp/tasks.json",
+				},
+			],
 		});
 		const { commandHandlers, pi } = createExtensionHarness();
 		const thinkingLevels: string[] = [];
@@ -1594,7 +1671,11 @@ describe("main-session composition recovery", () => {
 
 describe("tasks extension RPC UI relay", () => {
 	it("relays dialog requests to the parent UI and returns the selected value", async () => {
-		const selectCalls: Array<{ title: string; options: string[]; dialogOptions?: { timeout?: number; signal?: AbortSignal } }> = [];
+		const selectCalls: Array<{
+			title: string;
+			options: string[];
+			dialogOptions?: { timeout?: number; signal?: AbortSignal };
+		}> = [];
 		const responses: Record<string, unknown>[] = [];
 
 		await __test__.relayTaskExtensionUiRequest({
@@ -1610,7 +1691,11 @@ describe("tasks extension RPC UI relay", () => {
 			parentUi: {
 				hasUI: true,
 				ui: {
-					select: async (title: string, options: string[], dialogOptions?: { timeout?: number; signal?: AbortSignal }) => {
+					select: async (
+						title: string,
+						options: string[],
+						dialogOptions?: { timeout?: number; signal?: AbortSignal },
+					) => {
 						selectCalls.push({ title, options, dialogOptions });
 						return "Allow once";
 					},
@@ -1654,7 +1739,12 @@ describe("tasks extension RPC UI relay", () => {
 		};
 
 		const firstRelay = __test__.relayTaskExtensionUiRequest({
-			request: { type: "extension_ui_request", id: "req-confirm-1", method: "confirm", title: "Permission required" },
+			request: {
+				type: "extension_ui_request",
+				id: "req-confirm-1",
+				method: "confirm",
+				title: "Permission required",
+			},
 			controller: { agent: "thinker", step: 1, key: "run-dialog:1" },
 			parentUi,
 			sendResponse: async (payload: Record<string, unknown>) => {
@@ -1662,7 +1752,12 @@ describe("tasks extension RPC UI relay", () => {
 			},
 		});
 		const secondRelay = __test__.relayTaskExtensionUiRequest({
-			request: { type: "extension_ui_request", id: "req-confirm-2", method: "confirm", title: "Permission required" },
+			request: {
+				type: "extension_ui_request",
+				id: "req-confirm-2",
+				method: "confirm",
+				title: "Permission required",
+			},
 			controller: { agent: "thinker", step: 2, key: "run-dialog:2" },
 			parentUi,
 			sendResponse: async (payload: Record<string, unknown>) => {
@@ -1770,11 +1865,7 @@ describe("tasks extension RPC UI relay", () => {
 
 		expect(widgetCalls).toHaveLength(1);
 		expect(widgetCalls[0]?.[0]).toContain("tasks.rpc.run-3-2.widget.approval");
-		expect(widgetCalls[0]?.[1]).toEqual([
-			"[Task thinker step 2] Choose an option",
-			"Allow once",
-			"Block",
-		]);
+		expect(widgetCalls[0]?.[1]).toEqual(["[Task thinker step 2] Choose an option", "Allow once", "Block"]);
 		expect(widgetCalls[0]?.[2]).toEqual({ placement: "belowEditor" });
 		expect([...trackedWidgetKeys]).toEqual([widgetCalls[0]?.[0]]);
 	});
@@ -1923,7 +2014,10 @@ describe("task result formatting", () => {
 			"bash",
 			"edit",
 		]);
-		expect(items.filter((item: any) => item.type === "toolResult").map((item: any) => item.name)).toEqual(["grep", "edit"]);
+		expect(items.filter((item: any) => item.type === "toolResult").map((item: any) => item.name)).toEqual([
+			"grep",
+			"edit",
+		]);
 	});
 
 	it("accepts namespaced edit tool names", () => {
@@ -1940,15 +2034,21 @@ describe("task result formatting", () => {
 			},
 		] as any);
 
-		expect(items.filter((item: any) => item.type === "toolCall").map((item: any) => item.name)).toEqual(["functions.edit"]);
-		expect(items.filter((item: any) => item.type === "toolResult").map((item: any) => item.name)).toEqual(["functions.edit"]);
+		expect(items.filter((item: any) => item.type === "toolCall").map((item: any) => item.name)).toEqual([
+			"functions.edit",
+		]);
+		expect(items.filter((item: any) => item.type === "toolResult").map((item: any) => item.name)).toEqual([
+			"functions.edit",
+		]);
 	});
 
 	it("formats namespaced built-in tool calls compactly", () => {
 		const fg = (_color: string, value: string) => value;
 
 		expect(__test__.formatToolCall("functions.read", { path: "README.md" }, fg)).toBe("read: README.md");
-		expect(__test__.formatToolCall("functions.grep", { pattern: "TODO", path: "src" }, fg)).toBe("grep: /TODO/ in src");
+		expect(__test__.formatToolCall("functions.grep", { pattern: "TODO", path: "src" }, fg)).toBe(
+			"grep: /TODO/ in src",
+		);
 	});
 
 	it("omits unknown fresh task metadata from headers", () => {
@@ -2119,7 +2219,11 @@ describe("task origin resolution", () => {
 			[
 				{ type: "message", id: "user-1", message: { role: "user", content: "Initial request" } },
 				{ type: "message", id: "assistant-1", message: { role: "assistant", content: "Thinking" } },
-				{ type: "message", id: "user-2", message: { role: "user", content: "Please continue with the task browser UX" } },
+				{
+					type: "message",
+					id: "user-2",
+					message: { role: "user", content: "Please continue with the task browser UX" },
+				},
 				{ type: "message", id: "assistant-2", message: { role: "assistant", content: "Calling task tool" } },
 			] as any,
 			"assistant-2",
@@ -2137,7 +2241,10 @@ describe("task terminal backend configuration", () => {
 	it("parses disabled and explicit backend preferences", () => {
 		expect(__test__.parseTaskTerminalBackendPreference("disabled")).toEqual({ preference: "disabled" });
 		expect(__test__.parseTaskTerminalBackendPreference("wezterm")).toEqual({ preference: "wezterm" });
-		expect(__test__.parseTaskTerminalBackendPreference("bogus")).toEqual({ preference: "disabled", unsupported: "bogus" });
+		expect(__test__.parseTaskTerminalBackendPreference("bogus")).toEqual({
+			preference: "disabled",
+			unsupported: "bogus",
+		});
 	});
 
 	it("normalizes legacy wezterm metadata into generic terminal fields", () => {
@@ -2326,20 +2433,42 @@ describe("persisted child metadata lifecycle", () => {
 
 	function fakeResult() {
 		return {
-			agent: "worker", agentSource: "user", task: "metadata task", exitCode: 0,
-		messages: [], stderr: "", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		model: undefined, step: 1, sessionMode: "fresh", sessionPersist: true, stopReason: "completed",
+			agent: "worker",
+			agentSource: "user",
+			task: "metadata task",
+			exitCode: 0,
+			messages: [],
+			stderr: "",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			model: undefined,
+			step: 1,
+			sessionMode: "fresh",
+			sessionPersist: true,
+			stopReason: "completed",
 		};
 	}
 
-	for (const appendCustomEntry of [undefined, () => { throw new Error("append failed"); }]) {
+	for (const appendCustomEntry of [
+		undefined,
+		() => {
+			throw new Error("append failed");
+		},
+	]) {
 		it(`cleans up a child when initial metadata ${appendCustomEntry ? "throws" : "is unavailable"}`, async () => {
 			const preparedStep = preparedPersistedStep();
 			const result = await __test__.runTaskStepWithMetadata({
-				preparedStep, task: "metadata task", mode: "single", step: 1, toolCallId: "tool-call",
-				signal: undefined, onUpdate: undefined, makeDetails: () => ({}) as any,
+				preparedStep,
+				task: "metadata task",
+				mode: "single",
+				step: 1,
+				toolCallId: "tool-call",
+				signal: undefined,
+				onUpdate: undefined,
+				makeDetails: () => ({}) as any,
 				sessionManager: { appendCustomEntry },
-				runAgent: async () => { throw new Error("must not launch"); },
+				runAgent: async () => {
+					throw new Error("must not launch");
+				},
 			});
 			expect(result.exitCode).toBe(1);
 			expect(preparedStep.session.sessionFile).toBeUndefined();
@@ -2350,10 +2479,29 @@ describe("persisted child metadata lifecycle", () => {
 		const entries: any[] = [];
 		const preparedStep = preparedPersistedStep();
 		const result = await __test__.runTaskStepWithMetadata({
-			preparedStep, task: "metadata task", mode: "single", step: 1, toolCallId: "tool-call",
-			signal: undefined, onUpdate: undefined, makeDetails: () => ({}) as any,
-			sessionManager: { appendCustomEntry: (_type: string, data: unknown) => { entries.push(data); return "entry"; } },
-			runAgent: async (_step: unknown, _task: string, _number: number | undefined, _signal: AbortSignal | undefined, _update: unknown, _details: unknown, snapshot: unknown) => {
+			preparedStep,
+			task: "metadata task",
+			mode: "single",
+			step: 1,
+			toolCallId: "tool-call",
+			signal: undefined,
+			onUpdate: undefined,
+			makeDetails: () => ({}) as any,
+			sessionManager: {
+				appendCustomEntry: (_type: string, data: unknown) => {
+					entries.push(data);
+					return "entry";
+				},
+			},
+			runAgent: async (
+				_step: unknown,
+				_task: string,
+				_number: number | undefined,
+				_signal: AbortSignal | undefined,
+				_update: unknown,
+				_details: unknown,
+				snapshot: unknown,
+			) => {
 				expect(entries[0].status).toBe("created");
 				expect(snapshot).toEqual(entries[0]);
 				return fakeResult();
@@ -2376,7 +2524,9 @@ describe("parallel cancellation", () => {
 			async (item: number) => {
 				if (item > 0) queuedCallbackInvoked = true;
 				started.push(item);
-				await new Promise<void>((resolve) => { release = resolve; });
+				await new Promise<void>((resolve) => {
+					release = resolve;
+				});
 				return item;
 			},
 			{
@@ -2493,7 +2643,9 @@ describe("tasks RPC completion coordination", () => {
 
 	it("waits for pending responses until cleanup reschedules completion", async () => {
 		const harness = createCompletionHarness();
-		(harness.controller as { pendingResponses: Map<string, unknown> }).pendingResponses = new Map([["response", {}]]);
+		(harness.controller as { pendingResponses: Map<string, unknown> }).pendingResponses = new Map([
+			["response", {}],
+		]);
 		harness.coordinator.onAgentStart();
 		harness.coordinator.onAgentEnd();
 		harness.coordinator.onAgentSettled();
@@ -2560,7 +2712,15 @@ describe("tasks RPC completion coordination", () => {
 
 test("tasks completions list all accepted subcommands", () => {
 	expect(__test__.TASKS_COMPLETIONS.map((s: { value: string }) => s.value)).toEqual([
-		"list", "show", "view", "open", "attach", "origin", "steer", "parent", "toggle",
+		"list",
+		"show",
+		"view",
+		"open",
+		"attach",
+		"origin",
+		"steer",
+		"parent",
+		"toggle",
 	]);
 });
 

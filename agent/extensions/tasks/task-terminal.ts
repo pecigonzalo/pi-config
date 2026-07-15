@@ -65,8 +65,14 @@ export function isTaskTerminalBackendId(value: unknown): value is TaskTerminalBa
 
 export function getTaskTerminalAttachment(snapshot: TaskTerminalAttachmentFields): TaskTerminalAttachment | undefined {
 	if (isTaskTerminalBackendId(snapshot.terminalBackend)) {
-		const targetId = typeof snapshot.terminalTargetId === "string" && snapshot.terminalTargetId.trim() ? snapshot.terminalTargetId : undefined;
-		const workspace = typeof snapshot.terminalWorkspace === "string" && snapshot.terminalWorkspace.trim() ? snapshot.terminalWorkspace : undefined;
+		const targetId =
+			typeof snapshot.terminalTargetId === "string" && snapshot.terminalTargetId.trim()
+				? snapshot.terminalTargetId
+				: undefined;
+		const workspace =
+			typeof snapshot.terminalWorkspace === "string" && snapshot.terminalWorkspace.trim()
+				? snapshot.terminalWorkspace
+				: undefined;
 		if (targetId || workspace) {
 			return {
 				backend: snapshot.terminalBackend,
@@ -85,7 +91,10 @@ export function getTaskTerminalAttachment(snapshot: TaskTerminalAttachmentFields
 	return undefined;
 }
 
-export function applyTaskTerminalAttachment<T extends TaskTerminalAttachmentFields>(snapshot: T, attachment: TaskTerminalAttachment): T {
+export function applyTaskTerminalAttachment<T extends TaskTerminalAttachmentFields>(
+	snapshot: T,
+	attachment: TaskTerminalAttachment,
+): T {
 	const next = {
 		...snapshot,
 		terminalBackend: attachment.backend,
@@ -102,7 +111,11 @@ export function applyTaskTerminalAttachment<T extends TaskTerminalAttachmentFiel
 	return next as T;
 }
 
-async function runCommand(command: string, args: string[], options?: { cwd?: string }): Promise<CommandExecutionResult> {
+async function runCommand(
+	command: string,
+	args: string[],
+	options?: { cwd?: string },
+): Promise<CommandExecutionResult> {
 	return await new Promise<CommandExecutionResult>((resolve) => {
 		const proc = spawn(command, args, {
 			cwd: options?.cwd,
@@ -121,7 +134,13 @@ async function runCommand(command: string, args: string[], options?: { cwd?: str
 		proc.once("error", (error) => {
 			if (settled) return;
 			settled = true;
-			resolve({ ok: false, stdout, stderr, code: null, error: error instanceof Error ? error.message : String(error) });
+			resolve({
+				ok: false,
+				stdout,
+				stderr,
+				code: null,
+				error: error instanceof Error ? error.message : String(error),
+			});
 		});
 		proc.once("close", (code) => {
 			if (settled) return;
@@ -131,7 +150,11 @@ async function runCommand(command: string, args: string[], options?: { cwd?: str
 	});
 }
 
-async function runDetachedCommand(command: string, args: string[], options?: { cwd?: string }): Promise<{ ok: boolean; error?: string }> {
+async function runDetachedCommand(
+	command: string,
+	args: string[],
+	options?: { cwd?: string },
+): Promise<{ ok: boolean; error?: string }> {
 	return await new Promise<{ ok: boolean; error?: string }>((resolve) => {
 		let settled = false;
 		try {
@@ -166,7 +189,14 @@ function getWezTermDomain(): string {
 async function openWezTermWorkspace(workspace?: string): Promise<{ ok: boolean; error?: string }> {
 	const resolvedWorkspace = workspace?.trim() || TASKS_WEZTERM_WORKSPACE;
 	const domain = getWezTermDomain();
-	const result = await runDetachedCommand("wezterm", ["start", "--workspace", resolvedWorkspace, "--domain", domain, "--attach"]);
+	const result = await runDetachedCommand("wezterm", [
+		"start",
+		"--workspace",
+		resolvedWorkspace,
+		"--domain",
+		domain,
+		"--attach",
+	]);
 	if (result.ok) return { ok: true };
 	return {
 		ok: false,
@@ -239,9 +269,14 @@ const taskTerminalBackends: Record<TaskTerminalBackendId, TaskTerminalBackend> =
 				options.command,
 				...options.args,
 			];
-			const result = await runDetachedCommand("wezterm", startArgs, { cwd: options.cwd ?? path.dirname(options.sessionPath) });
+			const result = await runDetachedCommand("wezterm", startArgs, {
+				cwd: options.cwd ?? path.dirname(options.sessionPath),
+			});
 			if (!result.ok) {
-				return { ok: false, error: `Failed to launch WezTerm task session: ${result.error ?? "failed to start"}` };
+				return {
+					ok: false,
+					error: `Failed to launch WezTerm task session: ${result.error ?? "failed to start"}`,
+				};
 			}
 			return {
 				ok: true,
@@ -260,14 +295,19 @@ const taskTerminalBackends: Record<TaskTerminalBackendId, TaskTerminalBackend> =
 	},
 };
 
-export async function resolveTaskTerminalBackendById(id: TaskTerminalBackendId): Promise<{ backend?: TaskTerminalBackend; reason?: string }> {
+export async function resolveTaskTerminalBackendById(
+	id: TaskTerminalBackendId,
+): Promise<{ backend?: TaskTerminalBackend; reason?: string }> {
 	const backend = taskTerminalBackends[id];
 	const availability = await backend.detectAvailability();
 	if (availability.available) return { backend };
 	return { reason: `${backend.displayName} is unavailable${availability.reason ? `: ${availability.reason}` : "."}` };
 }
 
-export async function resolveConfiguredTaskTerminalBackend(): Promise<{ backend?: TaskTerminalBackend; reason?: string }> {
+export async function resolveConfiguredTaskTerminalBackend(): Promise<{
+	backend?: TaskTerminalBackend;
+	reason?: string;
+}> {
 	const preference = parseTaskTerminalBackendPreference();
 	if (preference.unsupported) {
 		return {
@@ -290,7 +330,10 @@ export async function resolveConfiguredTaskTerminalBackend(): Promise<{ backend?
 }
 
 export function formatTaskTerminalAttachment(attachment: TaskTerminalAttachment): string {
-	return taskTerminalBackends[attachment.backend]?.formatAttachment(attachment) ?? `${attachment.backend} ${attachment.targetId}`;
+	return (
+		taskTerminalBackends[attachment.backend]?.formatAttachment(attachment) ??
+		`${attachment.backend} ${attachment.targetId}`
+	);
 }
 
 export function getTaskAttachActionLabel(): string {

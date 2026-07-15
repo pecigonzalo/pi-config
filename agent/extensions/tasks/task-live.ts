@@ -75,7 +75,8 @@ function getFinalAssistantText(messages: Message[]): string | undefined {
 		const msg = messages[i];
 		if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
 		for (const part of msg.content) {
-			if (typeof part === "object" && part !== null && part.type === "text" && typeof part.text === "string") return part.text;
+			if (typeof part === "object" && part !== null && part.type === "text" && typeof part.text === "string")
+				return part.text;
 		}
 	}
 	return undefined;
@@ -157,7 +158,10 @@ export function sendLiveTaskRpcCommand(
 		if (options.signal) options.signal.addEventListener("abort", onAbort, { once: true });
 		const timeoutMs = options.timeout === undefined ? DEFAULT_LIVE_TASK_RPC_TIMEOUT_MS : options.timeout;
 		if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-			timeoutHandle = setTimeout(() => settle(() => reject(new Error("Live task RPC command timed out"))), timeoutMs);
+			timeoutHandle = setTimeout(
+				() => settle(() => reject(new Error("Live task RPC command timed out"))),
+				timeoutMs,
+			);
 		}
 		const stdin = controller.proc.stdin;
 		if (stdin.destroyed || stdin.writable === false) {
@@ -174,7 +178,9 @@ export function sendLiveTaskRpcCommand(
 	});
 }
 
-function readLiveTaskRuntimeInfoFromMessages(messages: Message[]): Pick<LiveTaskRuntimeInfo, "messageCount" | "lastAssistantText"> {
+function readLiveTaskRuntimeInfoFromMessages(
+	messages: Message[],
+): Pick<LiveTaskRuntimeInfo, "messageCount" | "lastAssistantText"> {
 	return {
 		messageCount: messages.length,
 		lastAssistantText: getFinalAssistantText(messages),
@@ -206,7 +212,11 @@ export async function readLiveTaskRuntimeInfo(controller: LiveTaskController): P
 
 	try {
 		const messagesResponse = await sendLiveTaskRpcCommand(controller, { type: "get_messages" });
-		if (messagesResponse.success !== false && isRecord(messagesResponse.data) && Array.isArray(messagesResponse.data.messages)) {
+		if (
+			messagesResponse.success !== false &&
+			isRecord(messagesResponse.data) &&
+			Array.isArray(messagesResponse.data.messages)
+		) {
 			const messages = messagesResponse.data.messages as Message[];
 			controller.lastMessageCount = messages.length;
 			Object.assign(info, readLiveTaskRuntimeInfoFromMessages(messages));

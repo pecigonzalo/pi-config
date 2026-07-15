@@ -1,0 +1,23 @@
+node_modules/
+.git/
+.pi/
+agent/sessions/
+
+# Sensitive and runtime JSON
+agent/auth.json
+agent/keybindings.json
+agent/mcp.json
+agent/permissions-approvals.json
+agent/settings.json
+agent/tasks.json
+agent/themes/*.json
+agent/trust.json
+**/*.log
+
+# Snapshots and generated artifacts
+**/__snapshots__/
+**/*.snap
+agent/extensions/footer/footer.schema.json
+
+# Extension permission manifests
+agent/extensions/permissions/**
