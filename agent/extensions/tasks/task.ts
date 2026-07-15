@@ -1077,6 +1077,17 @@ function escapeXmlAttribute(value: string): string {
 	return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+let discoveredSkills: Array<{ name: string; filePath: string }> = [];
+
+function extractDiscoveredSkills(skills: unknown[] | undefined): Array<{ name: string; filePath: string }> {
+	return (skills ?? []).flatMap((skill) => {
+		if (!skill || typeof skill !== "object") return [];
+		const candidate = skill as { name?: unknown; filePath?: unknown };
+		if (typeof candidate.name !== "string" || typeof candidate.filePath !== "string") return [];
+		return [{ name: candidate.name, filePath: candidate.filePath }];
+	});
+}
+
 async function loadRequiredSkillInstructions(skillPaths: string[]): Promise<string> {
 	const instructionPaths: string[] = [];
 	for (const skillPath of skillPaths) {
@@ -1120,7 +1131,7 @@ async function prepareWorkerSystemPrompt(
 	projectTrusted: boolean,
 ): Promise<string> {
 	if (!worker.skills || worker.skills.length === 0) return worker.systemPrompt;
-	const { paths, missing } = resolveSkillPaths(worker.skills, launchCwd, projectTrusted);
+	const { paths, missing } = resolveSkillPaths(worker.skills, launchCwd, projectTrusted, discoveredSkills);
 	if (missing.length > 0) {
 		throw new Error(
 			`Failed to resolve required skills for worker "${worker.displayAgentName}": ${missing.join(", ")}.`,
@@ -1580,7 +1591,7 @@ function appendWorkerSkillFlags(
 	if (worker.skills !== undefined) {
 		args.push("--no-skills");
 		if (worker.skills.length === 0) return undefined;
-		const { paths, missing } = resolveSkillPaths(worker.skills, launchCwd, projectTrusted);
+		const { paths, missing } = resolveSkillPaths(worker.skills, launchCwd, projectTrusted, discoveredSkills);
 		if (missing.length > 0) {
 			return `Failed to resolve required skills for worker "${worker.displayAgentName}": ${missing.join(", ")}.`;
 		}
@@ -4919,6 +4930,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
+		discoveredSkills = extractDiscoveredSkills(event.systemPromptOptions?.skills);
 		if (startupCompositionError) {
 			return {
 				systemPrompt: [

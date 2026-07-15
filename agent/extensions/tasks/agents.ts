@@ -3,7 +3,6 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
@@ -226,19 +225,6 @@ function isContainedPath(baseDir: string, candidate: string): boolean {
 	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-function hasSymbolicPathBetween(baseDir: string, candidate: string): boolean {
-	const absoluteBase = path.resolve(baseDir);
-	const absoluteCandidate = path.resolve(candidate);
-	if (!isContainedPath(absoluteBase, absoluteCandidate)) return true;
-	const relativeSegments = path.relative(absoluteBase, absoluteCandidate).split(path.sep).filter(Boolean);
-	let current = fs.realpathSync(absoluteBase);
-	for (const segment of relativeSegments) {
-		current = path.join(current, segment);
-		if (isSymbolicLink(current)) return true;
-	}
-	return false;
-}
-
 function findNearestProjectDir(cwd: string, parts: string[]): string | null {
 	let currentDir = cwd;
 	while (true) {
@@ -264,134 +250,6 @@ function findNearestProjectProfilesDir(cwd: string): string | null {
 function findNearestProjectTasksFile(cwd: string): string | null {
 	const result = findNearestProjectDir(cwd, [".pi", "tasks.json"]);
 	return result && isFile(result) ? result : null;
-}
-
-function findAncestorDirs(cwd: string, parts: string[]): string[] {
-	const dirs: string[] = [];
-	let currentDir = cwd;
-	while (true) {
-		const candidate = path.join(currentDir, ...parts);
-		if (!hasSymbolicPathComponent(currentDir, parts) && isDirectory(candidate)) dirs.push(candidate);
-		const parentDir = path.dirname(currentDir);
-		if (parentDir === currentDir) break;
-		currentDir = parentDir;
-	}
-	return dirs;
-}
-
-function expandHome(inputPath: string): string {
-	if (inputPath === "~") return os.homedir();
-	if (inputPath.startsWith("~/")) return path.join(os.homedir(), inputPath.slice(2));
-	return inputPath;
-}
-
-function readSettingsSkillPaths(settingsPath: string, allowedRoot?: string): string[] {
-	if (!isFile(settingsPath) || isSymbolicLink(settingsPath)) return [];
-	try {
-		const raw = fs.readFileSync(settingsPath, "utf-8");
-		const parsed = JSON.parse(raw) as { skills?: unknown };
-		if (!Array.isArray(parsed.skills)) return [];
-		const baseDir = path.dirname(settingsPath);
-		return parsed.skills
-			.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
-			.map((entry) => expandHome(entry))
-			.map((entry) => (path.isAbsolute(entry) ? entry : path.resolve(baseDir, entry)))
-			.filter((entry) => !allowedRoot || !hasSymbolicPathBetween(allowedRoot, entry));
-	} catch {
-		return [];
-	}
-}
-
-function getConfiguredSkillPaths(cwd: string, projectTrusted: boolean): string[] {
-	const paths = readSettingsSkillPaths(path.join(getAgentDir(), "settings.json"));
-	if (!projectTrusted) return Array.from(new Set(paths));
-
-	let currentDir = cwd;
-	while (true) {
-		if (!hasSymbolicPathComponent(currentDir, [".pi", "settings.json"])) {
-			paths.push(...readSettingsSkillPaths(path.join(currentDir, ".pi", "settings.json"), currentDir));
-		}
-		const parentDir = path.dirname(currentDir);
-		if (parentDir === currentDir) break;
-		currentDir = parentDir;
-	}
-
-	return Array.from(new Set(paths));
-}
-
-function getSkillRoots(cwd: string, projectTrusted: boolean): string[] {
-	const roots = [
-		path.join(getAgentDir(), "skills"),
-		path.join(os.homedir(), ".agents", "skills"),
-		...(projectTrusted ? findAncestorDirs(cwd, [".pi", "skills"]) : []),
-		...(projectTrusted ? findAncestorDirs(cwd, [".agents", "skills"]) : []),
-		...getConfiguredSkillPaths(cwd, projectTrusted),
-	];
-	return Array.from(new Set(roots.filter((root) => (isDirectory(root) || isFile(root)) && !isSymbolicLink(root))));
-}
-
-function isSkillIdentifier(skillName: string): boolean {
-	return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(skillName) && skillName !== "." && skillName !== "..";
-}
-
-function resolveContainedPath(root: string, candidate: string): string | null {
-	try {
-		const realRoot = fs.realpathSync(root);
-		const realCandidate = fs.realpathSync(candidate);
-		if (isFile(realRoot)) return realCandidate === realRoot ? realCandidate : null;
-		const relative = path.relative(realRoot, realCandidate);
-		return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)) ? realCandidate : null;
-	} catch {
-		return null;
-	}
-}
-
-function resolveContainedSkillDirectory(root: string, candidate: string): string | null {
-	const resolvedDirectory = resolveContainedPath(root, candidate);
-	if (!resolvedDirectory || !resolveContainedPath(root, path.join(resolvedDirectory, "SKILL.md"))) return null;
-	return resolvedDirectory;
-}
-
-function findSkillInDirectory(root: string, skillName: string): string | null {
-	const directDir = path.join(root, skillName);
-	if (isDirectory(directDir) && isFile(path.join(directDir, "SKILL.md"))) {
-		return resolveContainedSkillDirectory(root, directDir);
-	}
-
-	const directFile = path.join(root, `${skillName}.md`);
-	if (isFile(directFile)) return resolveContainedPath(root, directFile);
-
-	const stack = [root];
-	const visited = new Set<string>();
-	while (stack.length > 0) {
-		const current = stack.pop()!;
-		const realCurrent = resolveContainedPath(root, current);
-		if (!realCurrent || visited.has(realCurrent)) continue;
-		visited.add(realCurrent);
-
-		let entries: fs.Dirent[];
-		try {
-			entries = fs.readdirSync(realCurrent, { withFileTypes: true });
-		} catch {
-			continue;
-		}
-
-		for (const entry of entries) {
-			const entryPath = path.join(realCurrent, entry.name);
-			if (entry.isDirectory()) {
-				if (entry.name === skillName && isFile(path.join(entryPath, "SKILL.md"))) {
-					const resolved = resolveContainedSkillDirectory(root, entryPath);
-					if (resolved) return resolved;
-				}
-				stack.push(entryPath);
-			} else if (entry.isFile() && entry.name === `${skillName}.md`) {
-				const resolved = resolveContainedPath(root, entryPath);
-				if (resolved) return resolved;
-			}
-		}
-	}
-
-	return null;
 }
 
 function loadMarkdownConfigs<TConfig>(
@@ -597,37 +455,28 @@ function mergeByName<T extends { name: string }>(items: T[]): T[] {
 	return Array.from(map.values());
 }
 
+export interface DiscoveredSkill {
+	name: string;
+	filePath: string;
+}
+
 export function resolveSkillPaths(
 	skillNames: string[],
-	cwd: string,
-	projectTrusted = false,
+	_skillsCwd: string,
+	_projectTrusted = false,
+	discoveredSkills: DiscoveredSkill[] = [],
 ): { paths: string[]; missing: string[] } {
-	const roots = getSkillRoots(cwd, projectTrusted);
-	const resolvedPaths: string[] = [];
+	const skillsByName = new Map(discoveredSkills.map((skill) => [skill.name, skill.filePath]));
+	const paths: string[] = [];
 	const missing: string[] = [];
 
 	for (const skillName of skillNames) {
-		if (!isSkillIdentifier(skillName)) {
-			missing.push(skillName);
-			continue;
-		}
-		let resolved: string | null = null;
-		for (const root of roots) {
-			if (isFile(root)) {
-				if (path.basename(root) === `${skillName}.md` || path.basename(path.dirname(root)) === skillName) {
-					resolved = resolveContainedPath(root, root);
-					if (resolved) break;
-				}
-				continue;
-			}
-			resolved = findSkillInDirectory(root, skillName);
-			if (resolved) break;
-		}
-		if (resolved) resolvedPaths.push(resolved);
+		const skillPath = skillsByName.get(skillName);
+		if (skillPath) paths.push(skillPath);
 		else missing.push(skillName);
 	}
 
-	return { paths: Array.from(new Set(resolvedPaths)), missing };
+	return { paths: Array.from(new Set(paths)), missing };
 }
 
 export function hasProjectTaskResources(cwd: string): boolean {

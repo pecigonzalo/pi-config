@@ -119,105 +119,23 @@ describe("task resource project trust", () => {
 	});
 });
 
-describe("task skill path security", () => {
-	it("rejects traversal, absolute, separator, and dot skill names", async () => {
-		const cwd = await makeProject();
-		const outside = path.join(cwd, "outside");
-		await fs.mkdir(outside);
-		await fs.writeFile(path.join(outside, "SKILL.md"), "outside");
-		const invalidNames = ["../outside", "..", ".", "/absolute", "nested/skill", "nested\\skill"];
+describe("task skill resolution", () => {
+	it("resolves paths from Pi's discovered skill catalog", () => {
+		const skills = [
+			{ name: "review", filePath: "/loaded/review/SKILL.md" },
+			{ name: "configured", filePath: "/extra/configured.md" },
+		];
 
-		const result = resolveSkillPaths(invalidNames, cwd, true);
-
-		expect(result.paths).toEqual([]);
-		expect(result.missing).toEqual(invalidNames);
-	});
-
-	it("rejects a project skill symlink that escapes its root", async () => {
-		const cwd = await makeProject();
-		const skillsRoot = path.join(cwd, ".pi", "skills");
-		const outside = path.join(cwd, "outside-skill");
-		await fs.mkdir(skillsRoot, { recursive: true });
-		await fs.mkdir(outside);
-		await fs.writeFile(path.join(outside, "SKILL.md"), "outside");
-		await fs.symlink(outside, path.join(skillsRoot, "escape"));
-
-		const result = resolveSkillPaths(["escape"], cwd, true);
-
-		expect(result).toEqual({ paths: [], missing: ["escape"] });
-	});
-
-	it("rejects skill directories whose SKILL.md symlink escapes the root", async () => {
-		const cwd = await makeProject();
-		const skillsRoot = path.join(cwd, ".pi", "skills");
-		const outsideFile = path.join(cwd, "outside-SKILL.md");
-		await fs.mkdir(path.join(skillsRoot, "direct"), { recursive: true });
-		await fs.mkdir(path.join(skillsRoot, "nested", "recursive"), { recursive: true });
-		await fs.writeFile(outsideFile, "outside");
-		await fs.symlink(outsideFile, path.join(skillsRoot, "direct", "SKILL.md"));
-		await fs.symlink(outsideFile, path.join(skillsRoot, "nested", "recursive", "SKILL.md"));
-
-		const result = resolveSkillPaths(["direct", "recursive"], cwd, true);
-
-		expect(result).toEqual({ paths: [], missing: ["direct", "recursive"] });
-	});
-
-	it("rejects configured skill roots that are symbolic links", async () => {
-		const cwd = await makeProject();
-		const outsideFile = path.join(cwd, "outside-configured.md");
-		const configuredLink = path.join(cwd, ".pi", "configured.md");
-		await fs.mkdir(path.dirname(configuredLink), { recursive: true });
-		await fs.writeFile(outsideFile, "outside");
-		await fs.symlink(outsideFile, configuredLink);
-		await fs.writeFile(path.join(cwd, ".pi", "settings.json"), JSON.stringify({ skills: [configuredLink] }));
-
-		const result = resolveSkillPaths(["configured"], cwd, true);
-
-		expect(result).toEqual({ paths: [], missing: ["configured"] });
-	});
-
-	it("rejects configured skill roots with a symbolic-link parent component", async () => {
-		const cwd = await makeProject();
-		const outsideDir = path.join(cwd, "outside-parent");
-		const nestedDir = path.join(cwd, "nested");
-		await fs.mkdir(path.join(cwd, ".pi"), { recursive: true });
-		await fs.mkdir(outsideDir);
-		await fs.mkdir(nestedDir);
-		await fs.writeFile(path.join(outsideDir, "configured.md"), "outside");
-		await fs.symlink(outsideDir, path.join(nestedDir, "link"));
-		await fs.writeFile(
-			path.join(cwd, ".pi", "settings.json"),
-			JSON.stringify({ skills: [path.join(nestedDir, "link", "configured.md")] }),
-		);
-
-		const result = resolveSkillPaths(["configured"], cwd, true);
-
-		expect(result).toEqual({ paths: [], missing: ["configured"] });
-	});
-
-	it("loads a project skill symlink whose target remains inside its root", async () => {
-		const cwd = await makeProject();
-		const skillsRoot = path.join(cwd, ".pi", "skills");
-		const target = path.join(skillsRoot, "target");
-		await fs.mkdir(target, { recursive: true });
-		await fs.writeFile(path.join(target, "SKILL.md"), "safe");
-		await fs.symlink(target, path.join(skillsRoot, "alias"));
-
-		const result = resolveSkillPaths(["alias"], cwd, true);
-
-		expect(result).toEqual({ paths: [await fs.realpath(target)], missing: [] });
-	});
-
-	it("loads valid project skills only after trust is granted", async () => {
-		const cwd = await makeProject();
-		const skillDir = path.join(cwd, ".pi", "skills", "safe-skill");
-		await fs.mkdir(skillDir, { recursive: true });
-		await fs.writeFile(path.join(skillDir, "SKILL.md"), "safe");
-
-		expect(resolveSkillPaths(["safe-skill"], cwd, false)).toEqual({ paths: [], missing: ["safe-skill"] });
-		expect(resolveSkillPaths(["safe-skill"], cwd, true)).toEqual({
-			paths: [await fs.realpath(skillDir)],
+		expect(resolveSkillPaths(["review", "configured"], "/project", false, skills)).toEqual({
+			paths: ["/loaded/review/SKILL.md", "/extra/configured.md"],
 			missing: [],
+		});
+	});
+
+	it("reports names absent from Pi's discovered skill catalog", () => {
+		expect(resolveSkillPaths(["missing"], "/project", true, [])).toEqual({
+			paths: [],
+			missing: ["missing"],
 		});
 	});
 });
