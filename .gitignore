@@ -1,4 +1,5 @@
 ### Pi
+.pi/**/*
 agent/trust.json
 agent/permissions-approvals.json
 agent/auth.json
