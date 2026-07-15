@@ -925,7 +925,11 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 		});
 		return { dir: tmpDir, filePath };
 	} catch (error) {
-		await fs.promises.rm(tmpDir, { recursive: true, force: true });
+		try {
+			await fs.promises.rm(tmpDir, { recursive: true, force: true });
+		} catch {
+			// Preserve the prompt creation failure, which is the actionable root cause.
+		}
 		throw error;
 	}
 }
@@ -5978,6 +5982,7 @@ export const __test__ = {
 	composeWorkerSystemPrompt,
 	prepareWorkerSystemPrompt,
 	appendWorkerPromptFlags,
+	writePromptToTempFile,
 	resolveTaskSelector,
 	setTaskWidgetEnabled,
 	terminateProcessWithEscalation,

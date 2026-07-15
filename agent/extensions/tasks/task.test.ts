@@ -25,6 +25,8 @@ let mockSavedProjectTrust: boolean | null = null;
 const mockSavedProjectTrustByCwd = new Map<string, boolean>();
 let lastDiscoveryProjectTrusted: boolean | undefined;
 let mockSkillResolution: { paths: string[]; missing: string[] } = { paths: [], missing: [] };
+let mockFileMutationError: Error | undefined;
+let lastMutatedFilePath: string | undefined;
 
 beforeAll(async () => {
 	testAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tasks-ext-test-"));
@@ -83,7 +85,11 @@ beforeAll(async () => {
 		getAgentDir: () => testAgentDir,
 		getMarkdownTheme: () => ({}),
 		keyHint: (_binding: string, description: string) => `Ctrl+O ${description}`,
-		withFileMutationQueue: async (_filePath: string, mutation: () => Promise<void>) => mutation(),
+		withFileMutationQueue: async (filePath: string, mutation: () => Promise<void>) => {
+			lastMutatedFilePath = filePath;
+			if (mockFileMutationError) throw mockFileMutationError;
+			return mutation();
+		},
 		SessionManager: {
 			create: (cwd: string) => {
 				sessionCounter += 1;
@@ -1074,6 +1080,21 @@ describe("required task skill instructions", () => {
 
 		expect(prompt.split("One canonical instruction.")).toHaveLength(2);
 		expect(prompt).toContain(`path="${skillPath}"`);
+	});
+
+	it("removes the prompt directory and preserves the original mutation failure", async () => {
+		const originalError = new Error("queued mutation failed");
+		mockFileMutationError = originalError;
+		lastMutatedFilePath = undefined;
+
+		try {
+			await expect(__test__.writePromptToTempFile("reviewer", "prompt")).rejects.toBe(originalError);
+			expect(lastMutatedFilePath).toBeDefined();
+			expect(syncFs.existsSync(path.dirname(lastMutatedFilePath!))).toBe(false);
+		} finally {
+			mockFileMutationError = undefined;
+			lastMutatedFilePath = undefined;
+		}
 	});
 
 	it("writes required instructions and prompt flags for append and replace modes", async () => {
