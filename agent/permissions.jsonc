@@ -49,77 +49,13 @@
         "action": "allow",
         "externalPathAction": "allow",
       },
-      // .env.example is safe to read — allow it before the broader .env block
-      {
-        "tool": "read",
-        "match": "\\.env\\.example$",
-        "action": "allow",
-      },
-      // Block .env, .env.local, .env.production, etc.
-      {
-        "tool": "read",
-        "match": "\\.env(\\..+)?$",
-        "action": "block",
-        "reason": "May contain secrets",
-      },
-      // Block private keys and certificates
-      {
-        "tool": "read",
-        "match": "\\.(pem|key|p12|pfx|crt|ca-bundle)$",
-        "action": "block",
-        "reason": "Private key or certificate",
-      },
-      // Block ~/.aws/credentials, ~/.ssh/*, etc.
-      {
-        "tool": "read",
-        "match": "(^|[/])(\\.aws[/]|\\.ssh[/])",
-        "action": "block",
-        "reason": "Credentials directory",
-      },
-      // ── Write / Edit: protect secrets and git internals ─────────────────────
-      // Note: enforcing "local repo only" for write/edit requires cwd context
-      // which the current rule engine does not have. Add an explicit block for
-      // out-of-project absolute paths in a project-local .pi/permissions.json
-      // if needed.
-      {
-        "tool": "write",
-        "match": "\\.env\\.example$",
-        "action": "allow",
-      },
-      {
-        "tool": "write",
-        "match": "\\.env(\\..+)?$",
-        "action": "block",
-        "reason": "Env file protected",
-      },
-      {
-        "tool": "write",
-        "match": "\\.(pem|key|p12|pfx)$",
-        "action": "block",
-        "reason": "Key file protected",
-      },
+      // Built-in protected resources cover secrets, credentials, and key material.
+      // Keep structured tools out of all Git internals, beyond the built-in hooks/config protection.
       {
         "tool": "write",
         "match": "(^|[/])\\.git[/]",
         "action": "block",
         "reason": "Git internals",
-      },
-      {
-        "tool": "edit",
-        "match": "\\.env\\.example$",
-        "action": "allow",
-      },
-      {
-        "tool": "edit",
-        "match": "\\.env(\\..+)?$",
-        "action": "block",
-        "reason": "Env file protected",
-      },
-      {
-        "tool": "edit",
-        "match": "\\.(pem|key|p12|pfx)$",
-        "action": "block",
-        "reason": "Key file protected",
       },
       {
         "tool": "edit",
@@ -160,7 +96,7 @@
       },
       {
         "tool": "bash",
-        "match": "^(cd|cat|rg|find|wc|grep|head|uniq|ls|nl|sort|tail|tee|echo|printf|pwd|which|file|diff|stat|du|df|date|uname|env|printenv|type|true|false|test|mktemp|tr|jq|readlink|strings|fd|pwd)\\b",
+        "match": "^(cd|cat|rg|find|wc|grep|head|uniq|ls|nl|sort|tail|tee|echo|printf|pwd|which|file|diff|stat|du|df|date|uname|env|printenv|type|true|false|test|mktemp|tr|jq|readlink|strings|fd)\\b",
         "action": "allow",
       },
       {
@@ -328,7 +264,7 @@
       },
       // ── Bash: catch-all — ask for anything not explicitly matched ────────────
       // Mirrors opencode's safe default of asking before unknown commands.
-      // Add explicit `allow` rules in .pi/permissions.json for project-specific tools.
+      // Add explicit `allow` rules in .pi/permissions.jsonc for project-specific tools.
       {
         "tool": "bash",
         "action": "ask",
@@ -346,25 +282,7 @@
       "restoreCodeOnTree": "ask",
     },
   },
-  // Scoped approval settings.
-  // "approvals": {
-  //   "scopeByProject": true,
-  //   "scopeByAgent": true,
-  //   "maxAgeDays": 30
-  // },
-  // Built-in protected resources are defaults and are always overridable here.
-  // Effective sets are computed as: (built-ins + addDeny*) - unprotect*
-  // "protectedResources": {
-  //   "enabled": true,
-  //   "defaults": true,
-  //   "addDenyRead": ["(^|[/])secrets/"],
-  //   "addDenyWrite": ["(^|[/])infra/prod/"],
-  //   "unprotectRead": ["\\.env(\\..+)?$"],
-  //   "unprotectWrite": ["(^|[/])\\.git/(hooks/|config$)"]
-  // },
   "protectedResources": {
-    "enabled": true,
-    "defaults": true,
     "unprotectWrite": ["(^|[/])\\.mcp\\.json$"],
   },
   "profiles": {
@@ -462,53 +380,11 @@
       ],
     },
   },
-  // Optional bash sandbox backend. If the sandbox runtime is installed,
-  // workspace-write and plan modes enable it automatically unless disabled.
-  //
-  // "sandbox": {
-  //   "enabled": true,
-  //   "network": true,
-  //   // Optional sandbox temp dir base (exported as CLAUDE_TMPDIR/TMPDIR)
-  //   // Defaults to os.tmpdir()/pi
-  //   // "tmpDir": "/tmp/pi",
-  //   // Temp dir strategy:
-  //   // - "shared" (default): uses tmpDir directly
-  //   // - "session": creates mkdtemp() session-* dirs under tmpDir
-  //   // "tmpDirMode": "shared",
-  //   // Include compatibility write paths (/tmp, /private/tmp, os.tmpdir())
-  //   // "compatWritePaths": true,
-  //   // Optional domain filters (allow-only model).
-  //   // If omitted and network=true, network is unrestricted.
-  //   // "allowedDomains": ["api.github.com", "*.npmjs.org"],
-  //   // "deniedDomains": ["malicious.example.com"],
-  //   "allowSshAuthSock": true,
-  //   // Optional environment for sandboxed bash. By default, sandboxed bash
-  //   // sets GIT_SSH_COMMAND="ssh -o ControlMaster=no" to avoid dynamic SSH control sockets.
-  //   "env": { "GIT_SSH_COMMAND": "ssh -o ControlMaster=no" },
-  //   "allowUnixSockets": ["/path/to/ssh-agent.sock"],
-  //   "allowAllUnixSockets": false,
-  //   // macOS only: allow localhost TCP bind/connect for sandboxed processes.
-  //   // Useful for tests and local clusters that listen on 127.0.0.1:0.
-  //   "allowLocalBinding": true,
-  //   // macOS only: allow trustd for Go-based TLS verification (go, buf, gh, kubectl).
-  //   // This weakens network isolation because trustd can be an exfiltration vector.
-  //   "enableWeakerNetworkIsolation": true,
-  //   // macOS only: extra XPC/Mach services to allow. Pi includes
-  //   // com.apple.SystemConfiguration.configd by default when network=true
-  //   // so c-ares-based tools (for example Nix curl) can read DNS settings.
-  //   "allowMachLookup": ["com.example.service"],
-  //   // Per-rule `sandbox: false` can bypass only the OS sandbox after normal
-  //   // permission checks pass. Use narrow bash rules for GUI/browser launchers.
-  //   "addAllowWrite": ["/tmp"],
-  //   "denyRead": ["~/.ssh", "~/.aws", "~/.gnupg"],
-  //   "denyWrite": [".env", ".env.*", "*.pem", "*.key"]
-  // }
   "sandbox": {
     "enabled": true,
     "enableWeakerNetworkIsolation": true,
     "allowSshAuthSock": true,
     "allowLocalBinding": true,
     "addAllowWrite": ["~/.mcporter", "~/.mcp.json"],
-    "denyRead": ["~/.aws", "~/.gnupg"],
   },
 }
