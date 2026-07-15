@@ -429,6 +429,8 @@ describe("code-intel workflow guidance", () => {
 		].join("\n");
 
 		expect(guidance).toContain("symbols → slice → references → enclosing_symbol → slice");
+		expect(guidance).toContain("definition, references, and hover require LSP");
+		expect(guidance).toContain("When LSP references are unavailable");
 		expect(guidance).toContain("do not follow symbols results with whole-file reads");
 		expect(guidance).toContain("small read");
 	});
@@ -437,18 +439,26 @@ describe("code-intel workflow guidance", () => {
 		const schema = JSON.stringify(__test.CODE_INTEL_SCHEMA);
 
 		expect(schema).toContain("symbols only locates candidates");
-		expect(schema).toContain("Prefer slice for its body and references for usages");
+		expect(schema).toContain("Prefer slice for its body and LSP-backed references for usages");
+		expect(schema).toContain("definition/references/hover require LSP");
 		expect(schema).toContain("enclosing_symbol on a reference line");
 		expect(schema).toContain("slice the returned caller");
 	});
 
-	test("action outputs provide concise next-step hints", () => {
-		expect(__test.ACTION_NEXT_STEPS).toEqual({
-			symbols: "Next: use slice on the best match; do not read the whole file.",
-			slice: "Next: use references to find usages; verify only small target ranges before editing.",
-			references: "Next: run enclosing_symbol on a relevant location to identify its caller.",
-			enclosingSymbol: "Next: use slice on this enclosing symbol to inspect the caller body.",
-		});
+	test("references output suggests caller drilldown when locations exist", () => {
+		const output = __test.formatReferencesOutput("/repo", "LSP references", [
+			{ file: "/repo/src/index.ts", line: 2, column: 4, endLine: 2, endColumn: 9 },
+		]);
+
+		expect(output).toContain("src/index.ts:2:4-2:9");
+		expect(output).toContain("Next: run enclosing_symbol on a relevant location");
+	});
+
+	test("references output omits caller drilldown when no locations exist", () => {
+		const output = __test.formatReferencesOutput("/repo", "LSP references", []);
+
+		expect(output).toContain("No LSP locations found.");
+		expect(output).not.toContain("enclosing_symbol");
 	});
 
 	test("repo map directs agents to symbols and slice instead of broad reads", () => {

@@ -38,12 +38,13 @@ const CODE_INTEL_COMPLETIONS = [
 ] as const;
 
 export const CODE_INTEL_DESCRIPTION =
-	"Locate symbols and follow compact semantic drilldowns without loading whole files: symbols → slice → references → enclosing_symbol → slice. Uses LSP when available, with Tree-sitter/syntax fallback.";
+	"Locate symbols and follow compact drilldowns without loading whole files: symbols → slice → LSP references → enclosing_symbol → slice. Symbol discovery and slicing use LSP document symbols when available, with Tree-sitter/syntax fallback; definition, references, and hover require LSP.";
 export const CODE_INTEL_PROMPT_SNIPPET =
-	"Locate with symbols, inspect bodies with slice, follow usages with references, convert usage locations to caller context with enclosing_symbol, then slice callers; avoid broad file reads.";
+	"Locate with symbols, inspect bodies with slice, follow usages with LSP references, convert usage locations to caller context with enclosing_symbol, then slice callers; avoid broad file reads.";
 export const CODE_INTEL_PROMPT_GUIDELINES = [
 	"Use repo_map for unfamiliar codebase orientation, then symbols only as a locator; do not follow symbols results with whole-file reads.",
-	"Prefer the sequence symbols → slice → references → enclosing_symbol → slice to inspect definitions, usages, and caller bodies.",
+	"When LSP is available, prefer symbols → slice → references → enclosing_symbol → slice to inspect definitions, usages, and caller bodies.",
+	"When LSP references are unavailable, continue with outline, symbols, and slice; use targeted text search only for usages that semantic lookup cannot provide.",
 	"Use outline only for file structure, and definition/hover for focused LSP-backed lookup by symbol or path+line+column.",
 	"Before editing, verify only the exact target with a small read of the relevant lines when code_intel output is insufficient; avoid broad reads.",
 ];
@@ -180,5 +181,5 @@ export const __test = {
 	inferCallableArity: __actionsTest.inferCallableArity,
 	chooseReferenceDeclaration: __actionsTest.chooseReferenceDeclaration,
 	formatLspLocations: __actionsTest.formatLspLocations,
-	ACTION_NEXT_STEPS: __actionsTest.ACTION_NEXT_STEPS,
+	formatReferencesOutput: __actionsTest.formatReferencesOutput,
 };

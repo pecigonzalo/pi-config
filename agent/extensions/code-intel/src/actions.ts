@@ -362,12 +362,16 @@ export async function findReferencesWithLsp(
 	const request = await getLspLookupRequest(pi, ctx, params, "references", signal);
 	if (typeof request === "string") return request;
 	const locations = await request.service.references(request.path, request.position, { signal });
-	const output = formatLspLocations(
-		ctx.cwd,
-		`LSP references for ${formatLspLookupTarget(ctx.cwd, request)}`,
-		locations,
-	);
-	return `${output}\n\n${ACTION_NEXT_STEPS.references}`;
+	return formatReferencesOutput(ctx.cwd, `LSP references for ${formatLspLookupTarget(ctx.cwd, request)}`, locations);
+}
+
+export function formatReferencesOutput(
+	cwd: string,
+	header: string,
+	locations: Parameters<typeof formatLspLocations>[2],
+): string {
+	const output = formatLspLocations(cwd, header, locations);
+	return locations.length > 0 ? `${output}\n\n${ACTION_NEXT_STEPS.references}` : output;
 }
 
 export async function findHoverWithLsp(
@@ -759,7 +763,6 @@ function escapeRegExp(value: string): string {
 }
 
 export const __actionsTest = {
-	ACTION_NEXT_STEPS,
 	filterBySliceMode,
 	isDeclaration,
 	formatBackendSummary,
@@ -769,4 +772,5 @@ export const __actionsTest = {
 	inferCallableArity,
 	chooseReferenceDeclaration,
 	formatLspLocations,
+	formatReferencesOutput,
 };

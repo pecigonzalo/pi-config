@@ -24,7 +24,7 @@ export const CODE_INTEL_SCHEMA = {
 				"hover",
 			],
 			description:
-				"Operation to run. Orient with repo_map, locate with symbols, inspect bodies with slice, find usages with references, convert usage locations to caller context with enclosing_symbol, then slice callers. Use outline for structure; definition/hover for focused LSP lookup; status for backend availability.",
+				"Operation to run. Orient with repo_map, locate with symbols, inspect bodies with slice, find usages with LSP-backed references, convert usage locations to caller context with enclosing_symbol, then slice callers. Use outline for structure; definition/references/hover require LSP; status reports backend availability.",
 		},
 		root: {
 			type: "string",
@@ -58,7 +58,7 @@ export const CODE_INTEL_SCHEMA = {
 		symbol: {
 			type: "string",
 			description:
-				"Symbol name. Prefer slice for its body and references for usages; symbols only locates candidates.",
+				"Symbol name. Prefer slice for its body and LSP-backed references for usages; symbols only locates candidates.",
 		},
 		line: {
 			type: "number",
