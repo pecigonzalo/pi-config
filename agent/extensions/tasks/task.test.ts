@@ -10,6 +10,7 @@ import {
 	resolveConfiguredTaskTerminalBackend,
 	resolveTaskTerminalBackendById,
 	setTaskTerminalCommandRunnerForTests,
+	__test__ as taskTerminalTest,
 } from "./task-terminal.js";
 import { setTaskSessionRootForTests } from "./task-session-validation.js";
 
@@ -1437,7 +1438,7 @@ describe("parent session reference security", () => {
 	it.each([
 		["outside-root absolute parent", () => path.join(os.tmpdir(), "outside-parent.jsonl")],
 		["relative traversal escaping root", () => path.join(sessionRoot, "nested", "../../outside-parent.jsonl")],
-	])("rejects %s", async (_name, parentPath) => {
+	])("rejects %s", async (_name: string, parentPath: () => string) => {
 		const current = path.join(sessionRoot, "nested", "current.jsonl");
 		const outside = parentPath();
 		await writeSession(outside, "outside-parent");
@@ -1468,7 +1469,7 @@ describe("parent session reference security", () => {
 		["directory", "directory"],
 		["non-JSONL file", "parent.txt"],
 		["malformed JSONL", "malformed.jsonl"],
-	])("rejects a %s parent", async (_name, parentName) => {
+	])("rejects a %s parent", async (_name: string, parentName: string) => {
 		const current = path.join(sessionRoot, "current.jsonl");
 		const parent = path.join(sessionRoot, parentName);
 		if (parentName === "directory") await fs.mkdir(parent);
@@ -3394,4 +3395,66 @@ test("profile completions list clear", () => {
 
 test("effort completions list clear", () => {
 	expect(__test__.EFFORT_COMPLETIONS.map((s: { value: string }) => s.value)).toEqual(["clear"]);
+});
+
+describe("task output capture", () => {
+	it("bounds sustained UTF-8 chunks with a valid truncation marker", () => {
+		let output = "";
+		for (let i = 0; i < 10_000; i++) output = __test__.appendBoundedText(output, "🙂漢", 256);
+		expect(Buffer.byteLength(output)).toBeLessThanOrEqual(256);
+		expect(output).not.toContain("�");
+		expect(output).toContain("[output truncated;");
+	});
+
+	it("rejects oversized and cyclic messages without mutation", () => {
+		const messages: unknown[] = [];
+		const giant = { role: "user", content: [{ type: "text", text: "x".repeat(5_000_000) }] };
+		const before = JSON.stringify(giant);
+		expect(__test__.pushBoundedMessage(messages, giant)).toBe(false);
+		expect(JSON.stringify(giant)).toBe(before);
+		const cyclic: Record<string, unknown> = {};
+		cyclic.self = cyclic;
+		expect(__test__.pushBoundedMessage(messages, cyclic)).toBe(true);
+	});
+
+	it("keeps accepted messages bounded by count", () => {
+		const messages: unknown[] = [];
+		for (let i = 0; i < 600; i++) expect(__test__.pushBoundedMessage(messages, { i })).toBe(i < 512);
+		expect(messages.length).toBe(512);
+	});
+
+	it("caps terminal output across sustained UTF-8 chunks", () => {
+		const stdout = taskTerminalTest.capTaskTerminalOutput("🙂漢".repeat(100_000));
+		const stderr = taskTerminalTest.capTaskTerminalOutput("é".repeat(100_000));
+		expect(Buffer.byteLength(stdout)).toBeLessThanOrEqual(262_200);
+		expect(stderr).toContain("é");
+		expect(stdout).not.toContain("�");
+		expect(stderr).not.toContain("�");
+		expect(stdout).toContain("[command output truncated]");
+	});
+
+	it("signals event-line overflow once and ignores later chunks", () => {
+		const accumulator = { buffer: "", overflowed: false, maxBytes: 8 };
+		let failure = "";
+		let terminationCount = 0;
+		const onOverflow = () => {
+			failure = "event overflow";
+			terminationCount++;
+		};
+
+		expect(__test__.consumeBoundedEventChunk(accumulator, "123456789", onOverflow)).toEqual([]);
+		expect(__test__.consumeBoundedEventChunk(accumulator, '{"ok":true}\n', onOverflow)).toEqual([]);
+		expect(terminationCount).toBe(1);
+		expect(failure).toBe("event overflow");
+	});
+
+	it("returns complete event lines without invoking the failure callback", () => {
+		const accumulator = { buffer: "", overflowed: false, maxBytes: 32 };
+		let closeCount = 0;
+		const onOverflow = () => closeCount++;
+
+		expect(__test__.consumeBoundedEventChunk(accumulator, '{"ok":1}', onOverflow)).toEqual([]);
+		expect(__test__.consumeBoundedEventChunk(accumulator, "\nnext\n", onOverflow)).toEqual(['{"ok":1}', "next"]);
+		expect(closeCount).toBe(0);
+	});
 });

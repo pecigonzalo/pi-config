@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 export const TASKS_WEZTERM_WORKSPACE = "pi-tasks";
 export const TASKS_TERMINAL_BACKEND_ENV = "PI_TASKS_TERMINAL_BACKEND";
@@ -71,6 +72,8 @@ export type TaskTerminalCommandRunner = (
 ) => Promise<TaskTerminalCommandResult>;
 
 const TASK_TERMINAL_COMMAND_TIMEOUT_MS = 5_000;
+const MAX_TASK_TERMINAL_COMMAND_OUTPUT_BYTES = 256 * 1024;
+const TASK_TERMINAL_OUTPUT_TRUNCATION_MARKER = "\n[command output truncated]\n";
 let commandRunner: TaskTerminalCommandRunner | undefined;
 
 export function isTaskTerminalBackendId(value: unknown): value is TaskTerminalBackendId {
@@ -128,12 +131,29 @@ export function applyTaskTerminalAttachment<T extends TaskTerminalAttachmentFiel
 	return next as T;
 }
 
+function capTaskTerminalOutput(value: string): string {
+	const markerBytes = Buffer.byteLength(TASK_TERMINAL_OUTPUT_TRUNCATION_MARKER, "utf8");
+	const bytes = Buffer.from(value, "utf8");
+	if (bytes.byteLength <= MAX_TASK_TERMINAL_COMMAND_OUTPUT_BYTES) return value;
+	let body = bytes.subarray(0, Math.max(0, MAX_TASK_TERMINAL_COMMAND_OUTPUT_BYTES - markerBytes)).toString("utf8");
+	while (Buffer.byteLength(body, "utf8") > MAX_TASK_TERMINAL_COMMAND_OUTPUT_BYTES - markerBytes)
+		body = body.slice(0, -1);
+	return body + TASK_TERMINAL_OUTPUT_TRUNCATION_MARKER;
+}
+
 async function runCommand(
 	command: string,
 	args: string[],
 	options?: { cwd?: string; timeoutMs?: number },
 ): Promise<TaskTerminalCommandResult> {
-	if (commandRunner) return await commandRunner(command, args, options);
+	if (commandRunner) {
+		const result = await commandRunner(command, args, options);
+		return {
+			...result,
+			stdout: capTaskTerminalOutput(result.stdout),
+			stderr: capTaskTerminalOutput(result.stderr),
+		};
+	}
 	return await new Promise<TaskTerminalCommandResult>((resolve) => {
 		const proc = spawn(command, args, {
 			cwd: options?.cwd,
@@ -142,14 +162,26 @@ async function runCommand(
 		});
 		let stdout = "";
 		let stderr = "";
+		const stdoutDecoder = new StringDecoder("utf8");
+		const stderrDecoder = new StringDecoder("utf8");
 		let settled = false;
-		proc.stdout.on("data", (chunk) => {
-			stdout += chunk.toString();
+		const append = (current: string, text: string): string => {
+			const remainingBytes = MAX_TASK_TERMINAL_COMMAND_OUTPUT_BYTES - Buffer.byteLength(current, "utf8");
+			if (remainingBytes <= 0) return capTaskTerminalOutput(current);
+			const textBytes = Buffer.byteLength(text, "utf8");
+			if (textBytes <= remainingBytes) return current + text;
+			const boundedText = Buffer.from(text, "utf8").subarray(0, remainingBytes).toString("utf8");
+			return capTaskTerminalOutput(current + boundedText);
+		};
+		proc.stdout.on("data", (chunk: Buffer) => {
+			stdout = append(stdout, stdoutDecoder.write(chunk));
 		});
-		proc.stderr.on("data", (chunk) => {
-			stderr += chunk.toString();
+		proc.stderr.on("data", (chunk: Buffer) => {
+			stderr = append(stderr, stderrDecoder.write(chunk));
 		});
 		proc.once("error", (error) => {
+			stdout = append(stdout, stdoutDecoder.end());
+			stderr = append(stderr, stderrDecoder.end());
 			if (settled) return;
 			settled = true;
 			resolve({
@@ -161,6 +193,8 @@ async function runCommand(
 			});
 		});
 		proc.once("close", (code) => {
+			stdout = append(stdout, stdoutDecoder.end());
+			stderr = append(stderr, stderrDecoder.end());
 			if (settled) return;
 			settled = true;
 			clearTimeout(timeout);
@@ -237,6 +271,9 @@ const taskTerminalBackends: Record<TaskTerminalBackendId, TaskTerminalBackend> =
 				};
 			}
 			try {
+				if (result.stdout.includes(TASK_TERMINAL_OUTPUT_TRUNCATION_MARKER)) {
+					return { status: "unknown", error: "WezTerm pane data exceeded the output limit." };
+				}
 				const panes = JSON.parse(result.stdout) as Array<{ pane_id?: number }>;
 				return panes.some((pane) => String(pane.pane_id) === attachment.targetId)
 					? { status: "alive" }
@@ -357,3 +394,7 @@ export function getTaskAttachActionLabel(): string {
 	if (preference.preference === "wezterm") return "Attach in WezTerm";
 	return "Attach in terminal";
 }
+
+export const __test__ = {
+	capTaskTerminalOutput,
+};

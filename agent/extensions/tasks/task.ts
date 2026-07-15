@@ -218,6 +218,122 @@ function terminateProcessWithEscalation(
 	});
 }
 
+const MAX_CHILD_STDOUT_BYTES = 4 * 1024 * 1024;
+const MAX_CHILD_STDERR_BYTES = 256 * 1024;
+const MAX_CHILD_EVENT_LINE_BYTES = 1024 * 1024;
+const MAX_PARENT_MESSAGES = 512;
+const MAX_PARENT_MESSAGE_BYTES = 4 * 1024 * 1024;
+const TRUNCATION_MARKER = "\n[output truncated; full output is in the child session]\n";
+
+function truncateUtf8ToBytes(text: string, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	const bytes = Buffer.from(text, "utf8");
+	let result = bytes.subarray(0, maxBytes).toString("utf8");
+	while (result.endsWith("�") || Buffer.byteLength(result, "utf8") > maxBytes) result = result.slice(0, -1);
+	return result;
+}
+
+function appendBoundedText(current: string, text: string, maxBytes: number): string {
+	if (!text) return current;
+	const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf8");
+	const currentBytes = Buffer.byteLength(current, "utf8");
+	if (currentBytes >= maxBytes) return current;
+	const incoming = Buffer.byteLength(text, "utf8");
+	if (currentBytes + incoming <= maxBytes) return current + text;
+	const body = truncateUtf8ToBytes(text, Math.max(0, maxBytes - currentBytes - markerBytes));
+	const marker = truncateUtf8ToBytes(TRUNCATION_MARKER, Math.min(markerBytes, maxBytes));
+	return truncateUtf8ToBytes(current + body, Math.max(0, maxBytes - Buffer.byteLength(marker))) + marker;
+}
+
+interface MessageByteState {
+	totalBytes: number;
+	sizes: WeakMap<object, number>;
+}
+const messageByteStates = new WeakMap<Message[], MessageByteState>();
+
+function estimateBytes(value: unknown, limit: number, seen = new WeakSet<object>(), depth = 0): number {
+	if (limit <= 0) return 0;
+	if (value === null || typeof value !== "object") return Buffer.byteLength(String(value), "utf8");
+	if (seen.has(value) || depth > 32) return 8;
+	seen.add(value);
+	let total = Array.isArray(value) ? 2 : 2;
+	if (Array.isArray(value))
+		for (const item of value) {
+			total += estimateBytes(item, limit - total, seen, depth + 1);
+			if (total > limit) return limit + 1;
+		}
+	else
+		for (const [key, item] of Object.entries(value)) {
+			total +=
+				Buffer.byteLength(JSON.stringify(key), "utf8") +
+				1 +
+				estimateBytes(item, limit - total, seen, depth + 1);
+			if (total > limit) return limit + 1;
+		}
+	return total;
+}
+
+function pushBoundedMessage(messages: Message[], message: Message): boolean {
+	if (messages.length >= MAX_PARENT_MESSAGES) return false;
+	let state = messageByteStates.get(messages);
+	if (!state) {
+		state = { totalBytes: 0, sizes: new WeakMap() };
+		messageByteStates.set(messages, state);
+	}
+	const messageObject = message as unknown as object;
+	const bytes = state.sizes.get(messageObject) ?? estimateBytes(message, MAX_PARENT_MESSAGE_BYTES + 1);
+	if (state.totalBytes + bytes > MAX_PARENT_MESSAGE_BYTES) return false;
+	state.sizes.set(messageObject, bytes);
+	state.totalBytes += bytes;
+	messages.push(message);
+	return true;
+}
+
+interface BoundedEventLineAccumulator {
+	buffer: string;
+	overflowed: boolean;
+	maxBytes: number;
+}
+
+function consumeBoundedEventChunk(
+	accumulator: BoundedEventLineAccumulator,
+	text: string,
+	onOverflow: () => void,
+): string[] {
+	if (accumulator.overflowed) return [];
+	if (Buffer.byteLength(accumulator.buffer, "utf8") + Buffer.byteLength(text, "utf8") > accumulator.maxBytes) {
+		accumulator.buffer = "";
+		accumulator.overflowed = true;
+		onOverflow();
+		return [];
+	}
+	accumulator.buffer += text;
+	const parts = accumulator.buffer.split("\n");
+	accumulator.buffer = parts.pop() ?? "";
+	return parts;
+}
+
+function createBoundedEventLineAccumulator(maxBytes: number): {
+	push(text: string, onOverflow?: () => void): { lines: string[]; overflowed: boolean };
+	flush(onOverflow?: () => void): { lines: string[]; overflowed: boolean };
+} {
+	const accumulator: BoundedEventLineAccumulator = { buffer: "", overflowed: false, maxBytes };
+	return {
+		push: (text, onOverflow = () => {}) => {
+			const wasOverflowed = accumulator.overflowed;
+			const lines = consumeBoundedEventChunk(accumulator, text, onOverflow);
+			return { lines, overflowed: !wasOverflowed && accumulator.overflowed };
+		},
+		flush: (onOverflow = () => {}) => {
+			if (accumulator.overflowed) return { lines: [], overflowed: false };
+			return {
+				lines: consumeBoundedEventChunk(accumulator, "\n", onOverflow).filter((line) => line !== ""),
+				overflowed: false,
+			};
+		},
+	};
+}
+
 function createUtf8StreamDecoder(append: (text: string) => void) {
 	const decoder = new StringDecoder("utf8");
 	return {
@@ -2211,12 +2327,13 @@ async function runSingleAgentViaJson(
 				stdio: ["ignore", "pipe", "pipe"],
 				env: getWorkerProcessEnv(worker),
 			});
-			let buffer = "";
+			const eventLines = createBoundedEventLineAccumulator(MAX_CHILD_EVENT_LINE_BYTES);
 			const stdoutDecoder = new StringDecoder("utf8");
 			const stderrDecoder = createUtf8StreamDecoder((text) => {
-				currentResult.stderr += text;
+				currentResult.stderr = appendBoundedText(currentResult.stderr, text, MAX_CHILD_STDERR_BYTES);
 			});
 			let procClosed = false;
+			let oversizedEventLine = false;
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
@@ -2229,7 +2346,9 @@ async function runSingleAgentViaJson(
 
 				if (event.type === "message_end" && event.message) {
 					const msg = event.message as Message;
-					currentResult.messages.push(msg);
+					if (!pushBoundedMessage(currentResult.messages, msg)) {
+						currentResult.errorMessage ??= "Child message output exceeded the parent memory limit.";
+					}
 
 					if (msg.role === "assistant") {
 						currentResult.usage.turns++;
@@ -2250,16 +2369,21 @@ async function runSingleAgentViaJson(
 				}
 
 				if (event.type === "tool_result_end" && event.message) {
-					currentResult.messages.push(event.message as Message);
+					if (!pushBoundedMessage(currentResult.messages, event.message as Message)) {
+						currentResult.errorMessage ??= "Child message output exceeded the parent memory limit.";
+					}
 					emitUpdate();
 				}
 			};
 
 			proc.stdout.on("data", (data) => {
-				buffer += stdoutDecoder.write(data);
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-				for (const line of lines) processLine(line);
+				const result = eventLines.push(stdoutDecoder.write(data), () => {
+					oversizedEventLine = true;
+					currentResult.errorMessage = "Child emitted an oversized unterminated JSON event line.";
+					wasAborted = true;
+					terminateProcessWithEscalation(proc, { isExited: () => procClosed });
+				});
+				if (!oversizedEventLine) for (const line of result.lines) processLine(line);
 			});
 
 			proc.stderr.on("data", (data) => {
@@ -2268,9 +2392,9 @@ async function runSingleAgentViaJson(
 
 			proc.on("close", (code, closeSignal) => {
 				procClosed = true;
-				buffer += stdoutDecoder.end();
+				const result = eventLines.flush();
 				stderrDecoder.flush();
-				if (buffer.trim()) processLine(buffer);
+				if (!oversizedEventLine) for (const line of result.lines) processLine(line);
 				const outcome = mapTransportClose(code, closeSignal, {
 					aborted: wasAborted,
 					transportLabel: "Task process",
@@ -2488,10 +2612,10 @@ async function runSingleAgentViaRpc(
 		};
 		setLiveTaskController(controller);
 
-		let buffer = "";
+		const eventLines = createBoundedEventLineAccumulator(MAX_CHILD_EVENT_LINE_BYTES);
 		const stdoutDecoder = new StringDecoder("utf8");
 		const stderrDecoder = createUtf8StreamDecoder((text) => {
-			currentResult.stderr += text;
+			currentResult.stderr = appendBoundedText(currentResult.stderr, text, MAX_CHILD_STDERR_BYTES);
 		});
 		let completionResolve: ((value: number) => void) | undefined;
 		const completion = new Promise<number>((resolve) => {
@@ -2499,6 +2623,7 @@ async function runSingleAgentViaRpc(
 		});
 		let intentionallyTerminatedAfterSettlement = false;
 		let rpcAborted = false;
+		let oversizedEventLine = false;
 		let closed = false;
 		let uiRelayQueue: Promise<void> = Promise.resolve();
 
@@ -2588,8 +2713,19 @@ async function runSingleAgentViaRpc(
 				controller.lastActivity = "agent_end";
 				const maybeMessages = Array.isArray(event.messages) ? (event.messages as Message[]) : undefined;
 				if (maybeMessages) {
-					currentResult.messages = maybeMessages;
-					controller.lastMessageCount = maybeMessages.length;
+					const boundedMessages: Message[] = [];
+					let rejected = false;
+					for (const message of maybeMessages) {
+						if (!pushBoundedMessage(boundedMessages, message)) {
+							rejected = true;
+							break;
+						}
+					}
+					currentResult.messages = boundedMessages;
+					if (rejected || boundedMessages.length < maybeMessages.length) {
+						currentResult.errorMessage ??= "Child message output exceeded the parent memory limit.";
+					}
+					controller.lastMessageCount = boundedMessages.length;
 				}
 				emitUpdate();
 				completionCoordinator.onAgentEnd();
@@ -2604,7 +2740,9 @@ async function runSingleAgentViaRpc(
 			}
 			if (event.type === "message_end" && event.message) {
 				const msg = event.message as Message;
-				currentResult.messages.push(msg);
+				if (!pushBoundedMessage(currentResult.messages, msg)) {
+					currentResult.errorMessage ??= "Child message output exceeded the parent memory limit.";
+				}
 				controller.lastMessageCount = currentResult.messages.length;
 				controller.lastActivity = msg.role;
 				if (msg.role === "assistant") {
@@ -2688,18 +2826,21 @@ async function runSingleAgentViaRpc(
 		};
 
 		proc.stdout.on("data", (data) => {
-			buffer += stdoutDecoder.write(data);
-			const lines = buffer.split("\n");
-			buffer = lines.pop() || "";
-			for (const line of lines) handleLine(line);
+			const result = eventLines.push(stdoutDecoder.write(data), () => {
+				oversizedEventLine = true;
+				currentResult.errorMessage = "Child emitted an oversized unterminated JSON event line.";
+				rpcAborted = true;
+				void controller.close(new Error(currentResult.errorMessage));
+			});
+			if (!oversizedEventLine) for (const line of result.lines) handleLine(line);
 		});
 		proc.stderr.on("data", (data) => {
 			stderrDecoder.write(data);
 		});
 		proc.on("close", (code, closeSignal) => {
-			buffer += stdoutDecoder.end();
+			const result = eventLines.flush();
 			stderrDecoder.flush();
-			if (buffer.trim()) handleLine(buffer);
+			if (!oversizedEventLine) for (const line of result.lines) handleLine(line);
 			const outcome = mapTransportClose(code, closeSignal, {
 				aborted: rpcAborted,
 				intentionalSignal: intentionallyTerminatedAfterSettlement ? "SIGTERM" : undefined,
@@ -5755,6 +5896,11 @@ export const __test__ = {
 	terminateProcessWithEscalation,
 	mapWithConcurrencyLimit,
 	createUtf8StreamDecoder,
+	createBoundedEventLineAccumulator,
+	consumeBoundedEventChunk,
+	appendBoundedText,
+	estimateBytes,
+	pushBoundedMessage,
 	mapTransportClose,
 	createRpcCompletionCoordinator,
 	runTaskStepWithMetadata,
