@@ -1,9 +1,6 @@
 {
   "name": "mcp",
   "private": true,
-  "scripts": {
-    "test": "bun test --dots --only-failures"
-  },
   "dependencies": {
     "mcporter": "^0.12.0"
   },

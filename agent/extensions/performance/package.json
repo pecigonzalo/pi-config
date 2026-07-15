@@ -1,9 +1,6 @@
 {
   "name": "performance",
   "private": true,
-  "scripts": {
-    "test": "bun test --dots --only-failures"
-  },
   "pi": {
     "extensions": [
       "./index.ts"

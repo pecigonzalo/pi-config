@@ -1,8 +1,5 @@
 {
   "name": "skill-preservation",
-  "scripts": {
-    "test": "bun test --dots --only-failures"
-  },
   "pi": {
     "extensions": [
       "./index.ts"

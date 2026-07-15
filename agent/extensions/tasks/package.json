@@ -1,8 +1,5 @@
 {
   "name": "tasks",
-  "scripts": {
-    "test": "bun test --dots --only-failures"
-  },
   "pi": {
     "extensions": [
       "./task.ts"

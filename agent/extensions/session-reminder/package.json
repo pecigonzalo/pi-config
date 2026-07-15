@@ -1,8 +1,5 @@
 {
   "name": "session-reminder",
-  "scripts": {
-    "test": "bun test --dots --only-failures"
-  },
   "pi": {
     "extensions": [
       "./session-reminder.ts"
