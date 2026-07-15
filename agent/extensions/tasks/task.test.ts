@@ -1076,6 +1076,38 @@ describe("required task skill instructions", () => {
 		expect(prompt).toContain(`path="${skillPath}"`);
 	});
 
+	it("writes required instructions and prompt flags for append and replace modes", async () => {
+		const skillPath = await createSkill("review", "Launch-level required instruction.");
+		mockSkillResolution = { paths: [path.dirname(skillPath)], missing: [] };
+
+		try {
+			for (const mode of ["append", "replace"] as const) {
+				const args: string[] = [];
+				const worker = {
+					skills: ["review"],
+					systemPrompt: "Configured launch behavior.",
+					systemPromptMode: mode,
+					displayAgentName: "reviewer",
+					context: { mode: "fresh", project: false, skills: false },
+				};
+				expect(__test__.appendWorkerSkillFlags(args, worker, process.cwd(), false)).toBeUndefined();
+
+				const promptFile = await __test__.appendWorkerPromptFlags(args, worker, process.cwd(), false);
+				expect(promptFile.filePath).not.toBeNull();
+				const prompt = await fs.readFile(promptFile.filePath!, "utf-8");
+
+				expect(args).toContain("--skill");
+				expect(args).toContain(path.dirname(skillPath));
+				expect(args).toContain(mode === "append" ? "--append-system-prompt" : "--system-prompt");
+				expect(prompt).toContain("Configured launch behavior.");
+				expect(prompt).toContain("Launch-level required instruction.");
+				await fs.rm(promptFile.dir!, { recursive: true, force: true });
+			}
+		} finally {
+			mockSkillResolution = { paths: [], missing: [] };
+		}
+	});
+
 	it("uses explicit task skills instead of agent defaults, including an empty list", () => {
 		const resources = createResources({
 			agents: [

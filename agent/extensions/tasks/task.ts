@@ -1121,6 +1121,20 @@ async function prepareWorkerSystemPrompt(
 	return composeWorkerSystemPrompt(worker.systemPrompt, requiredSkillInstructions);
 }
 
+async function appendWorkerPromptFlags(
+	args: string[],
+	worker: Pick<ResolvedWorkerConfig, "displayAgentName" | "skills" | "systemPrompt" | "systemPromptMode">,
+	launchCwd: string,
+	projectTrusted: boolean,
+): Promise<{ dir: string | null; filePath: string | null }> {
+	const composedPrompt = await prepareWorkerSystemPrompt(worker, launchCwd, projectTrusted);
+	if (!composedPrompt.trim()) return { dir: null, filePath: null };
+	const promptFile = await writePromptToTempFile(worker.displayAgentName, composedPrompt);
+	const promptFlag = worker.systemPromptMode === "append" ? "--append-system-prompt" : "--system-prompt";
+	args.push(promptFlag, promptFile.filePath);
+	return promptFile;
+}
+
 function firstDefined<T>(...values: Array<T | undefined>): T | undefined {
 	for (const value of values) {
 		if (value !== undefined) return value;
@@ -2366,18 +2380,14 @@ async function runSingleAgentViaJson(
 	};
 
 	try {
-		const composedPrompt = await prepareWorkerSystemPrompt(
+		const promptFile = await appendWorkerPromptFlags(
+			args,
 			worker,
 			preparedStep.launchCwd,
 			preparedStep.projectTrusted,
 		);
-		if (composedPrompt.trim()) {
-			const tmp = await writePromptToTempFile(worker.displayAgentName, composedPrompt);
-			tmpPromptDir = tmp.dir;
-			tmpPromptPath = tmp.filePath;
-			const promptFlag = worker.systemPromptMode === "append" ? "--append-system-prompt" : "--system-prompt";
-			args.push(promptFlag, tmpPromptPath);
-		}
+		tmpPromptDir = promptFile.dir;
+		tmpPromptPath = promptFile.filePath;
 
 		args.push(`Task: ${task}`);
 		let wasAborted = false;
@@ -2631,18 +2641,14 @@ async function runSingleAgentViaRpc(
 	};
 
 	try {
-		const composedPrompt = await prepareWorkerSystemPrompt(
+		const promptFile = await appendWorkerPromptFlags(
+			args,
 			worker,
 			preparedStep.launchCwd,
 			preparedStep.projectTrusted,
 		);
-		if (composedPrompt.trim()) {
-			const tmp = await writePromptToTempFile(worker.displayAgentName, composedPrompt);
-			tmpPromptDir = tmp.dir;
-			tmpPromptPath = tmp.filePath;
-			const promptFlag = worker.systemPromptMode === "append" ? "--append-system-prompt" : "--system-prompt";
-			args.push(promptFlag, tmpPromptPath);
-		}
+		tmpPromptDir = promptFile.dir;
+		tmpPromptPath = promptFile.filePath;
 
 		const invocation = getPiInvocation(args);
 		const proc = spawn(invocation.command, invocation.args, {
@@ -5966,6 +5972,7 @@ export const __test__ = {
 	loadRequiredSkillInstructions,
 	composeWorkerSystemPrompt,
 	prepareWorkerSystemPrompt,
+	appendWorkerPromptFlags,
 	resolveTaskSelector,
 	setTaskWidgetEnabled,
 	terminateProcessWithEscalation,
