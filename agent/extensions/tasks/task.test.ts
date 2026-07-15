@@ -1,10 +1,16 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock, test } from "bun:test";
 import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
 import * as syncFs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { EventEmitter } from "node:events";
+import {
+	getTaskTerminalAttachment,
+	resolveConfiguredTaskTerminalBackend,
+	resolveTaskTerminalBackendById,
+	setTaskTerminalCommandRunnerForTests,
+} from "./task-terminal.js";
 
 let taskExtension: (typeof import("./task"))["default"];
 let __test__: any;
@@ -2302,7 +2308,7 @@ describe("task terminal backend configuration", () => {
 		});
 	});
 
-	it("keeps workspace-only terminal metadata when no pane id is recorded", () => {
+	it("does not attach workspace-only metadata without a canonical pane ID", () => {
 		const snapshot = __test__.normalizeChildSessionSnapshot({
 			v: 1,
 			runId: "run-3",
@@ -2321,12 +2327,343 @@ describe("task terminal backend configuration", () => {
 		});
 
 		expect(snapshot).toMatchObject({
-			terminalBackend: "wezterm",
+			terminalBackend: undefined,
 			terminalTargetId: undefined,
-			terminalWorkspace: "pi-session-abc",
+			terminalWorkspace: undefined,
 			weztermPaneId: undefined,
-			weztermWorkspace: "pi-session-abc",
+			weztermWorkspace: undefined,
 		});
+		expect(getTaskTerminalAttachment(snapshot)).toBeUndefined();
+	});
+
+	it("enforces canonical pane ID boundaries and normalizes outer whitespace", () => {
+		expect(getTaskTerminalAttachment({ terminalBackend: "wezterm", terminalTargetId: "0" })).toBeUndefined();
+		expect(
+			getTaskTerminalAttachment({
+				terminalBackend: "wezterm",
+				terminalTargetId: String(Number.MAX_SAFE_INTEGER) + "0",
+			}),
+		).toBeUndefined();
+		expect(getTaskTerminalAttachment({ terminalBackend: "wezterm", terminalTargetId: " 42 " })).toEqual({
+			backend: "wezterm",
+			targetId: "42",
+		});
+		for (const targetId of ["4 2", "4\t2", "4\n2", "42 43", "01"]) {
+			expect(
+				getTaskTerminalAttachment({ terminalBackend: "wezterm", terminalTargetId: targetId }),
+			).toBeUndefined();
+		}
+		expect(
+			getTaskTerminalAttachment({
+				terminalBackend: "wezterm",
+				terminalTargetId: String(Number.MAX_SAFE_INTEGER),
+			}),
+		).toEqual({ backend: "wezterm", targetId: String(Number.MAX_SAFE_INTEGER) });
+	});
+
+	it("rejects invalid persisted generic and legacy pane IDs, preferring valid canonical generic metadata", () => {
+		expect(
+			getTaskTerminalAttachment({
+				terminalBackend: "wezterm",
+				terminalTargetId: "not-a-pane",
+				weztermPaneId: "also-invalid",
+			}),
+		).toBeUndefined();
+		expect(
+			getTaskTerminalAttachment({
+				terminalBackend: "wezterm",
+				terminalTargetId: "42",
+				terminalWorkspace: "canonical",
+				weztermPaneId: "43",
+				weztermWorkspace: "legacy",
+			}),
+		).toEqual({ backend: "wezterm", targetId: "42", workspace: "canonical" });
+		expect(
+			getTaskTerminalAttachment({
+				terminalBackend: "wezterm",
+				terminalTargetId: "bad",
+				weztermPaneId: "43",
+				weztermWorkspace: "legacy",
+			}),
+		).toEqual({ backend: "wezterm", targetId: "43", workspace: "legacy" });
+	});
+});
+
+describe("deterministic task terminal ownership", () => {
+	const previousBackend = process.env.PI_TASKS_TERMINAL_BACKEND;
+	const previousDomain = process.env.PI_TASKS_WEZTERM_DOMAIN;
+	const makeFixture = async (attachment?: Record<string, unknown>) => {
+		const childSessionPath = path.join(testAgentDir, `terminal-child-${Date.now()}-${Math.random()}.jsonl`);
+		await fs.writeFile(childSessionPath, "{}\n");
+		const fixtureId = `${Date.now()}-${Math.random()}`;
+		const run = makeRun(`terminal-run-${fixtureId}`, `terminal-child-${fixtureId}`);
+		run.sourceSessionFile = childSessionPath;
+		run.steps[0].snapshot.childSessionPath = childSessionPath;
+		Object.assign(run.steps[0].snapshot, attachment);
+		return { run, childSessionPath };
+	};
+	const ok = (stdout = "") => ({ ok: true, stdout, stderr: "", code: 0 });
+	const fail = (stderr = "failed") => ({ ok: false, stdout: "", stderr, code: 1 });
+
+	afterEach(() => {
+		setTaskTerminalCommandRunnerForTests(undefined);
+		if (previousBackend === undefined) delete process.env.PI_TASKS_TERMINAL_BACKEND;
+		else process.env.PI_TASKS_TERMINAL_BACKEND = previousBackend;
+		if (previousDomain === undefined) delete process.env.PI_TASKS_WEZTERM_DOMAIN;
+		else process.env.PI_TASKS_WEZTERM_DOMAIN = previousDomain;
+	});
+
+	it("malformed, multi-token, and non-numeric WezTerm spawn output fails", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const { run } = await makeFixture();
+		let mode: "ok" | "malformed" | "multi-token" | "non-numeric" | "nonzero" | "timeout" = "ok";
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (mode === "nonzero") return fail("spawn failed");
+			if (mode === "timeout") return { ok: false, stdout: "", stderr: "", code: null, error: "timed out" };
+			if (mode === "malformed") return ok("42 nope");
+			if (mode === "multi-token") return ok("42\n43");
+			if (mode === "non-numeric") return ok("pane-42");
+			return ok("42\n");
+		});
+		expect((await resolveTaskTerminalBackendById("wezterm")).backend).toBeDefined();
+		expect((await resolveConfiguredTaskTerminalBackend()).backend).toBeDefined();
+		const ctx = { sessionManager: { getSessionFile: () => undefined } };
+		expect((await __test__.attachTaskRunInTerminal(ctx, run)).ok).toBe(true);
+		for (const invalidMode of ["malformed", "multi-token", "non-numeric"] as const) {
+			mode = invalidMode;
+			expect((await __test__.attachTaskRunInTerminal(ctx, (await makeFixture()).run)).ok).toBe(false);
+		}
+		mode = "nonzero";
+		expect((await __test__.attachTaskRunInTerminal(ctx, (await makeFixture()).run)).ok).toBe(false);
+		mode = "timeout";
+		expect((await __test__.attachTaskRunInTerminal(ctx, (await makeFixture()).run)).ok).toBe(false);
+	});
+
+	it("focuses an existing live pane without spawning", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const { run } = await makeFixture({ terminalBackend: "wezterm", terminalTargetId: "9" });
+		const calls: string[][] = [];
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			calls.push(args);
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("list")) return ok('[{"pane_id":9}]');
+			return ok();
+		});
+		expect((await __test__.attachTaskRunInTerminal({ sessionManager: {} }, run)).ok).toBe(true);
+		expect(calls.some((args) => args.includes("spawn"))).toBe(false);
+	});
+
+	it("stale cancellation and stale headless refusal each leave spawn count unchanged", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		let launches = 0;
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("list")) return ok("[]");
+			launches++;
+			return ok("11");
+		});
+		const { run } = await makeFixture({ terminalBackend: "wezterm", terminalTargetId: "9" });
+		const ctx = (answer?: boolean) => ({
+			sessionManager: {},
+			hasUI: answer !== undefined,
+			ui: { confirm: async () => answer! },
+		});
+		expect((await __test__.attachTaskRunInTerminal(ctx(true), run)).ok).toBe(true);
+		expect(launches).toBe(1);
+		expect(
+			(
+				await __test__.attachTaskRunInTerminal(
+					ctx(false),
+					await makeFixture({ terminalBackend: "wezterm", terminalTargetId: "9" }).then((x) => x.run),
+				)
+			).ok,
+		).toBe(false);
+		expect(
+			(
+				await __test__.attachTaskRunInTerminal(
+					{ sessionManager: {} },
+					await makeFixture({ terminalBackend: "wezterm", terminalTargetId: "9" }).then((x) => x.run),
+				)
+			).ok,
+		).toBe(false);
+	});
+
+	it("refuses relaunch when pane probing is unknown", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		let launches = 0;
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("list")) return { ...fail("connection unavailable"), code: null };
+			launches++;
+			return ok("11");
+		});
+		const { run } = await makeFixture({ terminalBackend: "wezterm", terminalTargetId: "9" });
+		expect((await __test__.attachTaskRunInTerminal({ sessionManager: {} }, run)).ok).toBe(false);
+		expect(launches).toBe(0);
+	});
+
+	it("refuses non-persisted attachment without launching", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		let launches = 0;
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("spawn")) launches++;
+			if (args.includes("--version")) return ok("wezterm 1");
+			return ok("11");
+		});
+		const { run } = await makeFixture();
+		run.steps[0].snapshot.persist = false;
+		const result = await __test__.attachTaskRunInTerminal({ sessionManager: {} }, run);
+		expect(result.ok).toBe(false);
+		expect(launches).toBe(0);
+	});
+
+	it("refuses unknown probe in UI mode without confirming or launching", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		let launches = 0;
+		let confirms = 0;
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("list")) return { ...fail("connection unavailable"), code: null };
+			if (args.includes("spawn")) launches++;
+			return ok("11");
+		});
+		const { run } = await makeFixture({ terminalBackend: "wezterm", terminalTargetId: "9" });
+		const result = await __test__.attachTaskRunInTerminal(
+			{
+				hasUI: true,
+				ui: { confirm: async () => (confirms++, true) },
+				sessionManager: {},
+			},
+			run,
+		);
+		expect(result.ok).toBe(false);
+		expect(confirms).toBe(0);
+		expect(launches).toBe(0);
+	});
+
+	it("passes bounded timeouts to probe focus open and close", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const timeouts: number[] = [];
+		setTaskTerminalCommandRunnerForTests(async (_command, args, options) => {
+			if (options?.timeoutMs !== undefined) timeouts.push(options.timeoutMs);
+			if (args.includes("list")) return ok('[{"pane_id":9}]');
+			if (args.includes("spawn")) return ok("10");
+			return ok();
+		});
+		const { backend } = await resolveTaskTerminalBackendById("wezterm");
+		expect(backend).toBeDefined();
+		const attachment = { backend: "wezterm" as const, targetId: "9" };
+		await backend!.probe(attachment);
+		await backend!.focus(attachment);
+		await backend!.openSession({ sessionPath: "/tmp/task.jsonl", command: "pi", args: [] });
+		await backend!.close(attachment);
+		expect(timeouts.length).toBe(4);
+		expect(timeouts.every((timeout) => Number.isFinite(timeout) && timeout > 0 && timeout === 5_000)).toBe(true);
+	});
+
+	it("shares one launch promise for concurrent attachments resolving to the same step", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const { run } = await makeFixture();
+		let launches = 0;
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => (release = resolve));
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("spawn")) {
+				launches++;
+				await gate;
+			}
+			return ok("12");
+		});
+		const first = __test__.attachTaskRunInTerminal({ sessionManager: {} }, run);
+		const second = __test__.attachTaskRunInTerminal({ sessionManager: {} }, run, run.steps[0]);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		release();
+		await Promise.all([first, second]);
+		expect(launches).toBe(1);
+	});
+
+	it("persistence append failure launches once, attempts kill-pane, and retry does not duplicate when close rejects", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const { run, childSessionPath } = await makeFixture();
+		let launches = 0;
+		let closeAttempts = 0;
+		let rejectClose = true;
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("spawn")) {
+				launches++;
+				return ok("13");
+			}
+			if (args.includes("list")) return ok('[{"pane_id":13}]');
+			if (args.includes("kill-pane")) {
+				closeAttempts++;
+				if (rejectClose) throw new Error("close promise rejected");
+				return fail("close failed");
+			}
+			return ok();
+		});
+		const ctx = {
+			sessionManager: {
+				getSessionFile: () => childSessionPath,
+				appendCustomEntry: () => {
+					throw new Error("append failed");
+				},
+			},
+		};
+		const first = await __test__.attachTaskRunInTerminal(ctx, run);
+		expect(first.ok).toBe(false);
+		expect(launches).toBe(1);
+		expect(closeAttempts).toBe(1);
+		expect(first.message).toContain("close promise rejected");
+		const retry = await __test__.attachTaskRunInTerminal(ctx, run);
+		expect(retry.ok).toBe(true);
+		expect(launches).toBe(1);
+	});
+
+	it("holds successful launch ownership in memory when metadata cannot be persisted", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const { run } = await makeFixture();
+		let launches = 0;
+		let focuses = 0;
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("spawn")) {
+				launches++;
+				return ok("14");
+			}
+			if (args.includes("list")) return ok('[{"pane_id":14}]');
+			if (args.includes("activate-pane")) focuses++;
+			return ok();
+		});
+		const ctx = { sessionManager: {} };
+		expect((await __test__.attachTaskRunInTerminal(ctx, run)).ok).toBe(true);
+		const retry = await __test__.attachTaskRunInTerminal(ctx, run);
+		expect(retry.ok).toBe(true);
+		expect(launches).toBe(1);
+		expect(focuses).toBe(1);
+	});
+
+	it("surfaces appendCustomEntry failure after launch", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const { run, childSessionPath } = await makeFixture();
+		setTaskTerminalCommandRunnerForTests(async (_command, args) =>
+			args.includes("--version") ? ok("wezterm 1") : ok("13"),
+		);
+		const result = await __test__.attachTaskRunInTerminal(
+			{
+				sessionManager: {
+					getSessionFile: () => childSessionPath,
+					appendCustomEntry: () => {
+						throw new Error("append failed");
+					},
+				},
+			},
+			run,
+		);
+		expect(result.ok).toBe(false);
+		expect(result.message).toContain("append failed");
 	});
 });
 

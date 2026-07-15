@@ -33,6 +33,9 @@ export interface TaskTerminalLaunchResult {
 	error?: string;
 }
 
+export type TaskTerminalProbeResult =
+	{ status: "alive" } | { status: "stale"; error?: string } | { status: "unknown"; error?: string };
+
 export interface TaskTerminalOpenSessionOptions {
 	sessionPath: string;
 	cwd?: string;
@@ -46,12 +49,14 @@ export interface TaskTerminalBackend {
 	id: TaskTerminalBackendId;
 	displayName: string;
 	detectAvailability(): Promise<TaskTerminalBackendAvailability>;
+	probe(attachment: TaskTerminalAttachment): Promise<TaskTerminalProbeResult>;
 	focus(attachment: TaskTerminalAttachment): Promise<{ ok: boolean; error?: string }>;
+	close(attachment: TaskTerminalAttachment): Promise<{ ok: boolean; error?: string }>;
 	openSession(options: TaskTerminalOpenSessionOptions): Promise<TaskTerminalLaunchResult>;
 	formatAttachment(attachment: TaskTerminalAttachment): string;
 }
 
-interface CommandExecutionResult {
+export interface TaskTerminalCommandResult {
 	ok: boolean;
 	stdout: string;
 	stderr: string;
@@ -59,33 +64,45 @@ interface CommandExecutionResult {
 	error?: string;
 }
 
+export type TaskTerminalCommandRunner = (
+	command: string,
+	args: string[],
+	options?: { cwd?: string; timeoutMs?: number },
+) => Promise<TaskTerminalCommandResult>;
+
+const TASK_TERMINAL_COMMAND_TIMEOUT_MS = 5_000;
+let commandRunner: TaskTerminalCommandRunner | undefined;
+
 export function isTaskTerminalBackendId(value: unknown): value is TaskTerminalBackendId {
 	return value === "wezterm";
 }
 
-export function getTaskTerminalAttachment(snapshot: TaskTerminalAttachmentFields): TaskTerminalAttachment | undefined {
-	if (isTaskTerminalBackendId(snapshot.terminalBackend)) {
-		const targetId =
-			typeof snapshot.terminalTargetId === "string" && snapshot.terminalTargetId.trim()
-				? snapshot.terminalTargetId
-				: undefined;
-		const workspace =
-			typeof snapshot.terminalWorkspace === "string" && snapshot.terminalWorkspace.trim()
-				? snapshot.terminalWorkspace
-				: undefined;
-		if (targetId || workspace) {
-			return {
-				backend: snapshot.terminalBackend,
-				targetId,
-				workspace,
-			};
-		}
+function normalizeTaskTerminalTargetId(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	if (!/^\d+$/.test(trimmed)) return undefined;
+	const numericValue = Number(trimmed);
+	if (numericValue < 1 || !Number.isSafeInteger(numericValue) || String(numericValue) !== trimmed) {
+		return undefined;
 	}
-	if (typeof snapshot.weztermPaneId === "string" && snapshot.weztermPaneId.trim()) {
+	return trimmed;
+}
+
+export function getTaskTerminalAttachment(snapshot: TaskTerminalAttachmentFields): TaskTerminalAttachment | undefined {
+	const genericTargetId = normalizeTaskTerminalTargetId(snapshot.terminalTargetId);
+	if (isTaskTerminalBackendId(snapshot.terminalBackend) && genericTargetId) {
+		return {
+			backend: snapshot.terminalBackend,
+			targetId: genericTargetId,
+			workspace: snapshot.terminalWorkspace?.trim() || undefined,
+		};
+	}
+	const legacyTargetId = normalizeTaskTerminalTargetId(snapshot.weztermPaneId);
+	if (legacyTargetId) {
 		return {
 			backend: "wezterm",
-			targetId: snapshot.weztermPaneId,
-			workspace: snapshot.weztermWorkspace,
+			targetId: legacyTargetId,
+			workspace: snapshot.weztermWorkspace?.trim() || undefined,
 		};
 	}
 	return undefined;
@@ -114,9 +131,10 @@ export function applyTaskTerminalAttachment<T extends TaskTerminalAttachmentFiel
 async function runCommand(
 	command: string,
 	args: string[],
-	options?: { cwd?: string },
-): Promise<CommandExecutionResult> {
-	return await new Promise<CommandExecutionResult>((resolve) => {
+	options?: { cwd?: string; timeoutMs?: number },
+): Promise<TaskTerminalCommandResult> {
+	if (commandRunner) return await commandRunner(command, args, options);
+	return await new Promise<TaskTerminalCommandResult>((resolve) => {
 		const proc = spawn(command, args, {
 			cwd: options?.cwd,
 			env: process.env,
@@ -145,39 +163,15 @@ async function runCommand(
 		proc.once("close", (code) => {
 			if (settled) return;
 			settled = true;
+			clearTimeout(timeout);
 			resolve({ ok: code === 0, stdout, stderr, code });
 		});
-	});
-}
-
-async function runDetachedCommand(
-	command: string,
-	args: string[],
-	options?: { cwd?: string },
-): Promise<{ ok: boolean; error?: string }> {
-	return await new Promise<{ ok: boolean; error?: string }>((resolve) => {
-		let settled = false;
-		try {
-			const proc = spawn(command, args, {
-				cwd: options?.cwd,
-				env: process.env,
-				stdio: "ignore",
-				detached: true,
-			});
-			proc.once("error", (error) => {
-				if (settled) return;
-				settled = true;
-				resolve({ ok: false, error: error instanceof Error ? error.message : String(error) });
-			});
-			proc.unref();
-			setTimeout(() => {
-				if (settled) return;
-				settled = true;
-				resolve({ ok: true });
-			}, 50);
-		} catch (error) {
-			resolve({ ok: false, error: error instanceof Error ? error.message : String(error) });
-		}
+		const timeout = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			proc.kill("SIGTERM");
+			resolve({ ok: false, stdout, stderr, code: null, error: "command timed out" });
+		}, options?.timeoutMs ?? TASK_TERMINAL_COMMAND_TIMEOUT_MS);
 	});
 }
 
@@ -186,25 +180,12 @@ function getWezTermDomain(): string {
 	return configured || "pi";
 }
 
-async function openWezTermWorkspace(workspace?: string): Promise<{ ok: boolean; error?: string }> {
-	const resolvedWorkspace = workspace?.trim() || TASKS_WEZTERM_WORKSPACE;
-	const domain = getWezTermDomain();
-	const result = await runDetachedCommand("wezterm", [
-		"start",
-		"--workspace",
-		resolvedWorkspace,
-		"--domain",
-		domain,
-		"--attach",
-	]);
-	if (result.ok) return { ok: true };
-	return {
-		ok: false,
-		error: `WezTerm could not open workspace ${resolvedWorkspace} on domain ${domain}: ${result.error ?? "failed to start"}`,
-	};
+export function setTaskTerminalCommandRunnerForTests(runner: TaskTerminalCommandRunner | undefined): void {
+	commandRunner = runner;
+	taskTerminalBackendAvailabilityCache.clear();
 }
 
-function formatCommandFailure(result: CommandExecutionResult): string {
+function formatCommandFailure(result: TaskTerminalCommandResult): string {
 	if (result.error) return result.error;
 	const stderr = result.stderr.trim();
 	if (stderr) return stderr;
@@ -243,15 +224,46 @@ const taskTerminalBackends: Record<TaskTerminalBackendId, TaskTerminalBackend> =
 			taskTerminalBackendAvailabilityCache.set("wezterm", pending);
 			return await pending;
 		},
+		async probe(attachment: TaskTerminalAttachment): Promise<TaskTerminalProbeResult> {
+			if (!attachment.targetId?.trim()) return { status: "stale", error: "Attachment has no pane identity." };
+			const result = await runCommand("wezterm", ["cli", "list", "--format", "json"], {
+				timeoutMs: TASK_TERMINAL_COMMAND_TIMEOUT_MS,
+			});
+			if (!result.ok) {
+				const detail = formatCommandFailure(result);
+				return {
+					status: /pane|not found|no such/i.test(detail) ? "stale" : "unknown",
+					error: detail,
+				};
+			}
+			try {
+				const panes = JSON.parse(result.stdout) as Array<{ pane_id?: number }>;
+				return panes.some((pane) => String(pane.pane_id) === attachment.targetId)
+					? { status: "alive" }
+					: { status: "stale", error: `Pane ${attachment.targetId} was not found.` };
+			} catch {
+				return { status: "unknown", error: "WezTerm returned invalid pane data." };
+			}
+		},
 		async focus(attachment: TaskTerminalAttachment): Promise<{ ok: boolean; error?: string }> {
-			const workspaceResult = await openWezTermWorkspace(attachment.workspace);
-			if (!workspaceResult.ok) return workspaceResult;
-			if (!attachment.targetId?.trim()) return { ok: true };
-			await new Promise((resolve) => setTimeout(resolve, 250));
-			const result = await runCommand("wezterm", ["cli", "activate-pane", "--pane-id", attachment.targetId]);
+			if (!attachment.targetId?.trim()) return { ok: false, error: "Attachment has no pane identity." };
+			const result = await runCommand("wezterm", ["cli", "activate-pane", "--pane-id", attachment.targetId], {
+				timeoutMs: TASK_TERMINAL_COMMAND_TIMEOUT_MS,
+			});
 			if (result.ok) return { ok: true };
 			const detail = formatCommandFailure(result);
 			return { ok: false, error: `WezTerm could not focus pane ${attachment.targetId}: ${detail}` };
+		},
+		async close(attachment: TaskTerminalAttachment): Promise<{ ok: boolean; error?: string }> {
+			if (!attachment.targetId?.trim()) return { ok: false, error: "Attachment has no pane identity." };
+			const result = await runCommand("wezterm", ["cli", "kill-pane", "--pane-id", attachment.targetId], {
+				timeoutMs: TASK_TERMINAL_COMMAND_TIMEOUT_MS,
+			});
+			if (result.ok) return { ok: true };
+			return {
+				ok: false,
+				error: `WezTerm could not close pane ${attachment.targetId}: ${formatCommandFailure(result)}`,
+			};
 		},
 		async openSession(options: TaskTerminalOpenSessionOptions): Promise<TaskTerminalLaunchResult> {
 			const workspace = options.workspace?.trim() || TASKS_WEZTERM_WORKSPACE;
@@ -269,19 +281,23 @@ const taskTerminalBackends: Record<TaskTerminalBackendId, TaskTerminalBackend> =
 				options.command,
 				...options.args,
 			];
-			const result = await runDetachedCommand("wezterm", startArgs, {
+			const result = await runCommand("wezterm", ["cli", "spawn", ...startArgs.slice(1)], {
 				cwd: options.cwd ?? path.dirname(options.sessionPath),
+				timeoutMs: TASK_TERMINAL_COMMAND_TIMEOUT_MS,
 			});
-			if (!result.ok) {
+			const output = result.stdout.trim();
+			const targetId = normalizeTaskTerminalTargetId(output);
+			if (!result.ok || !targetId) {
 				return {
 					ok: false,
-					error: `Failed to launch WezTerm task session: ${result.error ?? "failed to start"}`,
+					error: `Failed to launch WezTerm task session: ${formatCommandFailure(result)}`,
 				};
 			}
 			return {
 				ok: true,
 				attachment: {
 					backend: "wezterm",
+					targetId,
 					workspace,
 				},
 			};

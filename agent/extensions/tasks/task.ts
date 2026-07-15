@@ -3549,13 +3549,30 @@ function canPersistTaskSnapshotUpdate(currentSessionFile: string | undefined, ru
 	);
 }
 
-async function attachTaskRunInTerminal(
+const taskTerminalUnpersistedOwnership = new Map<string, TaskTerminalAttachment>();
+
+function taskTerminalOwnershipKey(run: TaskRunView, step: TaskRunStepView): string {
+	return `${step.snapshot.childSessionId}:${makeTaskRunStepKey(run.runId, step.step)}`;
+}
+
+const taskTerminalAttachInFlight = new Map<
+	string,
+	Promise<{
+		ok: boolean;
+		level: "info" | "warning" | "error";
+		message: string;
+	}>
+>();
+
+async function attachTaskRunInTerminalInternal(
 	ctx: {
 		sessionManager: {
 			getBranch?: () => readonly SessionEntry[];
 			getSessionFile?: () => string | undefined;
 			appendCustomEntry?: (customType: string, data?: unknown) => string;
 		};
+		hasUI?: boolean;
+		ui?: { confirm(title: string, message: string): Promise<boolean> };
 	},
 	run: TaskRunView,
 	preferredStep?: TaskRunStepView,
@@ -3596,8 +3613,58 @@ async function attachTaskRunInTerminal(
 	}
 
 	const liveController = getLiveTaskController(makeTaskRunStepKey(run.runId, targetStep.step));
-	const existingAttachment = getTaskTerminalAttachment(targetStep.snapshot);
+	const ownershipKey = taskTerminalOwnershipKey(run, targetStep);
+	const existingAttachment =
+		getTaskTerminalAttachment(targetStep.snapshot) ?? taskTerminalUnpersistedOwnership.get(ownershipKey);
 	const isRunning = liveController?.status === "running";
+	if (existingAttachment) {
+		const backendResolution = await resolveTaskTerminalBackendById(existingAttachment.backend);
+		if (!backendResolution.backend) {
+			return {
+				ok: false,
+				level: "error",
+				message: backendResolution.reason ?? "Recorded terminal backend is unavailable.",
+			};
+		}
+		const probe = await backendResolution.backend.probe(existingAttachment);
+		if (probe.status === "alive") {
+			const focusResult = await backendResolution.backend.focus(existingAttachment);
+			if (focusResult.ok) {
+				return {
+					ok: true,
+					level: "info",
+					message: `Focused task terminal ${formatTaskTerminalAttachment(existingAttachment)} for run ${run.runId} step ${targetStep.step}.`,
+				};
+			}
+			return {
+				ok: false,
+				level: "error",
+				message: focusResult.error ?? "Could not focus the recorded task terminal.",
+			};
+		}
+		if (probe.status === "unknown") {
+			return {
+				ok: false,
+				level: "warning",
+				message:
+					probe.error ??
+					"Could not determine whether the recorded task terminal is still alive; refusing to launch another writer.",
+			};
+		}
+		if (!ctx.hasUI || !ctx.ui) {
+			return {
+				ok: false,
+				level: "warning",
+				message: "The recorded task terminal is stale; refusing to launch another writer in headless mode.",
+			};
+		}
+		const confirmed = await ctx.ui.confirm(
+			"Relaunch task terminal?",
+			`${formatTaskTerminalAttachment(existingAttachment)} is unavailable. Launch another task terminal for run ${run.runId} step ${targetStep.step}?`,
+		);
+		if (!confirmed) return { ok: false, level: "info", message: "Task terminal relaunch cancelled." };
+		taskTerminalUnpersistedOwnership.delete(ownershipKey);
+	}
 	if (isRunning && !existingAttachment) {
 		return {
 			ok: false,
@@ -3605,32 +3672,6 @@ async function attachTaskRunInTerminal(
 			message:
 				`Run ${run.runId} step ${targetStep.step} is running under an internal controller, not an external terminal. ` +
 				`Use /tasks steer ${targetStep.snapshot.childSessionId} <message> or wait for completion before attaching.`,
-		};
-	}
-
-	if (isRunning && existingAttachment) {
-		const backendResolution = await resolveTaskTerminalBackendById(existingAttachment.backend);
-		if (!backendResolution.backend) {
-			return {
-				ok: false,
-				level: "error",
-				message:
-					backendResolution.reason ??
-					`Backend ${existingAttachment.backend} is unavailable for a running task.`,
-			};
-		}
-		const focusResult = await backendResolution.backend.focus(existingAttachment);
-		if (focusResult.ok) {
-			return {
-				ok: true,
-				level: "info",
-				message: `Focused running task in ${formatTaskTerminalAttachment(existingAttachment)} for run ${run.runId} step ${targetStep.step}.`,
-			};
-		}
-		return {
-			ok: false,
-			level: "error",
-			message: focusResult.error ?? `Could not focus ${formatTaskTerminalAttachment(existingAttachment)}.`,
 		};
 	}
 
@@ -3662,12 +3703,35 @@ async function attachTaskRunInTerminal(
 		};
 	}
 
+	// Register ownership before persistence so a successful launch is protected even when
+	// this session cannot durably record the attachment.
+	taskTerminalUnpersistedOwnership.set(ownershipKey, launchResult.attachment);
 	const currentSessionFile = ctx.sessionManager.getSessionFile?.();
 	if (canPersistTaskSnapshotUpdate(currentSessionFile, run)) {
-		appendTaskChildSessionMetadata(
+		const persistenceError = appendTaskChildSessionMetadata(
 			ctx.sessionManager,
 			applyTaskTerminalAttachment(targetStep.snapshot, launchResult.attachment),
 		);
+		if (persistenceError) {
+			let closeResult: { ok: boolean; error?: string };
+			try {
+				closeResult = await backendResolution.backend.close(launchResult.attachment);
+			} catch (error: unknown) {
+				const detail = error instanceof Error ? error.message : String(error);
+				closeResult = { ok: false, error: detail };
+			}
+			if (closeResult.ok) taskTerminalUnpersistedOwnership.delete(ownershipKey);
+			const closeError = closeResult.ok
+				? "launched pane closed"
+				: `close failed: ${closeResult.error ?? "unknown error"}`;
+			return {
+				ok: false,
+				level: "error",
+				message: `${persistenceError}; ${closeError}`,
+			};
+		}
+		// Durable ownership supersedes the in-memory fallback.
+		taskTerminalUnpersistedOwnership.delete(ownershipKey);
 	}
 
 	return {
@@ -3677,6 +3741,24 @@ async function attachTaskRunInTerminal(
 			`Opened run ${run.runId} step ${targetStep.step} in ${backendResolution.backend.displayName} ` +
 			`(${formatTaskTerminalAttachment(launchResult.attachment)}). Workspace: ${workspace}. It should open as a new tab in that session workspace. Session: ${shortenHomePath(childSessionPath)}`,
 	};
+}
+
+async function attachTaskRunInTerminal(
+	ctx: Parameters<typeof attachTaskRunInTerminalInternal>[0],
+	run: TaskRunView,
+	preferredStep?: TaskRunStepView,
+): ReturnType<typeof attachTaskRunInTerminalInternal> {
+	const targetStep = selectTaskRunStepForOpen(run, preferredStep);
+	const key = makeTaskRunStepKey(run.runId, targetStep?.step ?? preferredStep?.step ?? 0);
+	const existing = taskTerminalAttachInFlight.get(key);
+	if (existing) return await existing;
+	const pending = attachTaskRunInTerminalInternal(ctx, run, preferredStep);
+	taskTerminalAttachInFlight.set(key, pending);
+	try {
+		return await pending;
+	} finally {
+		taskTerminalAttachInFlight.delete(key);
+	}
 }
 
 async function openTaskRunSession(
@@ -5579,4 +5661,5 @@ export const __test__ = {
 	mapTransportClose,
 	createRpcCompletionCoordinator,
 	runTaskStepWithMetadata,
+	attachTaskRunInTerminal,
 };
