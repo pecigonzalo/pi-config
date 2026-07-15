@@ -96,7 +96,9 @@ export function extractText(content: unknown): string {
 function extractToolCallNames(content: unknown): string[] {
 	if (!Array.isArray(content)) return [];
 	return content
-		.map((part: ToolCallBlock) => (part?.type === "toolCall" && typeof part.name === "string" ? part.name : undefined))
+		.map((part: ToolCallBlock) =>
+			part?.type === "toolCall" && typeof part.name === "string" ? part.name : undefined,
+		)
 		.filter((name): name is string => !!name);
 }
 
@@ -122,7 +124,9 @@ function stableId(text: string, evidence: LearningEvidence): string {
 
 function explicitStableId(text: string, evidence: LearningEvidence): string {
 	return createHash("sha1")
-		.update(["explicit", text, evidence.sessionFile ?? "", evidence.entryId ?? "", evidence.timestamp ?? ""].join("\n"))
+		.update(
+			["explicit", text, evidence.sessionFile ?? "", evidence.entryId ?? "", evidence.timestamp ?? ""].join("\n"),
+		)
 		.digest("hex")
 		.slice(0, 12);
 }
@@ -166,7 +170,9 @@ function candidateFromMessageEntry(
 	const previousAssistant = previousMessage(messageEntries, index, "assistant");
 	const nextAssistant = nextMessage(messageEntries, index, "assistant");
 	const toolCalls = previousAssistant ? extractToolCallNames(previousAssistant.message?.content) : [];
-	const contextEntryIds = [previousUser?.id, previousAssistant?.id, entry.id, nextAssistant?.id].filter((id): id is string => !!id);
+	const contextEntryIds = [previousUser?.id, previousAssistant?.id, entry.id, nextAssistant?.id].filter(
+		(id): id is string => !!id,
+	);
 
 	const evidence: LearningEvidence = {
 		sessionFile,
@@ -199,9 +205,17 @@ function candidateFromMessageEntry(
 	};
 }
 
-export function extractCandidatesFromEntries(entries: unknown[], sessionFile: string | undefined, cwd: string, maxCandidates: number): LearningCandidate[] {
+export function extractCandidatesFromEntries(
+	entries: unknown[],
+	sessionFile: string | undefined,
+	cwd: string,
+	maxCandidates: number,
+): LearningCandidate[] {
 	const candidates: LearningCandidate[] = [];
-	const messageEntries = entries.filter((entry): entry is MessageEntry => !!entry && typeof entry === "object" && (entry as MessageEntry).type === "message");
+	const messageEntries = entries.filter(
+		(entry): entry is MessageEntry =>
+			!!entry && typeof entry === "object" && (entry as MessageEntry).type === "message",
+	);
 
 	for (let index = 0; index < messageEntries.length; index++) {
 		const entry = messageEntries[index];
@@ -228,9 +242,15 @@ export function extractCandidatesFromEntries(entries: unknown[], sessionFile: st
 }
 
 export function listUserMessageChoices(entries: unknown[]): Array<{ id: string; label: string; text: string }> {
-	const messageEntries = entries.filter((entry): entry is MessageEntry => !!entry && typeof entry === "object" && (entry as MessageEntry).type === "message");
+	const messageEntries = entries.filter(
+		(entry): entry is MessageEntry =>
+			!!entry && typeof entry === "object" && (entry as MessageEntry).type === "message",
+	);
 	return messageEntries
-		.filter((entry): entry is MessageEntry & { id: string } => entry.message?.role === "user" && typeof entry.id === "string")
+		.filter(
+			(entry): entry is MessageEntry & { id: string } =>
+				entry.message?.role === "user" && typeof entry.id === "string",
+		)
 		.map((entry, index) => {
 			const text = summarizeCandidateText(extractText(entry.message?.content));
 			const label = `${String(index + 1).padStart(2, "0")} · ${entry.timestamp ?? "unknown time"} · ${text}`;
@@ -239,8 +259,16 @@ export function listUserMessageChoices(entries: unknown[]): Array<{ id: string; 
 		.filter((choice) => choice.text.length > 0);
 }
 
-export function extractExplicitCandidateFromEntryId(entries: unknown[], entryId: string, sessionFile: string | undefined, cwd: string): LearningCandidate | undefined {
-	const messageEntries = entries.filter((entry): entry is MessageEntry => !!entry && typeof entry === "object" && (entry as MessageEntry).type === "message");
+export function extractExplicitCandidateFromEntryId(
+	entries: unknown[],
+	entryId: string,
+	sessionFile: string | undefined,
+	cwd: string,
+): LearningCandidate | undefined {
+	const messageEntries = entries.filter(
+		(entry): entry is MessageEntry =>
+			!!entry && typeof entry === "object" && (entry as MessageEntry).type === "message",
+	);
 	const index = messageEntries.findIndex((entry) => entry.id === entryId && entry.message?.role === "user");
 	if (index < 0) return undefined;
 	return candidateFromMessageEntry(

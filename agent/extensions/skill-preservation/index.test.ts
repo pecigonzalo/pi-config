@@ -37,7 +37,14 @@ describe("skill-preservation helpers", () => {
 				type: "message",
 				message: {
 					role: "assistant",
-					content: [{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "/repo/.pi/skills/bad/SKILL.md" } }],
+					content: [
+						{
+							type: "toolCall",
+							id: "read-1",
+							name: "read",
+							arguments: { path: "/repo/.pi/skills/bad/SKILL.md" },
+						},
+					],
 				},
 			},
 			{
@@ -54,7 +61,14 @@ describe("skill-preservation helpers", () => {
 				type: "message",
 				message: {
 					role: "assistant",
-					content: [{ type: "toolCall", id: "read-2", name: "read", arguments: { path: ".pi/skills/release-checklist.md" } }],
+					content: [
+						{
+							type: "toolCall",
+							id: "read-2",
+							name: "read",
+							arguments: { path: ".pi/skills/release-checklist.md" },
+						},
+					],
 				},
 			},
 			{
@@ -109,7 +123,7 @@ describe("skill-preservation helpers", () => {
 			{ name: "incident-response", path: "/repo/.pi/skills/incident-response/SKILL.md" },
 		]);
 		expect(note).toContain("incident-response: /repo/.pi/skills/incident-response/SKILL.md");
-		expect(note).toContain("skill(name: \"...\")");
-		expect(note).toContain("read(path: \"...\")");
+		expect(note).toContain('skill(name: "...")');
+		expect(note).toContain('read(path: "...")');
 	});
 });

@@ -1,8 +1,6 @@
 import type { TodoStatus, TodoView } from "./types";
 
-export type ParsedTodosRoute =
-	| { kind: "list"; listArgs: string }
-	| { kind: "widget"; widgetArgs: string };
+export type ParsedTodosRoute = { kind: "list"; listArgs: string } | { kind: "widget"; widgetArgs: string };
 
 export function parseTodosCommandRoute(args: string): ParsedTodosRoute {
 	const trimmed = args.trim();

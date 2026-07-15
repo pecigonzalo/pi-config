@@ -119,11 +119,7 @@ export function normalizeTodo(raw: unknown): TodoItem | null {
 	const createdAt = typeof value.createdAt === "string" ? value.createdAt : now();
 	const updatedAt = typeof value.updatedAt === "string" ? value.updatedAt : createdAt;
 	const title =
-		typeof value.title === "string"
-			? value.title
-			: typeof value.text === "string"
-				? value.text
-				: `Todo #${id}`;
+		typeof value.title === "string" ? value.title : typeof value.text === "string" ? value.text : `Todo #${id}`;
 	const status = normalizeStatus(value.status, value.done);
 	const history = normalizeHistory(value.history, id);
 
@@ -133,7 +129,8 @@ export function normalizeTodo(raw: unknown): TodoItem | null {
 		description: typeof value.description === "string" ? value.description : undefined,
 		status,
 		tags: Array.isArray(value.tags) ? value.tags.filter((item): item is string => typeof item === "string") : [],
-		priority: value.priority === "low" || value.priority === "med" || value.priority === "high" ? value.priority : "med",
+		priority:
+			value.priority === "low" || value.priority === "med" || value.priority === "high" ? value.priority : "med",
 		effort: value.effort === "S" || value.effort === "M" || value.effort === "L" ? value.effort : "M",
 		parentId: typeof value.parentId === "number" ? value.parentId : undefined,
 		blockerIds: Array.isArray(value.blockerIds)
@@ -192,7 +189,9 @@ export function applyPersistedDetails(state: TodoState, details: unknown): TodoS
 		todos,
 		nextId: typeof details.nextId === "number" ? details.nextId : Math.max(0, ...todos.map((todo) => todo.id)) + 1,
 		wipLimit:
-			typeof details.wipLimit === "number" && details.wipLimit > 0 ? Math.floor(details.wipLimit) : DEFAULT_WIP_LIMIT,
+			typeof details.wipLimit === "number" && details.wipLimit > 0
+				? Math.floor(details.wipLimit)
+				: DEFAULT_WIP_LIMIT,
 	};
 }
 

@@ -27,7 +27,12 @@ export function registerShutdownReviewHook(pi: ExtensionAPI, runtime: LearnRunti
 
 		if (countUserMessages(entries) < config.minUserMessages) return;
 		const sessionFile = ctx.sessionManager.getSessionFile();
-		const candidates = extractCandidatesFromEntries(entries, sessionFile, ctx.cwd, config.maxCandidatesPerReview).map(applyClassification);
+		const candidates = extractCandidatesFromEntries(
+			entries,
+			sessionFile,
+			ctx.cwd,
+			config.maxCandidatesPerReview,
+		).map(applyClassification);
 		if (candidates.length === 0) return;
 
 		runtime.shutdownPromptInFlight = true;

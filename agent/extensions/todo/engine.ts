@@ -197,7 +197,12 @@ function validateActionParams(
 	const names = invalid.join(", ");
 	return {
 		ok: false,
-		result: fail(state, action, `Error: unsupported ${label} for ${action}: ${names}`, `unsupported ${label} for ${action}: ${names}`),
+		result: fail(
+			state,
+			action,
+			`Error: unsupported ${label} for ${action}: ${names}`,
+			`unsupported ${label} for ${action}: ${names}`,
+		),
 	};
 }
 
@@ -266,13 +271,20 @@ export function executeTodoAction(
 			const includeArchived = params.includeArchived ?? false;
 			return {
 				state: nextState,
-				result: ok(nextState, "list", truncateTodoOutput(listText(nextState, view, includeArchived, params.status, params.tag))),
+				result: ok(
+					nextState,
+					"list",
+					truncateTodoOutput(listText(nextState, view, includeArchived, params.status, params.tag)),
+				),
 			};
 		}
 
 		case "add": {
 			if (!params.title?.trim()) {
-				return { state: nextState, result: fail(nextState, "add", "Error: title required for add", "title required") };
+				return {
+					state: nextState,
+					result: fail(nextState, "add", "Error: title required for add", "title required"),
+				};
 			}
 			const id = nextState.nextId++;
 			const parentId = params.parentId;
@@ -307,14 +319,21 @@ export function executeTodoAction(
 			}
 			const todo = findTodo(nextState, params.id);
 			if (!todo) {
-				return { state: nextState, result: fail(nextState, "update", `Todo #${params.id} not found`, `#${params.id} not found`) };
+				return {
+					state: nextState,
+					result: fail(nextState, "update", `Todo #${params.id} not found`, `#${params.id} not found`),
+				};
 			}
 			if (params.title !== undefined && !params.title.trim()) {
-				return { state: nextState, result: fail(nextState, "update", "Error: title required for update", "title required") };
+				return {
+					state: nextState,
+					result: fail(nextState, "update", "Error: title required for update", "title required"),
+				};
 			}
 
 			const nextParentId = params.parentId !== undefined ? params.parentId : todo.parentId;
-			const nextBlockers = params.blockerIds !== undefined ? [...new Set(params.blockerIds)] : [...todo.blockerIds];
+			const nextBlockers =
+				params.blockerIds !== undefined ? [...new Set(params.blockerIds)] : [...todo.blockerIds];
 			const validation = validateParentAndBlockers(nextState, todo.id, nextParentId, nextBlockers, "update");
 			if (validation.ok === false) return { state: nextState, result: validation.result };
 
@@ -344,7 +363,10 @@ export function executeTodoAction(
 			}
 			const todo = findTodo(nextState, params.id);
 			if (!todo) {
-				return { state: nextState, result: fail(nextState, "link", `Todo #${params.id} not found`, `#${params.id} not found`) };
+				return {
+					state: nextState,
+					result: fail(nextState, "link", `Todo #${params.id} not found`, `#${params.id} not found`),
+				};
 			}
 
 			const nextParentId = params.parentId !== undefined ? params.parentId : todo.parentId;
@@ -364,14 +386,22 @@ export function executeTodoAction(
 			}
 			const todo = findTodo(nextState, params.id);
 			if (!todo) {
-				return { state: nextState, result: fail(nextState, "unlink", `Todo #${params.id} not found`, `#${params.id} not found`) };
+				return {
+					state: nextState,
+					result: fail(nextState, "unlink", `Todo #${params.id} not found`, `#${params.id} not found`),
+				};
 			}
 
 			const removeBlockerIds = params.removeBlockerIds ?? [];
 			if (!params.clearParent && removeBlockerIds.length === 0) {
 				return {
 					state: nextState,
-					result: fail(nextState, "unlink", "Error: provide clearParent and/or removeBlockerIds", "no unlink operation provided"),
+					result: fail(
+						nextState,
+						"unlink",
+						"Error: provide clearParent and/or removeBlockerIds",
+						"no unlink operation provided",
+					),
 				};
 			}
 
@@ -381,7 +411,10 @@ export function executeTodoAction(
 				todo.blockerIds = todo.blockerIds.filter((id) => !removeSet.has(id));
 			}
 			addHistory(todo, "unlinked", { clearParent: Boolean(params.clearParent), removeBlockerIds });
-			return { state: nextState, result: ok(nextState, "unlink", `Removed selected relationships from todo #${todo.id}`) };
+			return {
+				state: nextState,
+				result: ok(nextState, "unlink", `Removed selected relationships from todo #${todo.id}`),
+			};
 		}
 
 		case "toggle": {
@@ -390,19 +423,31 @@ export function executeTodoAction(
 			}
 			const todo = findTodo(nextState, params.id);
 			if (!todo) {
-				return { state: nextState, result: fail(nextState, "toggle", `Todo #${params.id} not found`, `#${params.id} not found`) };
+				return {
+					state: nextState,
+					result: fail(nextState, "toggle", `Todo #${params.id} not found`, `#${params.id} not found`),
+				};
 			}
 			if (todo.archived) {
-				return { state: nextState, result: fail(nextState, "toggle", `${todoLabel(todo)} is archived`, "cannot toggle archived todo") };
+				return {
+					state: nextState,
+					result: fail(nextState, "toggle", `${todoLabel(todo)} is archived`, "cannot toggle archived todo"),
+				};
 			}
 
 			const previousStatus = todo.status;
 			const nextStatus = params.toStatus ?? cycleStatus(previousStatus);
 			if (!isAllowedTransition(previousStatus, nextStatus)) {
-				return { state: nextState, result: fail(nextState, "toggle", invalidTransitionMessage(previousStatus), "invalid transition") };
+				return {
+					state: nextState,
+					result: fail(nextState, "toggle", invalidTransitionMessage(previousStatus), "invalid transition"),
+				};
 			}
 			if (previousStatus === nextStatus) {
-				return { state: nextState, result: ok(nextState, "toggle", `${todoLabel(todo)} already ${statusLabel(nextStatus)}`) };
+				return {
+					state: nextState,
+					result: ok(nextState, "toggle", `${todoLabel(todo)} already ${statusLabel(nextStatus)}`),
+				};
 			}
 
 			if (nextStatus === "in-progress") {
@@ -410,7 +455,12 @@ export function executeTodoAction(
 				if (blockers.length) {
 					return {
 						state: nextState,
-						result: fail(nextState, "toggle", `${todoLabel(todo)} is blocked by ${blockers.map((id) => `#${id}`).join(", ")}`, "unfinished blockers"),
+						result: fail(
+							nextState,
+							"toggle",
+							`${todoLabel(todo)} is blocked by ${blockers.map((id) => `#${id}`).join(", ")}`,
+							"unfinished blockers",
+						),
 					};
 				}
 				if (previousStatus !== "in-progress" && inProgressCount(nextState) >= nextState.wipLimit) {
@@ -440,12 +490,22 @@ export function executeTodoAction(
 					};
 				}
 				if (hasOpenChildren(nextState, todo.id)) {
-					return { state: nextState, result: fail(nextState, "toggle", `${todoLabel(todo)} has unfinished children`, "unfinished children") };
+					return {
+						state: nextState,
+						result: fail(
+							nextState,
+							"toggle",
+							`${todoLabel(todo)} has unfinished children`,
+							"unfinished children",
+						),
+					};
 				}
 			}
 
 			if (previousStatus === "done" && nextStatus !== "done") {
-				const activeDependents = dependentsOf(nextState, todo.id).filter((dependent) => dependent.status !== "todo");
+				const activeDependents = dependentsOf(nextState, todo.id).filter(
+					(dependent) => dependent.status !== "todo",
+				);
 				if (activeDependents.length) {
 					return {
 						state: nextState,
@@ -463,7 +523,11 @@ export function executeTodoAction(
 			addHistory(todo, "status_changed", { from: previousStatus, to: nextStatus });
 			return {
 				state: nextState,
-				result: ok(nextState, "toggle", `${todoLabel(todo)} moved ${statusLabel(previousStatus)} → ${statusLabel(nextStatus)}`),
+				result: ok(
+					nextState,
+					"toggle",
+					`${todoLabel(todo)} moved ${statusLabel(previousStatus)} → ${statusLabel(nextStatus)}`,
+				),
 			};
 		}
 
@@ -473,7 +537,10 @@ export function executeTodoAction(
 			}
 			const todo = findTodo(nextState, params.id);
 			if (!todo) {
-				return { state: nextState, result: fail(nextState, "read", `Todo #${params.id} not found`, `#${params.id} not found`) };
+				return {
+					state: nextState,
+					result: fail(nextState, "read", `Todo #${params.id} not found`, `#${params.id} not found`),
+				};
 			}
 
 			addHistory(todo, "read");
@@ -485,11 +552,17 @@ export function executeTodoAction(
 			if (params.id !== undefined) {
 				const todo = findTodo(nextState, params.id);
 				if (!todo) {
-					return { state: nextState, result: fail(nextState, "history", `Todo #${params.id} not found`, `#${params.id} not found`) };
+					return {
+						state: nextState,
+						result: fail(nextState, "history", `Todo #${params.id} not found`, `#${params.id} not found`),
+					};
 				}
 				const lines = todo.history
 					.slice(-limit)
-					.map((entry) => `${entry.timestamp} ${entry.type}${entry.meta ? ` ${JSON.stringify(entry.meta)}` : ""}`);
+					.map(
+						(entry) =>
+							`${entry.timestamp} ${entry.type}${entry.meta ? ` ${JSON.stringify(entry.meta)}` : ""}`,
+					);
 				const historyText = lines.length ? lines.join("\n") : `No history for #${todo.id}`;
 				return { state: nextState, result: ok(nextState, "history", truncateTodoOutput(historyText)) };
 			}
@@ -509,12 +582,23 @@ export function executeTodoAction(
 			}
 			const todo = findTodo(nextState, params.id);
 			if (!todo) {
-				return { state: nextState, result: fail(nextState, "archive", `Todo #${params.id} not found`, `#${params.id} not found`) };
+				return {
+					state: nextState,
+					result: fail(nextState, "archive", `Todo #${params.id} not found`, `#${params.id} not found`),
+				};
 			}
 
 			const nextArchived = params.archived ?? true;
 			if (nextArchived && todo.status !== "done") {
-				return { state: nextState, result: fail(nextState, "archive", "Only done todos can be archived", "archive requires done status") };
+				return {
+					state: nextState,
+					result: fail(
+						nextState,
+						"archive",
+						"Only done todos can be archived",
+						"archive requires done status",
+					),
+				};
 			}
 			todo.archived = nextArchived;
 			addHistory(todo, nextArchived ? "archived" : "unarchived");
@@ -526,10 +610,16 @@ export function executeTodoAction(
 
 		case "set_wip_limit": {
 			if (params.limit === undefined || !Number.isFinite(params.limit) || params.limit < 1) {
-				return { state: nextState, result: fail(nextState, "set_wip_limit", "Error: positive limit required", "invalid limit") };
+				return {
+					state: nextState,
+					result: fail(nextState, "set_wip_limit", "Error: positive limit required", "invalid limit"),
+				};
 			}
 			nextState.wipLimit = Math.floor(params.limit);
-			return { state: nextState, result: ok(nextState, "set_wip_limit", `Set WIP limit to ${nextState.wipLimit}`) };
+			return {
+				state: nextState,
+				result: ok(nextState, "set_wip_limit", `Set WIP limit to ${nextState.wipLimit}`),
+			};
 		}
 
 		case "clear": {

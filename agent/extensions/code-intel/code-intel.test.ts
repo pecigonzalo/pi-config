@@ -49,7 +49,10 @@ describe("code-intel Phase 1 extraction", () => {
 	});
 
 	test("finds brace-delimited symbol ranges", () => {
-		const lines = `export class AuthService {\n  async login() {\n    if (true) {\n      return 1;\n    }\n  }\n}\n\nexport function outside() {}`.split("\n");
+		const lines =
+			`export class AuthService {\n  async login() {\n    if (true) {\n      return 1;\n    }\n  }\n}\n\nexport function outside() {}`.split(
+				"\n",
+			);
 
 		expect(__test.findDefinitionEnd(lines, 0, "typescript")).toBe(6);
 		expect(__test.findDefinitionEnd(lines, 1, "typescript")).toBe(5);
@@ -123,7 +126,9 @@ locals {
 	});
 
 	test("uses declaration-aware ranges", () => {
-		const lines = `type clusterState interface {\n\tCreateTopic(ctx context.Context, name string) error\n}`.split("\n");
+		const lines = `type clusterState interface {\n\tCreateTopic(ctx context.Context, name string) error\n}`.split(
+			"\n",
+		);
 		const declaration = {
 			name: "CreateTopic",
 			kind: "interface_method",
@@ -189,22 +194,18 @@ locals {
 	});
 
 	test("hydrates tree-sitter tags into definitions", () => {
-		const defs = __test.hydrateTreeSitterDefinitions(
-			sourceFile,
-			`export class AuthService {\n  login() {}\n}`,
-			[{ name: "AuthService", kind: "class", role: "def", file: "src/auth.ts", line: 0, column: 13 }],
-		);
+		const defs = __test.hydrateTreeSitterDefinitions(sourceFile, `export class AuthService {\n  login() {}\n}`, [
+			{ name: "AuthService", kind: "class", role: "def", file: "src/auth.ts", line: 0, column: 13 },
+		]);
 
 		expect(defs[0]?.backend).toBe("tree-sitter-tags");
 		expect(defs[0]?.signatureLines[0]).toContain("AuthService");
 	});
 
 	test("hydrates LSP document symbols into preferred definitions", () => {
-		const defs = __test.hydrateLspDocumentSymbols(
-			sourceFile,
-			`export class AuthService {\n  login() {}\n}`,
-			[{ name: "AuthService", kind: "Class", file: "src/auth.ts", line: 1, column: 14 }],
-		);
+		const defs = __test.hydrateLspDocumentSymbols(sourceFile, `export class AuthService {\n  login() {}\n}`, [
+			{ name: "AuthService", kind: "Class", file: "src/auth.ts", line: 1, column: 14 },
+		]);
 
 		expect(defs[0]?.backend).toBe("lsp-document-symbol");
 		expect(defs[0]?.line).toBe(0);
@@ -317,7 +318,7 @@ locals {
 	});
 
 	test("parses symbol query DSL filters", () => {
-		const parsed = __test.parseSymbolQuery('kind:method file:internal/broker name:CreateTopic queue');
+		const parsed = __test.parseSymbolQuery("kind:method file:internal/broker name:CreateTopic queue");
 		expect(parsed.kind).toBe("method");
 		expect(parsed.file).toBe("internal/broker");
 		expect(parsed.name).toBe("createtopic");
@@ -327,10 +328,7 @@ locals {
 
 	test("matches symbol query DSL filters", () => {
 		const parsed = __test.parseSymbolQuery("kind:method file:internal/broker name:CreateTopic");
-		const match = __test.matchesSymbolQuery(
-			definition({ name: "CreateTopic", kind: "method" }),
-			parsed,
-		);
+		const match = __test.matchesSymbolQuery(definition({ name: "CreateTopic", kind: "method" }), parsed);
 		const noMatch = __test.matchesSymbolQuery(
 			definition({ name: "CreateTopic", kind: "interface_method" }),
 			parsed,
@@ -355,7 +353,13 @@ locals {
 			parsed,
 		);
 		const impl = __test.matchesSymbolQuery(
-			definition({ name: "CreateTopic", kind: "method", file: "internal/broker/handler_admin.go", declaration: false, backend: "tree-sitter-tags" }),
+			definition({
+				name: "CreateTopic",
+				kind: "method",
+				file: "internal/broker/handler_admin.go",
+				declaration: false,
+				backend: "tree-sitter-tags",
+			}),
 			parsed,
 		);
 		expect(decl).toBe(true);
@@ -363,18 +367,24 @@ locals {
 	});
 
 	test("infers callable arity from go signatures", () => {
-		const declArity = __test.inferCallableArity(definition({
-			name: "CreateTopic",
-			kind: "interface_method",
-			signatureLines: ["\tCreateTopic(ctx context.Context, name string, partitions int32) error"],
-			text: "",
-		}));
-		const methodArity = __test.inferCallableArity(definition({
-			name: "CreateTopic",
-			kind: "method",
-			signatureLines: ["func (c *Cluster) CreateTopic(ctx context.Context, name string, partitions int32) error {"],
-			text: "",
-		}));
+		const declArity = __test.inferCallableArity(
+			definition({
+				name: "CreateTopic",
+				kind: "interface_method",
+				signatureLines: ["\tCreateTopic(ctx context.Context, name string, partitions int32) error"],
+				text: "",
+			}),
+		);
+		const methodArity = __test.inferCallableArity(
+			definition({
+				name: "CreateTopic",
+				kind: "method",
+				signatureLines: [
+					"func (c *Cluster) CreateTopic(ctx context.Context, name string, partitions int32) error {",
+				],
+				text: "",
+			}),
+		);
 		expect(declArity).toBe(3);
 		expect(methodArity).toBe(3);
 	});

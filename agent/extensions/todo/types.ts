@@ -72,9 +72,19 @@ export type TodoResult = {
 };
 
 export const TodoParams = Type.Object({
-	action: StringEnum(
-		["list", "add", "update", "toggle", "read", "archive", "link", "unlink", "history", "clear", "set_wip_limit"] as const,
-	),
+	action: StringEnum([
+		"list",
+		"add",
+		"update",
+		"toggle",
+		"read",
+		"archive",
+		"link",
+		"unlink",
+		"history",
+		"clear",
+		"set_wip_limit",
+	] as const),
 	id: Type.Optional(Type.Number({ description: "Todo ID" })),
 	title: Type.Optional(Type.String({ description: "Short title" })),
 	description: Type.Optional(Type.String({ description: "Long description" })),
@@ -86,7 +96,9 @@ export const TodoParams = Type.Object({
 	addBlockerIds: Type.Optional(Type.Array(Type.Number(), { description: "Blocking todo IDs to add" })),
 	removeBlockerIds: Type.Optional(Type.Array(Type.Number(), { description: "Blocking todo IDs to remove" })),
 	clearParent: Type.Optional(Type.Boolean({ description: "Clear parent relationship" })),
-	toStatus: Type.Optional(StringEnum(["todo", "in-progress", "done"] as const, { description: "Target status for toggle action" })),
+	toStatus: Type.Optional(
+		StringEnum(["todo", "in-progress", "done"] as const, { description: "Target status for toggle action" }),
+	),
 	view: Type.Optional(StringEnum(["default", "tree", "ready"] as const)),
 	includeArchived: Type.Optional(Type.Boolean()),
 	status: Type.Optional(StringEnum(["todo", "in-progress", "done"] as const)),

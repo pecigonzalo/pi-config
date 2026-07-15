@@ -12,11 +12,24 @@ export const CODE_INTEL_SCHEMA = {
 	properties: {
 		action: {
 			type: "string",
-			enum: ["repo_map", "status", "outline", "symbols", "slice", "enclosing_symbol", "definition", "references", "hover"],
+			enum: [
+				"repo_map",
+				"status",
+				"outline",
+				"symbols",
+				"slice",
+				"enclosing_symbol",
+				"definition",
+				"references",
+				"hover",
+			],
 			description:
 				"Operation to run. Use repo_map for compact codebase orientation; outline/symbols/slice/enclosing_symbol for targeted drilldown; definition/references/hover for LSP-backed semantic lookup when available; status for backend availability.",
 		},
-		root: { type: "string", description: "Optional project root. Defaults to current working directory or git root." },
+		root: {
+			type: "string",
+			description: "Optional project root. Defaults to current working directory or git root.",
+		},
 		mapTokens: {
 			type: "number",
 			description: `Approximate token budget for repo_map output. Default ${DEFAULT_MAP_TOKENS}.`,
@@ -27,11 +40,21 @@ export const CODE_INTEL_SCHEMA = {
 			description: `Maximum bytes per file to scan. Default ${formatSize(DEFAULT_MAX_FILE_BYTES)}.`,
 		},
 		include: { type: "array", items: { type: "string" }, description: "Optional substrings paths must include." },
-		exclude: { type: "array", items: { type: "string" }, description: "Optional substrings paths must not include." },
+		exclude: {
+			type: "array",
+			items: { type: "string" },
+			description: "Optional substrings paths must not include.",
+		},
 		query: { type: "string", description: "Optional identifier/file hint for repo_map or symbols." },
-		path: { type: "string", description: "File path for outline, slice, enclosing_symbol, definition, references, or hover." },
+		path: {
+			type: "string",
+			description: "File path for outline, slice, enclosing_symbol, definition, references, or hover.",
+		},
 		symbol: { type: "string", description: "Symbol name for slice, definition, references, or hover." },
-		line: { type: "number", description: "1-based line number for enclosing_symbol or LSP-backed position lookups." },
+		line: {
+			type: "number",
+			description: "1-based line number for enclosing_symbol or LSP-backed position lookups.",
+		},
 		column: { type: "number", description: "1-based column number for LSP-backed position lookups." },
 		limit: { type: "number", description: "Maximum symbol results for symbols action. Default 50." },
 		sliceMode: {

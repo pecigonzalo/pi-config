@@ -17,8 +17,12 @@ function formatStatus(status: McpStatus): string {
 		for (const server of status.servers.slice(0, 20)) {
 			const target = server.transport === "http" ? server.url : server.command;
 			const source = server.sources[0];
-			const sourceLabel = source ? ` [${source.kind}${source.importKind ? `:${source.importKind}` : ""} ${source.path}]` : "";
-			lines.push(`- ${server.name} (${server.transport}${server.lifecycle ? `, ${server.lifecycle}` : ""})${target ? `: ${target}` : ""}${sourceLabel}`);
+			const sourceLabel = source
+				? ` [${source.kind}${source.importKind ? `:${source.importKind}` : ""} ${source.path}]`
+				: "";
+			lines.push(
+				`- ${server.name} (${server.transport}${server.lifecycle ? `, ${server.lifecycle}` : ""})${target ? `: ${target}` : ""}${sourceLabel}`,
+			);
 		}
 		if (status.servers.length > 20) lines.push(`- ... ${status.servers.length - 20} more`);
 	}
@@ -40,15 +44,12 @@ async function showStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
 	}
 }
 
-const MCP_COMPLETIONS = [
-	{ value: "status", label: "status: show MCP server status" },
-] as const;
+const MCP_COMPLETIONS = [{ value: "status", label: "status: show MCP server status" }] as const;
 
 export default function mcpExtension(pi: ExtensionAPI) {
 	pi.registerCommand("mcp", {
 		description: "MCP commands: /mcp status",
-		getArgumentCompletions: (prefix) =>
-			MCP_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
+		getArgumentCompletions: (prefix) => MCP_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			const command = args.trim().toLowerCase() || "status";
 			if (command === "status") {

@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [
+    "typescript",
+    "oxc"
+  ],
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "eslint/no-control-regex": "off",
+    "eslint/no-unassigned-vars": "off",
+    "eslint/no-unused-vars": "off",
+    "eslint/no-unsafe-finally": "off",
+    "eslint/no-useless-escape": "off",
+    "typescript/prefer-as-const": "off"
+  },
+  "env": {
+    "builtin": true
+  }
+}

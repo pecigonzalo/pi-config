@@ -43,9 +43,7 @@ export interface StoreDeleteParams {
 	id: string;
 }
 
-export type LegacyReadResult =
-	| { ok: true; items: StoreItem[] }
-	| { ok: false; error: "missing" | "corrupt" };
+export type LegacyReadResult = { ok: true; items: StoreItem[] } | { ok: false; error: "missing" | "corrupt" };
 
 const LOCK_POLL_MS = 10;
 const LOCK_TIMEOUT_MS = 5_000;

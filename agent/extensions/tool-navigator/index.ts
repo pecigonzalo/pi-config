@@ -146,12 +146,18 @@ function summarizeToolArgs(toolName: string, args: unknown): string {
 		case "task": {
 			if (typeof args.task === "string") return truncateText(args.task, MAX_PREVIEW);
 			if (Array.isArray(args.tasks) && args.tasks.length > 0) {
-				const first = isRecord(args.tasks[0]) && typeof args.tasks[0].task === "string" ? args.tasks[0].task : "parallel task";
+				const first =
+					isRecord(args.tasks[0]) && typeof args.tasks[0].task === "string"
+						? args.tasks[0].task
+						: "parallel task";
 				const suffix = args.tasks.length > 1 ? ` (+${args.tasks.length - 1} more)` : "";
 				return truncateText(`parallel · ${first}${suffix}`, MAX_PREVIEW);
 			}
 			if (Array.isArray(args.chain) && args.chain.length > 0) {
-				const first = isRecord(args.chain[0]) && typeof args.chain[0].task === "string" ? args.chain[0].task : "chain task";
+				const first =
+					isRecord(args.chain[0]) && typeof args.chain[0].task === "string"
+						? args.chain[0].task
+						: "chain task";
 				const suffix = args.chain.length > 1 ? ` (+${args.chain.length - 1} more)` : "";
 				return truncateText(`chain · ${first}${suffix}`, MAX_PREVIEW);
 			}
@@ -207,8 +213,10 @@ function formatTaskBody(details: unknown, fallbackOutput: string): string | unde
 		const stopReason = typeof result.stopReason === "string" ? result.stopReason : undefined;
 		const task = typeof result.task === "string" ? result.task : "";
 		const childSession = isRecord(result.childSession) ? result.childSession : undefined;
-		const childSessionName = typeof childSession?.childSessionName === "string" ? childSession.childSessionName : undefined;
-		const childSessionId = typeof childSession?.childSessionId === "string" ? childSession.childSessionId : undefined;
+		const childSessionName =
+			typeof childSession?.childSessionName === "string" ? childSession.childSessionName : undefined;
+		const childSessionId =
+			typeof childSession?.childSessionId === "string" ? childSession.childSessionId : undefined;
 		const errorMessage = typeof result.errorMessage === "string" ? result.errorMessage : undefined;
 		const stderr = typeof result.stderr === "string" ? result.stderr : "";
 		const output = formatTaskMessages(result.messages);
@@ -243,7 +251,8 @@ function formatGenericBody(
 	if (argsText && argsText !== "{}") sections.push(`Arguments:\n${argsText}`);
 	if (textOutput) sections.push(`Output:\n${textOutput}`);
 	if (!textOutput && imageCount > 0) sections.push(`Output:\n(contains ${imageCount} image result(s))`);
-	if (!textOutput && imageCount === 0 && details !== undefined) sections.push(`Details:\n${stringifyPretty(details)}`);
+	if (!textOutput && imageCount === 0 && details !== undefined)
+		sections.push(`Details:\n${stringifyPretty(details)}`);
 	if (sections.length === 0) sections.push(`(${toolName} produced no text output)`);
 	return sections.join("\n\n");
 }
@@ -278,7 +287,8 @@ function extractToolOutputs(ctx: ExtensionContext): ToolOutputRecord[] {
 		const textOutput = collectTextContent(message.content);
 		const imageCount = countImages(message.content);
 		const argsSummary = summarizeToolArgs(message.toolName, args);
-		const previewSource = textOutput || argsSummary || (imageCount > 0 ? `(contains ${imageCount} image result(s))` : "(no output)");
+		const previewSource =
+			textOutput || argsSummary || (imageCount > 0 ? `(contains ${imageCount} image result(s))` : "(no output)");
 		const body = buildBody(message.toolName, args, textOutput, message.details, imageCount);
 		const lineCount = body.split(/\r?\n/).length;
 
@@ -408,12 +418,20 @@ class ToolOutputViewerComponent {
 		headerLines.push(truncateToWidth(header, safeWidth));
 		headerLines.push(
 			truncateToWidth(
-				this.theme.fg("dim", `${formatTimestamp(record.timestamp)} · ${record.lineCount} line(s) · ${shortId(record.toolCallId)}`),
+				this.theme.fg(
+					"dim",
+					`${formatTimestamp(record.timestamp)} · ${record.lineCount} line(s) · ${shortId(record.toolCallId)}`,
+				),
 				safeWidth,
 			),
 		);
 		if (record.argsSummary) {
-			headerLines.push(...wrapTextWithAnsi(this.theme.fg("muted", `Call: `) + this.theme.fg("dim", record.argsSummary), safeWidth));
+			headerLines.push(
+				...wrapTextWithAnsi(
+					this.theme.fg("muted", `Call: `) + this.theme.fg("dim", record.argsSummary),
+					safeWidth,
+				),
+			);
 		}
 		headerLines.push(truncateToWidth(this.theme.fg("borderMuted", "─".repeat(safeWidth)), safeWidth));
 
@@ -423,7 +441,10 @@ class ToolOutputViewerComponent {
 		const footerLines: string[] = [
 			truncateToWidth(this.theme.fg("borderMuted", "─".repeat(safeWidth)), safeWidth),
 			truncateToWidth(
-				this.theme.fg("dim", `${scrollHint}/${pageHint} scroll • n/p or ←/→ switch • Home/End jump • ${cancelHint} close`),
+				this.theme.fg(
+					"dim",
+					`${scrollHint}/${pageHint} scroll • n/p or ←/→ switch • Home/End jump • ${cancelHint} close`,
+				),
 				safeWidth,
 			),
 		];
@@ -434,7 +455,10 @@ class ToolOutputViewerComponent {
 		const visibleBody = bodyLines.slice(this.scrollOffset, this.scrollOffset + viewportHeight);
 		const scrollInfo =
 			maxScroll > 0
-				? this.theme.fg("dim", `[scroll ${this.scrollOffset + 1}-${Math.min(this.scrollOffset + viewportHeight, bodyLines.length)} of ${bodyLines.length}]`)
+				? this.theme.fg(
+						"dim",
+						`[scroll ${this.scrollOffset + 1}-${Math.min(this.scrollOffset + viewportHeight, bodyLines.length)} of ${bodyLines.length}]`,
+					)
 				: this.theme.fg("dim", `[${bodyLines.length} line(s)]`);
 
 		return [...headerLines, truncateToWidth(scrollInfo, safeWidth), ...visibleBody, ...footerLines];
@@ -458,58 +482,68 @@ async function showPicker(ctx: ExtensionContext, records: ToolOutputRecord[]): P
 		};
 	});
 
-	return ctx.ui.custom<number | null>((tui, theme, keybindings, done) => {
-		const container = new Container();
-		const selectList = new SelectList(items, Math.min(Math.max(items.length, 1), 12), {
-			selectedPrefix: (text) => theme.fg("accent", text),
-			selectedText: (text) => theme.fg("accent", text),
-			description: (text) => theme.fg("muted", text),
-			scrollInfo: (text) => theme.fg("dim", text),
-			noMatch: (text) => theme.fg("warning", text),
-		});
-		selectList.onSelect = (item) => done(Number(item.value));
-		selectList.onCancel = () => done(null);
+	return ctx.ui.custom<number | null>(
+		(tui, theme, keybindings, done) => {
+			const container = new Container();
+			const selectList = new SelectList(items, Math.min(Math.max(items.length, 1), 12), {
+				selectedPrefix: (text) => theme.fg("accent", text),
+				selectedText: (text) => theme.fg("accent", text),
+				description: (text) => theme.fg("muted", text),
+				scrollInfo: (text) => theme.fg("dim", text),
+				noMatch: (text) => theme.fg("warning", text),
+			});
+			selectList.onSelect = (item) => done(Number(item.value));
+			selectList.onCancel = () => done(null);
 
-		const rebuild = () => {
-			container.clear();
-			container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-			container.addChild(new Text(theme.fg("accent", theme.bold("Tool Navigator")), 1, 0));
-			container.addChild(new Text(theme.fg("muted", `Recent tool outputs on the current branch (${records.length})`), 1, 0));
-			container.addChild(selectList);
-			const confirmHint = getBindingHint(keybindings, "tui.select.confirm", "Enter");
-			const cancelHint = getBindingHint(keybindings, "tui.select.cancel", "Esc");
-			container.addChild(new Text(theme.fg("dim", `Type to filter • ${confirmHint} open • ${cancelHint} cancel`), 1, 0));
-			container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-		};
+			const rebuild = () => {
+				container.clear();
+				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+				container.addChild(new Text(theme.fg("accent", theme.bold("Tool Navigator")), 1, 0));
+				container.addChild(
+					new Text(theme.fg("muted", `Recent tool outputs on the current branch (${records.length})`), 1, 0),
+				);
+				container.addChild(selectList);
+				const confirmHint = getBindingHint(keybindings, "tui.select.confirm", "Enter");
+				const cancelHint = getBindingHint(keybindings, "tui.select.cancel", "Esc");
+				container.addChild(
+					new Text(theme.fg("dim", `Type to filter • ${confirmHint} open • ${cancelHint} cancel`), 1, 0),
+				);
+				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+			};
 
-		rebuild();
+			rebuild();
 
-		return {
-			render(width: number) {
-				return container.render(width);
-			},
-			invalidate() {
-				rebuild();
-				container.invalidate();
-			},
-			handleInput(data: string) {
-				selectList.handleInput(data);
-				tui.requestRender();
-			},
-		};
-	}, {
-		overlay: true,
-		overlayOptions: { width: "78%", maxHeight: "75%", anchor: "center" },
-	});
+			return {
+				render(width: number) {
+					return container.render(width);
+				},
+				invalidate() {
+					rebuild();
+					container.invalidate();
+				},
+				handleInput(data: string) {
+					selectList.handleInput(data);
+					tui.requestRender();
+				},
+			};
+		},
+		{
+			overlay: true,
+			overlayOptions: { width: "78%", maxHeight: "75%", anchor: "center" },
+		},
+	);
 }
 
 async function showViewer(ctx: ExtensionContext, records: ToolOutputRecord[], startIndex: number): Promise<void> {
-	await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
-		return new ToolOutputViewerComponent(records, startIndex, tui, theme, keybindings, () => done());
-	}, {
-		overlay: true,
-		overlayOptions: { width: "82%", maxHeight: "85%", anchor: "center" },
-	});
+	await ctx.ui.custom<void>(
+		(tui, theme, keybindings, done) => {
+			return new ToolOutputViewerComponent(records, startIndex, tui, theme, keybindings, () => done());
+		},
+		{
+			overlay: true,
+			overlayOptions: { width: "82%", maxHeight: "85%", anchor: "center" },
+		},
+	);
 }
 
 async function openLatest(ctx: ExtensionContext): Promise<void> {

@@ -3,7 +3,7 @@ import { scanLearningText } from "./scanner";
 
 describe("learning memory scanner", () => {
 	test("allows normal learning text", () => {
-		expect(scanLearningText("Prefer typescript for ad hoc scripting.")) .toBeUndefined();
+		expect(scanLearningText("Prefer typescript for ad hoc scripting.")).toBeUndefined();
 	});
 
 	test("blocks prompt injection text", () => {

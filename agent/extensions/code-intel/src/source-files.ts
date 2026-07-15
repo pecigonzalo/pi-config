@@ -92,10 +92,14 @@ function extensionLabel(relPath: string): string {
 
 async function listGitFiles(pi: ExtensionAPI, root: string, signal?: AbortSignal): Promise<string[]> {
 	try {
-		const result = await pi.exec("git", ["-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
-			signal,
-			timeout: 10_000,
-		});
+		const result = await pi.exec(
+			"git",
+			["-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+			{
+				signal,
+				timeout: 10_000,
+			},
+		);
 		if (result.code !== 0) return [];
 		return result.stdout.split("\0").filter(Boolean);
 	} catch {

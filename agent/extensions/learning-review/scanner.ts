@@ -15,11 +15,23 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 	{ pattern: /\b(password|secret|token)\s*[=:]\s*\S{8,}\b/i, reason: "inline credential" },
 ];
 
-const INVISIBLE_CHARS = new Set(["\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e"]);
+const INVISIBLE_CHARS = new Set([
+	"\u200b",
+	"\u200c",
+	"\u200d",
+	"\u2060",
+	"\ufeff",
+	"\u202a",
+	"\u202b",
+	"\u202c",
+	"\u202d",
+	"\u202e",
+]);
 
 export function scanLearningText(text: string): string | undefined {
 	for (const char of text) {
-		if (INVISIBLE_CHARS.has(char)) return `contains invisible unicode character U+${char.charCodeAt(0).toString(16).toUpperCase()}`;
+		if (INVISIBLE_CHARS.has(char))
+			return `contains invisible unicode character U+${char.charCodeAt(0).toString(16).toUpperCase()}`;
 	}
 
 	for (const { pattern, reason } of PROMPT_INJECTION_PATTERNS) {

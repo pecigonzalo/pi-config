@@ -49,7 +49,11 @@ export function validateHttpUrl(rawUrl: string, label = "URL"): URL {
 }
 
 export function normalizeWhitespace(text: string): string {
-	return text.replace(/\r\n/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+	return text
+		.replace(/\r\n/g, "\n")
+		.replace(/[ \t]+\n/g, "\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
 }
 
 export function clipText(text: string, maxChars: number): string {
@@ -176,7 +180,10 @@ export function decodeBuffer(buffer: Buffer, charset: string | undefined): strin
 	return new TextDecoder("utf-8").decode(buffer);
 }
 
-export function truncateToolText(content: string, options?: { maxLines?: number; maxBytes?: number }): TruncationResult {
+export function truncateToolText(
+	content: string,
+	options?: { maxLines?: number; maxBytes?: number },
+): TruncationResult {
 	return truncateHead(content, {
 		maxLines: options?.maxLines ?? OUTPUT_MAX_LINES,
 		maxBytes: options?.maxBytes ?? OUTPUT_MAX_BYTES,
@@ -202,7 +209,10 @@ export function normalizeDomainFilters(domains: string[] | undefined): string[] 
 		const trimmed = domain.trim().toLowerCase();
 		if (!trimmed) continue;
 
-		const host = trimmed.replace(/^https?:\/\//, "").split("/")[0]?.replace(/:\d+$/, "");
+		const host = trimmed
+			.replace(/^https?:\/\//, "")
+			.split("/")[0]
+			?.replace(/:\d+$/, "");
 		if (!host || !/^[a-z0-9.-]+$/.test(host) || !host.includes(".")) {
 			throw new Error(`Invalid domain filter: ${domain}`);
 		}

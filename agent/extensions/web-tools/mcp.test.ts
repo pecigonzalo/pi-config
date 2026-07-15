@@ -15,10 +15,9 @@ describe("extractMcpTextResponse", () => {
 	});
 
 	test("extracts text from SSE responses", () => {
-		const text = extractMcpTextResponse([
-			"event: message",
-			'data: {"result":{"content":[{"type":"text","text":"hello from sse"}]}}',
-		].join("\n"));
+		const text = extractMcpTextResponse(
+			["event: message", 'data: {"result":{"content":[{"type":"text","text":"hello from sse"}]}}'].join("\n"),
+		);
 
 		expect(text).toBe("hello from sse");
 	});
@@ -26,13 +25,19 @@ describe("extractMcpTextResponse", () => {
 
 describe("callMcpTool", () => {
 	test("caps oversized response bodies and still parses leading SSE payloads", async () => {
-		const payload = ['event: message', 'data: {"result":{"content":[{"type":"text","text":"hello"}]}}', "", "x".repeat(MCP_MAX_RESPONSE_BYTES)].join("\n");
+		const payload = [
+			"event: message",
+			'data: {"result":{"content":[{"type":"text","text":"hello"}]}}',
+			"",
+			"x".repeat(MCP_MAX_RESPONSE_BYTES),
+		].join("\n");
 		const result = await callMcpTool({
 			url: "https://example.com/mcp",
 			toolName: "demo",
 			args: {},
 			timeoutSeconds: 5,
-			fetchImpl: async () => new Response(payload, { status: 200, headers: { "content-type": "text/event-stream" } }),
+			fetchImpl: async () =>
+				new Response(payload, { status: 200, headers: { "content-type": "text/event-stream" } }),
 		});
 
 		expect(result.text).toBe("hello");

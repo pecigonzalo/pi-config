@@ -36,7 +36,9 @@ describe("atomic approval persistence", () => {
 	it("atomically replaces the file with valid JSON and restrictive permissions", async () => {
 		const dir = await makeTemporaryDirectory();
 		const target = path.join(dir, "nested", "approvals.json");
-		writeApprovalFileAtomic(target, { approvals: [{ tool: "bash", scopeType: "tool", scopeValue: "bash", createdAt: 1 }] });
+		writeApprovalFileAtomic(target, {
+			approvals: [{ tool: "bash", scopeType: "tool", scopeValue: "bash", createdAt: 1 }],
+		});
 		expect(JSON.parse(await fsp.readFile(target, "utf8")).approvals).toHaveLength(1);
 		if (process.platform !== "win32") expect((await fsp.stat(target)).mode & 0o777).toBe(0o600);
 	});
@@ -46,11 +48,21 @@ describe("atomic approval persistence", () => {
 		const target = path.join(dir, "approvals.json");
 		await fsp.writeFile(target, "original\n");
 		let fsyncCalled = false;
-		expect(() => writeApprovalFileAtomic(target, { approvals: [] }, {
-			...operations,
-			writeFileSync: () => { throw new Error("write failed"); },
-			fsyncSync: () => { fsyncCalled = true; },
-		})).toThrow("write failed");
+		expect(() =>
+			writeApprovalFileAtomic(
+				target,
+				{ approvals: [] },
+				{
+					...operations,
+					writeFileSync: () => {
+						throw new Error("write failed");
+					},
+					fsyncSync: () => {
+						fsyncCalled = true;
+					},
+				},
+			),
+		).toThrow("write failed");
 		expect(fsyncCalled).toBe(false);
 		expect(await fsp.readFile(target, "utf8")).toBe("original\n");
 		expect(await temporaryFiles(dir)).toEqual([]);
@@ -60,7 +72,18 @@ describe("atomic approval persistence", () => {
 		const dir = await makeTemporaryDirectory();
 		const target = path.join(dir, "approvals.json");
 		await fsp.writeFile(target, "original\n");
-		expect(() => writeApprovalFileAtomic(target, { approvals: [] }, { ...operations, fsyncSync: () => { throw new Error("sync failed"); } })).toThrow("sync failed");
+		expect(() =>
+			writeApprovalFileAtomic(
+				target,
+				{ approvals: [] },
+				{
+					...operations,
+					fsyncSync: () => {
+						throw new Error("sync failed");
+					},
+				},
+			),
+		).toThrow("sync failed");
 		expect(await fsp.readFile(target, "utf8")).toBe("original\n");
 		expect(await temporaryFiles(dir)).toEqual([]);
 	});
@@ -69,7 +92,18 @@ describe("atomic approval persistence", () => {
 		const dir = await makeTemporaryDirectory();
 		const target = path.join(dir, "approvals.json");
 		await fsp.writeFile(target, "original\n");
-		expect(() => writeApprovalFileAtomic(target, { approvals: [] }, { ...operations, renameSync: () => { throw new Error("rename failed"); } })).toThrow("rename failed");
+		expect(() =>
+			writeApprovalFileAtomic(
+				target,
+				{ approvals: [] },
+				{
+					...operations,
+					renameSync: () => {
+						throw new Error("rename failed");
+					},
+				},
+			),
+		).toThrow("rename failed");
 		expect(await fsp.readFile(target, "utf8")).toBe("original\n");
 		expect(await temporaryFiles(dir)).toEqual([]);
 	});

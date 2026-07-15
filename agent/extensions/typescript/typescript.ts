@@ -36,7 +36,12 @@ const TOOL_OUTPUT_MAX_BYTES = Math.min(DEFAULT_MAX_BYTES, 30 * 1024);
 const SUBPROCESS_SIGKILL_TIMEOUT_MS = 5000;
 
 function terminateProcessWithEscalation(
-	proc: { kill(signal?: NodeJS.Signals | number): boolean; once(event: string, listener: () => void): unknown; exitCode: number | null; signalCode: NodeJS.Signals | null },
+	proc: {
+		kill(signal?: NodeJS.Signals | number): boolean;
+		once(event: string, listener: () => void): unknown;
+		exitCode: number | null;
+		signalCode: NodeJS.Signals | null;
+	},
 	options?: { timeoutMs?: number; isExited?: () => boolean },
 ): void {
 	let exited = options?.isExited?.() ?? (proc.exitCode !== null || proc.signalCode !== null);
@@ -125,7 +130,7 @@ type CodemodeDetails = {
 	exitCode: number | null;
 	ok: boolean;
 	result?: unknown;
-	error?: ProtocolResult extends infer R ? R extends { ok: false; error: infer E } ? E : never : never;
+	error?: ProtocolResult extends infer R ? (R extends { ok: false; error: infer E } ? E : never) : never;
 	logs: string[];
 	logNotice?: string;
 	rawOutput: string;
@@ -157,7 +162,9 @@ interface BridgeRuntimeState {
 
 function describeAvailableCapabilityProfiles(): string {
 	try {
-		const profiles = taskAgents.discoverProfiles(process.cwd(), "user").profiles.filter((profile) => profile.enabled);
+		const profiles = taskAgents
+			.discoverProfiles(process.cwd(), "user")
+			.profiles.filter((profile) => profile.enabled);
 		const listed = profiles.map((profile) => `${profile.name} (${profile.description})`).join("; ") || "none";
 		return ` Available user profiles: ${listed}. Trusted project profiles are also accepted.`;
 	} catch {
@@ -181,7 +188,9 @@ const CodemodeParams = Type.Object({
 		}),
 	),
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (1..120, default 30)" })),
-	cwd: Type.Optional(Type.String({ description: "Optional working directory override, relative to current cwd unless absolute" })),
+	cwd: Type.Optional(
+		Type.String({ description: "Optional working directory override, relative to current cwd unless absolute" }),
+	),
 });
 
 function detectAgentName(pi: ExtensionAPI): string {
@@ -206,7 +215,11 @@ function resolvePermissionsProfileName(
 	if (!requestedProfile) return inheritedPermissionsProfile;
 	const profile = profiles.find((candidate) => candidate.enabled && candidate.name === requestedProfile);
 	if (!profile) {
-		const available = profiles.filter((candidate) => candidate.enabled).map((candidate) => candidate.name).join(", ") || "none";
+		const available =
+			profiles
+				.filter((candidate) => candidate.enabled)
+				.map((candidate) => candidate.name)
+				.join(", ") || "none";
 		throw new Error(`Unknown CodeMode profile: "${requestedProfile}". Available profiles: ${available}.`);
 	}
 	return profile.permissionsProfile ?? profile.name;
@@ -219,10 +232,7 @@ function clampTimeout(value: number | undefined): number {
 
 async function resolveContainedCwd(baseCwd: string, requested: string | undefined): Promise<string> {
 	const requestedCwd = path.resolve(baseCwd, requested ?? ".");
-	const [realBaseCwd, realRequestedCwd] = await Promise.all([
-		fs.realpath(baseCwd),
-		fs.realpath(requestedCwd),
-	]);
+	const [realBaseCwd, realRequestedCwd] = await Promise.all([fs.realpath(baseCwd), fs.realpath(requestedCwd)]);
 	const relativeCwd = path.relative(realBaseCwd, realRequestedCwd);
 	if (relativeCwd === ".." || relativeCwd.startsWith(`..${path.sep}`) || path.isAbsolute(relativeCwd)) {
 		throw new Error("cwd must stay within the session workspace");
@@ -340,7 +350,9 @@ function appendLogLine(state: LogCaptureState, line: string): void {
 function formatLogNotice(state: LogCaptureState): string | undefined {
 	const parts: string[] = [];
 	if (state.droppedLines > 0) {
-		parts.push(`${state.droppedLines} older log line(s) (${formatSize(state.droppedBytes)}) were dropped to stay within ${MAX_LOG_LINES} lines/${formatSize(MAX_LOG_BYTES)}`);
+		parts.push(
+			`${state.droppedLines} older log line(s) (${formatSize(state.droppedBytes)}) were dropped to stay within ${MAX_LOG_LINES} lines/${formatSize(MAX_LOG_BYTES)}`,
+		);
 	}
 	if (state.clippedLines > 0) {
 		parts.push(`${state.clippedLines} line(s) were clipped to ${MAX_LOG_LINE_CHARS} chars`);
@@ -665,7 +677,11 @@ function buildUserModule(code: string): string {
 	return parts.join("\n");
 }
 
-async function createRuntimeFiles(runtimeDir: string, code: string, capabilities: CodemodeCapability[]): Promise<{ entryFile: string }> {
+async function createRuntimeFiles(
+	runtimeDir: string,
+	code: string,
+	capabilities: CodemodeCapability[],
+): Promise<{ entryFile: string }> {
 	const entryFile = path.join(runtimeDir, "runner.ts");
 	const userFile = path.join(runtimeDir, "usercode.ts");
 	await Promise.all([
@@ -710,7 +726,8 @@ function getFinalAssistantText(messages: Message[]): string {
 		const msg = messages[i];
 		if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
 		for (const part of msg.content) {
-			if (typeof part === "object" && part !== null && part.type === "text" && typeof part.text === "string") return part.text;
+			if (typeof part === "object" && part !== null && part.type === "text" && typeof part.text === "string")
+				return part.text;
 		}
 	}
 	return "";
@@ -728,13 +745,18 @@ async function runTaskBridge(state: BridgeRuntimeState, args: unknown): Promise<
 	if (!state.capabilities.includes("task")) throw new Error("host.task.run is not available for this profile");
 	if (!args || typeof args !== "object") throw new Error("host.task.run expects an object argument");
 	const input = args as { agent?: unknown; task?: unknown; cwd?: unknown; agentScope?: unknown };
-	if (typeof input.agent !== "string" || input.agent.trim() === "") throw new Error("host.task.run requires string field 'agent'");
-	if (typeof input.task !== "string" || input.task.trim() === "") throw new Error("host.task.run requires string field 'task'");
+	if (typeof input.agent !== "string" || input.agent.trim() === "")
+		throw new Error("host.task.run requires string field 'agent'");
+	if (typeof input.task !== "string" || input.task.trim() === "")
+		throw new Error("host.task.run requires string field 'task'");
 	const agentScope = (input.agentScope ?? "user") as AgentScope;
 	if (agentScope !== "user" && !state.allowProjectAgents) {
 		throw new Error("host.task.run only allows agentScope='user' in this MVP");
 	}
-	const taskCwd = await resolveContainedCwd(state.policyCwd, typeof input.cwd === "string" ? input.cwd : undefined).catch((error) => {
+	const taskCwd = await resolveContainedCwd(
+		state.policyCwd,
+		typeof input.cwd === "string" ? input.cwd : undefined,
+	).catch((error) => {
 		throw new Error(`host.task.run ${error instanceof Error ? error.message : String(error)}`);
 	});
 	const discovery = taskAgents.discoverAgents(taskCwd, agentScope);
@@ -842,7 +864,8 @@ function requireMcpCapability(state: BridgeRuntimeState): void {
 }
 
 function asRecord(value: unknown, method: string): Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${method} expects an object argument`);
+	if (!value || typeof value !== "object" || Array.isArray(value))
+		throw new Error(`${method} expects an object argument`);
 	return value as Record<string, unknown>;
 }
 
@@ -865,7 +888,8 @@ function optionalNumberField(input: Record<string, unknown>, field: string): num
 function optionalArgsField(input: Record<string, unknown>): Record<string, unknown> | undefined {
 	const value = input.args;
 	if (value === undefined) return undefined;
-	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("host.mcp.call field 'args' must be an object when provided");
+	if (!value || typeof value !== "object" || Array.isArray(value))
+		throw new Error("host.mcp.call field 'args' must be an object when provided");
 	return value as Record<string, unknown>;
 }
 
@@ -880,22 +904,32 @@ function assertMcpAllowed(state: BridgeRuntimeState, target: string): void {
 async function executeBridgeRequest(state: BridgeRuntimeState, request: BridgeRequest): Promise<unknown> {
 	switch (request.method) {
 		case "message.info": {
-			const text = typeof (request.args as { text?: unknown })?.text === "string" ? (request.args as { text: string }).text : "";
-			if (!state.capabilities.includes("message")) throw new Error("host.message.info is not available for this profile");
+			const text =
+				typeof (request.args as { text?: unknown })?.text === "string"
+					? (request.args as { text: string }).text
+					: "";
+			if (!state.capabilities.includes("message"))
+				throw new Error("host.message.info is not available for this profile");
 			state.onUpdate?.({ content: [{ type: "text", text }], details: {} });
 			return { ok: true };
 		}
 		case "message.warn": {
-			const text = typeof (request.args as { text?: unknown })?.text === "string" ? (request.args as { text: string }).text : "";
-			if (!state.capabilities.includes("message")) throw new Error("host.message.warn is not available for this profile");
+			const text =
+				typeof (request.args as { text?: unknown })?.text === "string"
+					? (request.args as { text: string }).text
+					: "";
+			if (!state.capabilities.includes("message"))
+				throw new Error("host.message.warn is not available for this profile");
 			state.onUpdate?.({ content: [{ type: "text", text: `WARNING: ${text}` }], details: {} });
 			return { ok: true };
 		}
 		case "artifact.write": {
-			if (!state.capabilities.includes("artifact")) throw new Error("host.artifact.write is not available for this profile");
+			if (!state.capabilities.includes("artifact"))
+				throw new Error("host.artifact.write is not available for this profile");
 			const input = request.args as { name?: unknown; content?: unknown };
 			if (typeof input?.name !== "string") throw new Error("host.artifact.write requires string field 'name'");
-			if (typeof input?.content !== "string") throw new Error("host.artifact.write requires string field 'content'");
+			if (typeof input?.content !== "string")
+				throw new Error("host.artifact.write requires string field 'content'");
 			await fs.mkdir(state.artifactsDir, { recursive: true });
 			const artifactName = sanitizeArtifactName(input.name);
 			const artifactPath = path.join(state.artifactsDir, artifactName);
@@ -946,7 +980,10 @@ async function executeBridgeRequest(state: BridgeRuntimeState, request: BridgeRe
 			requireMcpCapability(state);
 			const input = asRecord(request.args, "host.mcp.listResources");
 			const server = requireStringField(input, "server", "host.mcp.listResources");
-			return getMcpService(state).listResources({ server, disableOAuth: optionalBooleanField(input, "disableOAuth") });
+			return getMcpService(state).listResources({
+				server,
+				disableOAuth: optionalBooleanField(input, "disableOAuth"),
+			});
 		}
 		case "mcp.readResource": {
 			requireMcpCapability(state);
@@ -954,7 +991,11 @@ async function executeBridgeRequest(state: BridgeRuntimeState, request: BridgeRe
 			const server = requireStringField(input, "server", "host.mcp.readResource");
 			const uri = requireStringField(input, "uri", "host.mcp.readResource");
 			assertMcpAllowed(state, `${server}.resource`);
-			return getMcpService(state).readResource({ server, uri, disableOAuth: optionalBooleanField(input, "disableOAuth") });
+			return getMcpService(state).readResource({
+				server,
+				uri,
+				disableOAuth: optionalBooleanField(input, "disableOAuth"),
+			});
 		}
 		default:
 			throw new Error(`Unknown bridge method: ${request.method}`);
@@ -986,10 +1027,18 @@ function buildContent(details: CodemodeDetails): string {
 			if (details.logNotice) parts.push(details.logNotice);
 		}
 		if (details.artifacts.length > 0) {
-			parts.push("", "Artifacts:", ...details.artifacts.map((artifact) => `- ${artifact.name} (${artifact.size} bytes)`));
+			parts.push(
+				"",
+				"Artifacts:",
+				...details.artifacts.map((artifact) => `- ${artifact.name} (${artifact.size} bytes)`),
+			);
 		}
 		if (details.bridgeCalls.length > 0) {
-			parts.push("", "Bridge calls:", ...details.bridgeCalls.map((call) => `- ${call.name}: ${call.ok ? "ok" : `error (${call.error})`}`));
+			parts.push(
+				"",
+				"Bridge calls:",
+				...details.bridgeCalls.map((call) => `- ${call.name}: ${call.ok ? "ok" : `error (${call.error})`}`),
+			);
 		}
 		return parts.join("\n");
 	}
@@ -1001,7 +1050,11 @@ function buildContent(details: CodemodeDetails): string {
 		if (details.logNotice) parts.push(details.logNotice);
 	}
 	if (details.bridgeCalls.length > 0) {
-		parts.push("", "Bridge calls:", ...details.bridgeCalls.map((call) => `- ${call.name}: ${call.ok ? "ok" : `error (${call.error})`}`));
+		parts.push(
+			"",
+			"Bridge calls:",
+			...details.bridgeCalls.map((call) => `- ${call.name}: ${call.ok ? "ok" : `error (${call.error})`}`),
+		);
 	}
 	return parts.join("\n");
 }
@@ -1025,7 +1078,7 @@ export default function (pi: ExtensionAPI) {
 			"Use the typescript tool when the task benefits from batching multiple local operations into one scripted execution instead of many step-by-step tool calls.",
 			"Prefer the typescript tool for codebase analysis, structured extraction, summarization over many inputs, and artifact generation.",
 			"Do not use the typescript tool for trivial single-step actions when direct tools are simpler.",
-			"Use the typescript tool with mode \"analysis\" for read/analyze/report tasks and mode \"orchestrator\" only when task/todo host bridges are needed.",
+			'Use the typescript tool with mode "analysis" for read/analyze/report tasks and mode "orchestrator" only when task/todo host bridges are needed.',
 			"Use the typescript tool's profile parameter to select an existing capability profile as an additional permission constraint; it cannot grant access beyond the current session profile. Omit profile to inherit the current session permissions profile.",
 			"Use the typescript tool's host.mcp methods for batched programmatic MCP workflows once the relevant server or tool is known.",
 			"When using the typescript tool, return a compact result and use artifact writing for larger outputs.",
@@ -1063,13 +1116,16 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (details.ok) {
-				const resultPreview = truncate(serializeForDisplay(details.result), expanded ? MAX_RESULT_PREVIEW : 300);
+				const resultPreview = truncate(
+					serializeForDisplay(details.result),
+					expanded ? MAX_RESULT_PREVIEW : 300,
+				);
 				text += `\n${theme.fg("muted", "result:")} ${theme.fg("toolOutput", resultPreview)}`;
 			}
 
 			if (details.artifacts.length > 0) {
 				text += `\n${theme.fg("muted", `artifacts (${details.artifacts.length}):`)}`;
-				for (const artifact of (expanded ? details.artifacts : details.artifacts.slice(0, 3))) {
+				for (const artifact of expanded ? details.artifacts : details.artifacts.slice(0, 3)) {
 					text += `\n  ${theme.fg("accent", artifact.name)}${theme.fg("dim", ` (${artifact.size} bytes)`)}`;
 				}
 				if (!expanded && details.artifacts.length > 3) {
@@ -1079,7 +1135,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (details.bridgeCalls.length > 0) {
 				text += `\n${theme.fg("muted", `bridge calls (${details.bridgeCalls.length}):`)}`;
-				for (const call of (expanded ? details.bridgeCalls : details.bridgeCalls.slice(0, 4))) {
+				for (const call of expanded ? details.bridgeCalls : details.bridgeCalls.slice(0, 4)) {
 					const callIcon = call.ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
 					text += `\n  ${callIcon} ${theme.fg("accent", call.name)} ${theme.fg("dim", formatDurationMs(call.startedAt, call.endedAt))}`;
 					if (expanded) {
@@ -1127,14 +1183,25 @@ export default function (pi: ExtensionAPI) {
 			const { executionCwd, policyCwd } = await resolveExecutionPaths(ctx.cwd, params.cwd);
 			const config = loadConfig(policyCwd);
 			const profileScope: AgentScope = ctx.isProjectTrusted() ? "both" : "user";
-			const discoveredProfiles = taskAgents.discoverProfiles(policyCwd, profileScope, ctx.isProjectTrusted()).profiles;
+			const discoveredProfiles = taskAgents.discoverProfiles(
+				policyCwd,
+				profileScope,
+				ctx.isProjectTrusted(),
+			).profiles;
 			const agentName = detectAgentName(pi);
 			const inheritedPermissionsProfile = detectProfileName(pi);
-			const permissionsProfile = resolvePermissionsProfileName(params.profile, inheritedPermissionsProfile, discoveredProfiles);
+			const permissionsProfile = resolvePermissionsProfileName(
+				params.profile,
+				inheritedPermissionsProfile,
+				discoveredProfiles,
+			);
 			if (params.profile) {
-				if (!permissionsProfile) throw new Error(`CodeMode profile "${params.profile}" does not resolve to a permissions profile.`);
+				if (!permissionsProfile)
+					throw new Error(`CodeMode profile "${params.profile}" does not resolve to a permissions profile.`);
 				if (permissionsProfile !== "default" && !(permissionsProfile in (config.profiles ?? {}))) {
-					throw new Error(`CodeMode profile "${params.profile}" references unknown permissions profile "${permissionsProfile}".`);
+					throw new Error(
+						`CodeMode profile "${params.profile}" references unknown permissions profile "${permissionsProfile}".`,
+					);
 				}
 			}
 			const inheritedPolicy = activePolicy(config, agentName, inheritedPermissionsProfile);
@@ -1148,10 +1215,20 @@ export default function (pi: ExtensionAPI) {
 
 			if (!resolvedPolicy.sandbox.enabled) {
 				await fs.rm(runtimeDir, { recursive: true, force: true }).catch(() => {});
-				throw new Error(`TypeScript requires sandboxing, but sandboxing is disabled: ${resolvedPolicy.sandbox.reason}`);
+				throw new Error(
+					`TypeScript requires sandboxing, but sandboxing is disabled: ${resolvedPolicy.sandbox.reason}`,
+				);
 			}
 
-			onUpdate?.({ content: [{ type: "text", text: `Starting TypeScript (${codeMode}${params.profile ? `, profile=${params.profile}` : ""})...` }], details: {} });
+			onUpdate?.({
+				content: [
+					{
+						type: "text",
+						text: `Starting TypeScript (${codeMode}${params.profile ? `, profile=${params.profile}` : ""})...`,
+					},
+				],
+				details: {},
+			});
 
 			let exitCode: number | null = null;
 			const rawOutputState = createRawOutputCaptureState();
@@ -1196,7 +1273,10 @@ export default function (pi: ExtensionAPI) {
 						const payload = JSON.parse(line.slice(LOG_PREFIX.length)) as ProtocolLog;
 						appendLogLine(logState, formatLogLine(payload));
 					} catch {
-						appendLogLine(logState, `[protocol] could not parse log payload: ${line.slice(LOG_PREFIX.length)}`);
+						appendLogLine(
+							logState,
+							`[protocol] could not parse log payload: ${line.slice(LOG_PREFIX.length)}`,
+						);
 					}
 					return;
 				}

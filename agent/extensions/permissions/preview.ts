@@ -42,9 +42,10 @@ export function formatPermissionPreview(value: string, limits: PreviewLimits = {
 		for (;;) {
 			// Prefer retaining a complete final line when possible. For a single long
 			// line, divide capacity evenly so both command ends remain recognizable.
-			let tailCount = sourceLines.length > 1
-				? Math.min(tailAvailable.length, Math.max(0, contentBudget - 1))
-				: Math.min(tailAvailable.length, Math.floor(contentBudget / 2));
+			let tailCount =
+				sourceLines.length > 1
+					? Math.min(tailAvailable.length, Math.max(0, contentBudget - 1))
+					: Math.min(tailAvailable.length, Math.floor(contentBudget / 2));
 			let headCount = Math.min(headAvailable.length, sourceChars.length - tailCount, contentBudget - tailCount);
 			// Give unused capacity on either side to the other, while preventing overlap.
 			tailCount = Math.min(tailAvailable.length, sourceChars.length - headCount, contentBudget - headCount);
@@ -56,7 +57,9 @@ export function formatPermissionPreview(value: string, limits: PreviewLimits = {
 			const omissions = [
 				omittedLines > 0 ? `${omittedLines} line${omittedLines === 1 ? "" : "s"}` : undefined,
 				omittedChars > 0 ? `${omittedChars} character${omittedChars === 1 ? "" : "s"}` : undefined,
-			].filter((item): item is string => item !== undefined).join(" and ");
+			]
+				.filter((item): item is string => item !== undefined)
+				.join(" and ");
 			const notice = `[Preview shortened: omitted ${omissions}]`;
 			const separators = (head ? 1 : 0) + (tail ? 1 : 0);
 			const nextBudget = Math.min(contentBudget, maxChars - Array.from(notice).length - separators);
@@ -79,7 +82,9 @@ export function formatPermissionPreview(value: string, limits: PreviewLimits = {
 		const omissions = [
 			omittedLines > 0 ? `${omittedLines} line${omittedLines === 1 ? "" : "s"}` : undefined,
 			omittedChars > 0 ? `${omittedChars} character${omittedChars === 1 ? "" : "s"}` : undefined,
-		].filter((item): item is string => item !== undefined).join(" and ");
+		]
+			.filter((item): item is string => item !== undefined)
+			.join(" and ");
 		const notice = `[Preview shortened: omitted ${omissions}]`;
 		const separatorLength = retainedCount > 0 ? 1 : 0;
 		const nextRetainedCount = Math.min(

@@ -1,12 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	type PermissionToolInput,
-	type PermissionToolName,
-	type Rule,
-	isFilesystemToolName,
-} from "./shared";
+import { type PermissionToolInput, type PermissionToolName, type Rule, isFilesystemToolName } from "./shared";
 
 export function getCommandInput(input: PermissionToolInput): string | undefined {
 	return typeof input.command === "string" ? input.command : undefined;
@@ -97,7 +92,9 @@ export function ruleMatch(rule: Rule, toolName: PermissionToolName, target: stri
 	const patterns = rule.match;
 	if (patterns === undefined) return true;
 
-	return (Array.isArray(patterns) ? patterns : [patterns]).some((pattern) => patternMatches(pattern, toolName, target));
+	return (Array.isArray(patterns) ? patterns : [patterns]).some((pattern) =>
+		patternMatches(pattern, toolName, target),
+	);
 }
 
 export function matchRule(rules: Rule[], toolName: PermissionToolName, input: PermissionToolInput): Rule | undefined {
@@ -125,16 +122,10 @@ export function resolveToken(token: string, cwd: string): string {
 }
 
 function hasErrno(error: unknown, ...codes: string[]): error is NodeJS.ErrnoException {
-	return typeof error === "object"
-		&& error !== null
-		&& "code" in error
-		&& codes.includes(String(error.code));
+	return typeof error === "object" && error !== null && "code" in error && codes.includes(String(error.code));
 }
 
-function canonicalizeThroughExistingAncestor(
-	inputPath: string,
-	visitedSymlinks: Set<string> = new Set(),
-): string {
+function canonicalizeThroughExistingAncestor(inputPath: string, visitedSymlinks: Set<string> = new Set()): string {
 	const absolutePath = path.resolve(inputPath);
 	let current = absolutePath;
 	const unresolved: string[] = [];

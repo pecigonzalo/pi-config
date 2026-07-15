@@ -39,7 +39,17 @@ const PROJECT_TERMS = [
 const AVOIDANCE_TERMS = ["don't", "dont", "do not", "never", "avoid", "not supposed", "without asking", "stop"];
 const PREFERENCE_TERMS = ["prefer", "rather", "instead", "i like", "i would", "we want", "should"];
 const WORKFLOW_TERMS = ["plan", "review", "implement", "commit", "stage", "test", "verify", "delegate", "task"];
-const PROCEDURE_TERMS = ["procedure", "steps", "checklist", "when debugging", "when fixing", "how to", "run then", "first", "then verify"];
+const PROCEDURE_TERMS = [
+	"procedure",
+	"steps",
+	"checklist",
+	"when debugging",
+	"when fixing",
+	"how to",
+	"run then",
+	"first",
+	"then verify",
+];
 
 function includesAny(text: string, terms: string[]): boolean {
 	return terms.some((term) => text.includes(term));
@@ -55,7 +65,9 @@ function inferKind(text: string): LearningKind {
 }
 
 function looksProcedural(text: string): boolean {
-	return includesAny(text, PROCEDURE_TERMS) && /\b(run|check|verify|debug|fix|create|update|deploy|test)\b/i.test(text);
+	return (
+		includesAny(text, PROCEDURE_TERMS) && /\b(run|check|verify|debug|fix|create|update|deploy|test)\b/i.test(text)
+	);
 }
 
 function inferScope(text: string): LearningScope {
@@ -90,9 +102,10 @@ export function classifyCandidate(candidate: LearningCandidate): LearningClassif
 		scope,
 		destination,
 		confidence: Math.min(0.95, candidate.confidence + confidenceBoost),
-		reason: destination === "undecided"
-			? "Heuristic classifier found a correction/advice candidate but could not safely choose a scope or destination."
-			: `Heuristic classifier suggests ${destination} based on ${kind} signals and ${scope} scope.`,
+		reason:
+			destination === "undecided"
+				? "Heuristic classifier found a correction/advice candidate but could not safely choose a scope or destination."
+				: `Heuristic classifier suggests ${destination} based on ${kind} signals and ${scope} scope.`,
 	};
 }
 

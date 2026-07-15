@@ -3,7 +3,17 @@ import { LEARN_COMPLETIONS } from "./commands";
 
 test("learn completions list all accepted subcommands", () => {
 	expect(LEARN_COMPLETIONS.map((s) => s.value)).toEqual([
-		"review", "list", "recall", "search", "classify", "distill", "route", "accept", "reject", "status", "help",
+		"review",
+		"list",
+		"recall",
+		"search",
+		"classify",
+		"distill",
+		"route",
+		"accept",
+		"reject",
+		"status",
+		"help",
 	]);
 });
 

@@ -18,14 +18,7 @@ interface ProtectedResourceDefinition {
 export const GIT_METADATA_PROTECTED_RESOURCE_MATCH = "(^|[/])\\.git/(hooks/|config$)";
 
 const ENV_FILE_GLOBS = ["**/.env", "**/.env.*"] as const;
-const KEY_MATERIAL_GLOBS = [
-	"**/*.pem",
-	"**/*.key",
-	"**/*.p12",
-	"**/*.pfx",
-	"**/*.crt",
-	"**/*.ca-bundle",
-] as const;
+const KEY_MATERIAL_GLOBS = ["**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.crt", "**/*.ca-bundle"] as const;
 
 const BUILTIN_PROTECTED_RESOURCES: readonly ProtectedResourceDefinition[] = [
 	{
@@ -85,14 +78,19 @@ const BUILTIN_PROTECTED_RESOURCES: readonly ProtectedResourceDefinition[] = [
 		id: "claude-extension-directories",
 		match: "(^|[/])\\.claude/(commands/|agents/)",
 		denyWrite: true,
-		sandboxDenyWrite: ["**/.claude/commands", "**/.claude/commands/**", "**/.claude/agents", "**/.claude/agents/**"],
+		sandboxDenyWrite: [
+			"**/.claude/commands",
+			"**/.claude/commands/**",
+			"**/.claude/agents",
+			"**/.claude/agents/**",
+		],
 	},
 ] as const;
 
 export function getBuiltinProtectedResourceMatches(access: ProtectedResourceAccess): string[] {
-	return BUILTIN_PROTECTED_RESOURCES
-		.filter((resource) => (access === "read" ? resource.denyRead === true : resource.denyWrite === true))
-		.map((resource) => resource.match);
+	return BUILTIN_PROTECTED_RESOURCES.filter((resource) =>
+		access === "read" ? resource.denyRead === true : resource.denyWrite === true,
+	).map((resource) => resource.match);
 }
 
 export function getProtectedResourceSandboxDenySpec(

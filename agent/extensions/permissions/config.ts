@@ -185,7 +185,8 @@ export function getInterpolationVariables(): Record<string, string | undefined> 
 	const vars: Record<string, string | undefined> = { ...process.env };
 	vars.HOME ??= os.homedir();
 
-	const piPackageDir = vars.PI_PACKAGE_DIR ?? inferPiPackageDirFrom(process.argv[1]) ?? inferPiPackageDirFrom(process.execPath);
+	const piPackageDir =
+		vars.PI_PACKAGE_DIR ?? inferPiPackageDirFrom(process.argv[1]) ?? inferPiPackageDirFrom(process.execPath);
 	if (piPackageDir) {
 		vars.PI_PACKAGE_DIR = piPackageDir;
 		vars.PI_DOCS_DIR ??= path.resolve(piPackageDir, "docs");
@@ -228,7 +229,9 @@ export function interpolateConfig(config: PermissionsConfig): PermissionsConfig 
 			...rule,
 			match: interpolateRuleMatch(rule.match),
 		}));
-	const interpolateProfile = <T extends { rules?: Rule[]; tmpDir?: string }>(profile: T | undefined): T | undefined => {
+	const interpolateProfile = <T extends { rules?: Rule[]; tmpDir?: string }>(
+		profile: T | undefined,
+	): T | undefined => {
 		if (!profile) return undefined;
 		return {
 			...profile,
@@ -236,7 +239,9 @@ export function interpolateConfig(config: PermissionsConfig): PermissionsConfig 
 			tmpDir: profile.tmpDir === undefined ? undefined : interpolateEnvString(profile.tmpDir),
 		};
 	};
-	const interpolateProfileMap = (profiles: PermissionsConfig["profiles"]): PermissionsConfig["profiles"] | undefined => {
+	const interpolateProfileMap = (
+		profiles: PermissionsConfig["profiles"],
+	): PermissionsConfig["profiles"] | undefined => {
 		if (!profiles) return undefined;
 		return Object.fromEntries(
 			Object.entries(profiles)
@@ -252,25 +257,26 @@ export function interpolateConfig(config: PermissionsConfig): PermissionsConfig 
 		agents: interpolateProfileMap(config.agents),
 		sandbox: config.sandbox
 			? {
-				...config.sandbox,
-				tmpDir: config.sandbox.tmpDir === undefined ? undefined : interpolateEnvString(config.sandbox.tmpDir),
-				allowUnixSockets: interpolateStringArray(config.sandbox.allowUnixSockets),
-				allowMachLookup: interpolateStringArray(config.sandbox.allowMachLookup),
-				bypassCommands: interpolateStringArray(config.sandbox.bypassCommands, { regex: true }),
-				addAllowWrite: interpolateStringArray(config.sandbox.addAllowWrite),
-				denyRead: interpolateStringArray(config.sandbox.denyRead),
-				denyWrite: interpolateStringArray(config.sandbox.denyWrite),
-				env: interpolateStringRecord(config.sandbox.env),
-			}
+					...config.sandbox,
+					tmpDir:
+						config.sandbox.tmpDir === undefined ? undefined : interpolateEnvString(config.sandbox.tmpDir),
+					allowUnixSockets: interpolateStringArray(config.sandbox.allowUnixSockets),
+					allowMachLookup: interpolateStringArray(config.sandbox.allowMachLookup),
+					bypassCommands: interpolateStringArray(config.sandbox.bypassCommands, { regex: true }),
+					addAllowWrite: interpolateStringArray(config.sandbox.addAllowWrite),
+					denyRead: interpolateStringArray(config.sandbox.denyRead),
+					denyWrite: interpolateStringArray(config.sandbox.denyWrite),
+					env: interpolateStringRecord(config.sandbox.env),
+				}
 			: undefined,
 		protectedResources: config.protectedResources
 			? {
-				...config.protectedResources,
-				addDenyRead: interpolateStringArray(config.protectedResources.addDenyRead, { regex: true }),
-				addDenyWrite: interpolateStringArray(config.protectedResources.addDenyWrite, { regex: true }),
-				unprotectRead: interpolateStringArray(config.protectedResources.unprotectRead, { regex: true }),
-				unprotectWrite: interpolateStringArray(config.protectedResources.unprotectWrite, { regex: true }),
-			}
+					...config.protectedResources,
+					addDenyRead: interpolateStringArray(config.protectedResources.addDenyRead, { regex: true }),
+					addDenyWrite: interpolateStringArray(config.protectedResources.addDenyWrite, { regex: true }),
+					unprotectRead: interpolateStringArray(config.protectedResources.unprotectRead, { regex: true }),
+					unprotectWrite: interpolateStringArray(config.protectedResources.unprotectWrite, { regex: true }),
+				}
 			: undefined,
 	};
 }
@@ -408,9 +414,10 @@ function mergePolicyLayer(
 	const mode = layer.mode ?? base.mode;
 	const compiled = compileModeDefaults(mode);
 	const externalPath = layer.externalPath ?? (layer.mode ? compiled.externalPath : base.externalPath);
-	const rules = layer.inherit === false
-		? [...(layer.rules ?? []), ...compiled.rules]
-		: [...(layer.rules ?? []), ...base.rules, ...(layer.mode ? compiled.rules : [])];
+	const rules =
+		layer.inherit === false
+			? [...(layer.rules ?? []), ...compiled.rules]
+			: [...(layer.rules ?? []), ...base.rules, ...(layer.mode ? compiled.rules : [])];
 	return { mode, rules, externalPath };
 }
 

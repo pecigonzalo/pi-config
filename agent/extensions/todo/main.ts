@@ -15,13 +15,13 @@ import {
 	TodoPanelWidgetComponent,
 } from "./components";
 import { parseTodoWidgetMode, parseTodosCommandArgs, parseTodosCommandRoute } from "./commands";
-import { executeTodoAction, findTodo as findTodoInState, resultText as getTodoResultText, type TodoExecuteParams } from "./engine";
 import {
-	buildTodoBrowserRows,
-	buildTodoCommandTitle,
-	buildTodoPanelRows,
-	statusLabel,
-} from "./presenters";
+	executeTodoAction,
+	findTodo as findTodoInState,
+	resultText as getTodoResultText,
+	type TodoExecuteParams,
+} from "./engine";
+import { buildTodoBrowserRows, buildTodoCommandTitle, buildTodoPanelRows, statusLabel } from "./presenters";
 import {
 	applyPersistedDetails as applyPersistedTodoDetails,
 	createTodoState,
@@ -70,12 +70,12 @@ function compactRenderedTodoText(text: string, expanded: boolean, theme: Theme):
 }
 
 export const TODOS_COMPLETIONS = [
-	{ value: "ready",       label: "ready: show todos without blockers" },
-	{ value: "all",         label: "all: show all todos including done" },
-	{ value: "todo",        label: "todo: filter by todo status" },
+	{ value: "ready", label: "ready: show todos without blockers" },
+	{ value: "all", label: "all: show all todos including done" },
+	{ value: "todo", label: "todo: filter by todo status" },
 	{ value: "in-progress", label: "in-progress: filter by in-progress status" },
-	{ value: "done",        label: "done: filter by done status" },
-	{ value: "widget",      label: "widget: manage the todo widget (widget on|off|toggle|status)" },
+	{ value: "done", label: "done: filter by done status" },
+	{ value: "widget", label: "widget: manage the todo widget (widget on|off|toggle|status)" },
 ] as const;
 
 export default function (pi: ExtensionAPI) {
@@ -408,9 +408,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("todos", {
-		description: "Show todos or manage widget. Usage: /todos [ready] [all] [todo|in-progress|done] [tag:<name>] | /todos widget [on|off|toggle|status]",
-		getArgumentCompletions: (prefix) =>
-			TODOS_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
+		description:
+			"Show todos or manage widget. Usage: /todos [ready] [all] [todo|in-progress|done] [tag:<name>] | /todos widget [on|off|toggle|status]",
+		getArgumentCompletions: (prefix) => TODOS_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: handleTodosCommand,
 	});
 }

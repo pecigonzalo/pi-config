@@ -32,7 +32,10 @@ export function writeApprovalFileAtomic(
 	operations: ApprovalStoreOperations = defaultOperations,
 ): void {
 	operations.mkdirSync(path.dirname(filePath), { recursive: true });
-	const temporaryPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`);
+	const temporaryPath = path.join(
+		path.dirname(filePath),
+		`.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`,
+	);
 	let fd: number | undefined;
 	try {
 		fd = operations.openSync(temporaryPath, "wx", 0o600);
@@ -48,9 +51,17 @@ export function writeApprovalFileAtomic(
 		operations.renameSync(temporaryPath, filePath);
 	} catch (error) {
 		if (fd !== undefined) {
-			try { operations.closeSync(fd); } catch { /* preserve the original failure */ }
+			try {
+				operations.closeSync(fd);
+			} catch {
+				/* preserve the original failure */
+			}
 		}
-		try { operations.unlinkSync(temporaryPath); } catch { /* absent or best-effort cleanup */ }
+		try {
+			operations.unlinkSync(temporaryPath);
+		} catch {
+			/* absent or best-effort cleanup */
+		}
 		throw error;
 	}
 }

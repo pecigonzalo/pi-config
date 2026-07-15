@@ -11,12 +11,14 @@ const StoreStatusSchema = StringEnum(["active", "archived", "deprecated"] as con
 const StoreReadParams = Type.Object({
 	id: Type.Optional(
 		Type.String({
-			description: "Optional: Specific item ID to retrieve (READ mode). Returns full item including data field. Omit for LIST mode.",
+			description:
+				"Optional: Specific item ID to retrieve (READ mode). Returns full item including data field. Omit for LIST mode.",
 		}),
 	),
 	tags: Type.Optional(
 		Type.Array(Type.String(), {
-			description: "Optional: Filter by tags in LIST mode (AND logic - must match ALL tags). Example: ['auth', 'critical']",
+			description:
+				"Optional: Filter by tags in LIST mode (AND logic - must match ALL tags). Example: ['auth', 'critical']",
 		}),
 	),
 	includeArchived: Type.Optional(
@@ -33,16 +35,26 @@ const StoreWriteParams = Type.Object({
 		description: "Required: Array of tags for discoverability (e.g., ['auth', 'critical', 'design'])",
 	}),
 	status: Type.Optional(StoreStatusSchema),
-	links: Type.Optional(Type.Array(Type.String(), { description: "Optional: Array of related store item IDs or URLs" })),
-	data: Type.Optional(Type.Any({ description: "Optional: Structured payload containing the actual data to persist" })),
+	links: Type.Optional(
+		Type.Array(Type.String(), { description: "Optional: Array of related store item IDs or URLs" }),
+	),
+	data: Type.Optional(
+		Type.Any({ description: "Optional: Structured payload containing the actual data to persist" }),
+	),
 });
 
 const StorePatchParams = Type.Object({
 	id: Type.String({ description: "Required: ID of the store item to update" }),
-	summary: Type.Optional(Type.String({ minLength: 1, description: "Optional: New summary to replace the existing one" })),
-	tags: Type.Optional(Type.Array(Type.String(), { minItems: 1, description: "Optional: New tags array to replace existing tags" })),
+	summary: Type.Optional(
+		Type.String({ minLength: 1, description: "Optional: New summary to replace the existing one" }),
+	),
+	tags: Type.Optional(
+		Type.Array(Type.String(), { minItems: 1, description: "Optional: New tags array to replace existing tags" }),
+	),
 	status: Type.Optional(StoreStatusSchema),
-	links: Type.Optional(Type.Array(Type.String(), { description: "Optional: New links array to replace existing links" })),
+	links: Type.Optional(
+		Type.Array(Type.String(), { description: "Optional: New links array to replace existing links" }),
+	),
 	data: Type.Optional(Type.Any({ description: "Optional: New data payload to replace existing data" })),
 });
 
@@ -140,10 +152,12 @@ function renderStoreCall(toolName: string, args: unknown, theme: Theme): Text {
 }
 
 function resultText(result: { content?: Array<{ type: string; text?: string }> }): string {
-	return result.content
-		?.filter((item) => item.type === "text")
-		.map((item) => item.text ?? "")
-		.join("\n") ?? "";
+	return (
+		result.content
+			?.filter((item) => item.type === "text")
+			.map((item) => item.text ?? "")
+			.join("\n") ?? ""
+	);
 }
 
 function itemLine(item: StoreListEntry, theme: Theme): string {
@@ -151,13 +165,20 @@ function itemLine(item: StoreListEntry, theme: Theme): string {
 	const summary = clipText(asString(item.summary) ?? "(no summary)");
 	const tags = tagsText(item.tags);
 	const status = asString(item.status);
-	const suffix = [status && status !== "active" ? status : undefined, tags ? `#${tags.replace(/, /g, " #")}` : undefined]
+	const suffix = [
+		status && status !== "active" ? status : undefined,
+		tags ? `#${tags.replace(/, /g, " #")}` : undefined,
+	]
 		.filter(Boolean)
 		.join(" · ");
 	return `${theme.fg("accent", id)} ${theme.fg("toolOutput", summary)}${suffix ? " " + theme.fg("dim", suffix) : ""}`;
 }
 
-function renderStoreReadResult(result: { details?: unknown; content?: Array<{ type: string; text?: string }> }, opts: { expanded?: boolean; isPartial?: boolean }, theme: Theme): Text {
+function renderStoreReadResult(
+	result: { details?: unknown; content?: Array<{ type: string; text?: string }> },
+	opts: { expanded?: boolean; isPartial?: boolean },
+	theme: Theme,
+): Text {
 	if (opts.isPartial) return new Text(theme.fg("warning", "Reading store…"), 0, 0);
 
 	const details = isRecord(result.details) ? result.details : undefined;
@@ -191,14 +212,12 @@ function renderStoreReadResult(result: { details?: unknown; content?: Array<{ ty
 		const compact = `${theme.fg("success", "✓")} ${theme.fg("accent", id)} ${theme.fg("toolOutput", clipText(summary))}${tags ? " " + theme.fg("dim", `#${tags.replace(/, /g, " #")}`) : ""}${maybeExpandHint(theme)}`;
 		if (!opts.expanded) return new Text(compact, 0, 0);
 
-		const lines = [
-			`${theme.fg("success", "✓")} ${theme.fg("accent", id)}`,
-			theme.fg("toolOutput", summary),
-		];
+		const lines = [`${theme.fg("success", "✓")} ${theme.fg("accent", id)}`, theme.fg("toolOutput", summary)];
 		const status = asString(item.status);
 		if (status) lines.push(theme.fg("dim", `status: ${status}`));
 		if (tags) lines.push(theme.fg("dim", `tags: ${tags}`));
-		if (Array.isArray(item.links) && item.links.length) lines.push(theme.fg("dim", `links: ${item.links.join(", ")}`));
+		if (Array.isArray(item.links) && item.links.length)
+			lines.push(theme.fg("dim", `links: ${item.links.join(", ")}`));
 		if ("data" in item) {
 			lines.push("");
 			lines.push(theme.fg("muted", "data preview:"));
@@ -234,7 +253,11 @@ function renderMutationResult(
 		return new Text(theme.fg("warning", `Store item not found${id ? `: ${id}` : ""}`), 0, 0);
 	}
 
-	return new Text(`${theme.fg("success", "✓")} ${theme.fg("toolOutput", `Store ${verb}`)}${id ? " " + theme.fg("accent", id) : ""}`, 0, 0);
+	return new Text(
+		`${theme.fg("success", "✓")} ${theme.fg("toolOutput", `Store ${verb}`)}${id ? " " + theme.fg("accent", id) : ""}`,
+		0,
+		0,
+	);
 }
 
 export default function storeExtension(pi: ExtensionAPI) {

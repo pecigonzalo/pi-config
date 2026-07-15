@@ -144,7 +144,13 @@ describe("todo state helpers", () => {
 		snapshot.todos[0]!.blockerIds.push(9);
 		const meta = snapshot.todos[0]!.history[0]!.meta;
 		const context = meta?.context;
-		if (!meta || !Array.isArray(meta.blockerIds) || !context || Array.isArray(context) || typeof context !== "object") {
+		if (
+			!meta ||
+			!Array.isArray(meta.blockerIds) ||
+			!context ||
+			Array.isArray(context) ||
+			typeof context !== "object"
+		) {
 			throw new Error("expected nested snapshot history metadata");
 		}
 		meta.blockerIds.push(9);

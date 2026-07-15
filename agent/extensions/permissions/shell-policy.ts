@@ -16,7 +16,10 @@ const DANGEROUS_BASH_CHECKS = [
 	{ re: /\bsudo\b/i, reason: "Elevated privileges" },
 	{ re: /\b(chmod|chown)\b/i, reason: "Changes permissions or ownership" },
 	{ re: /\bkill\b/i, reason: "Terminates processes" },
-	{ re: /\bcurl\b.+(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|PUT|DELETE|PATCH))/i, reason: "HTTP write operation" },
+	{
+		re: /\bcurl\b.+(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|PUT|DELETE|PATCH))/i,
+		reason: "HTTP write operation",
+	},
 ] as const;
 
 export function detectDangerousBashPattern(command: string): string | undefined {
@@ -56,10 +59,7 @@ export function isParsedCommandAllowed(cmd: ParsedCommand, rules: Rule[]): boole
 /**
  * Check if a parsed command is covered by existing approvals.
  */
-export function isParsedCommandApproved(
-	cmd: ParsedCommand,
-	isApproved: (candidate: string) => boolean,
-): boolean {
+export function isParsedCommandApproved(cmd: ParsedCommand, isApproved: (candidate: string) => boolean): boolean {
 	return isApproved(cmd.source) || isApproved(cmd.command) || isApproved(cmd.alwaysPattern);
 }
 

@@ -78,7 +78,10 @@ describe("store extension core", () => {
 	});
 
 	test("storewrite creates a YAML item with a generated id", async () => {
-		const result = (await storeWrite(tmpDir, { summary: "capture context", tags: ["test"] })) as { success: boolean; id: string };
+		const result = (await storeWrite(tmpDir, { summary: "capture context", tags: ["test"] })) as {
+			success: boolean;
+			id: string;
+		};
 
 		expect(result.success).toBe(true);
 		expect(result.id).toMatch(/^[0-9a-f]{12}$/);
@@ -103,10 +106,24 @@ describe("store extension core", () => {
 	test("storeread filters tags with AND logic and excludes archived by default", async () => {
 		await writeLegacyItems(tmpDir, legacyItems);
 
-		const authResult = (await storeRead(tmpDir, { tags: ["auth", "critical"] })) as { list: Array<Record<string, unknown>> };
-		const archivedResult = (await storeRead(tmpDir, { tags: ["database"] })) as { list: Array<Record<string, unknown>> };
+		const authResult = (await storeRead(tmpDir, { tags: ["auth", "critical"] })) as {
+			list: Array<Record<string, unknown>>;
+		};
+		const archivedResult = (await storeRead(tmpDir, { tags: ["database"] })) as {
+			list: Array<Record<string, unknown>>;
+		};
 
-		expect(authResult.list).toEqual([{ id: "aaa-111", summary: "Legacy first", tags: ["auth", "critical"], status: "active", links: undefined, createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-02T00:00:00.000Z" }]);
+		expect(authResult.list).toEqual([
+			{
+				id: "aaa-111",
+				summary: "Legacy first",
+				tags: ["auth", "critical"],
+				status: "active",
+				links: undefined,
+				createdAt: "2024-01-01T00:00:00.000Z",
+				updatedAt: "2024-01-02T00:00:00.000Z",
+			},
+		]);
 		expect(archivedResult.list).toEqual([]);
 	});
 

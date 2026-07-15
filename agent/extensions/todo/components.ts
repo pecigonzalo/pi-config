@@ -214,7 +214,10 @@ export class TodoBrowserComponent {
 			if (out.length < maxLines) out.push(truncateToWidth(line, width));
 		};
 		const title = th.fg("accent", ` ${this.title} `);
-		const header = th.fg("borderMuted", "─".repeat(3)) + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - this.title.length - 8)));
+		const header =
+			th.fg("borderMuted", "─".repeat(3)) +
+			title +
+			th.fg("borderMuted", "─".repeat(Math.max(0, width - this.title.length - 8)));
 		push(header);
 
 		if (this.rows.length === 0) {
@@ -238,7 +241,9 @@ export class TodoBrowserComponent {
 
 		const showingStart = window.startIndex + 1;
 		const showingEnd = Math.max(showingStart, window.endIndex);
-		push(`  ${th.fg("dim", `showing ${showingStart}-${showingEnd} of ${this.rows.length} · pageUp/pageDown scroll`)}`);
+		push(
+			`  ${th.fg("dim", `showing ${showingStart}-${showingEnd} of ${this.rows.length} · pageUp/pageDown scroll`)}`,
+		);
 
 		this.cachedWidth = width;
 		this.cachedMaxLines = maxLines;
@@ -254,7 +259,14 @@ export class TodoBrowserComponent {
 }
 
 export class TodoDetailComponent {
-	private static readonly fields: TodoDetailField[] = ["title", "description", "status", "priority", "effort", "tags"];
+	private static readonly fields: TodoDetailField[] = [
+		"title",
+		"description",
+		"status",
+		"priority",
+		"effort",
+		"tags",
+	];
 
 	private todo: TodoItem;
 	private theme: Theme;
@@ -263,7 +275,12 @@ export class TodoDetailComponent {
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 
-	constructor(todo: TodoItem, theme: Theme, selectedField: TodoDetailField, onAction: (action: TodoDetailAction) => void) {
+	constructor(
+		todo: TodoItem,
+		theme: Theme,
+		selectedField: TodoDetailField,
+		onAction: (action: TodoDetailAction) => void,
+	) {
 		this.todo = todo;
 		this.theme = theme;
 		this.onAction = onAction;
@@ -348,7 +365,12 @@ export class TodoDetailComponent {
 			return;
 		}
 		if (matchesKey(data, "enter") || data === "e") {
-			this.onAction({ type: "edit", id: this.todo.id, field: this.selectedField, selectedField: this.selectedField });
+			this.onAction({
+				type: "edit",
+				id: this.todo.id,
+				field: this.selectedField,
+				selectedField: this.selectedField,
+			});
 			return;
 		}
 		if (data === "t") {
@@ -367,10 +389,16 @@ export class TodoDetailComponent {
 		const out: string[] = [];
 		out.push("");
 		const title = th.fg("accent", ` Todo #${this.todo.id} `);
-		const header = th.fg("borderMuted", "─".repeat(3)) + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 17)));
+		const header =
+			th.fg("borderMuted", "─".repeat(3)) + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 17)));
 		out.push(truncateToWidth(header, width));
 		out.push("");
-		out.push(truncateToWidth(`  ${th.fg("dim", "↑↓ select field · enter/e edit field · t cycle status · a archive · esc back")}`, width));
+		out.push(
+			truncateToWidth(
+				`  ${th.fg("dim", "↑↓ select field · enter/e edit field · t cycle status · a archive · esc back")}`,
+				width,
+			),
+		);
 		out.push("");
 
 		const rows: Array<{ field: TodoDetailField; label: string; value: string }> = [
@@ -380,7 +408,11 @@ export class TodoDetailComponent {
 				label: "Description",
 				value: this.todo.description?.trim() ? this.todo.description : th.fg("dim", "(empty)"),
 			},
-			{ field: "status", label: "Status", value: this.colorStatusIcon(this.todo.status) + ` ${this.statusLabel(this.todo.status)}` },
+			{
+				field: "status",
+				label: "Status",
+				value: this.colorStatusIcon(this.todo.status) + ` ${this.statusLabel(this.todo.status)}`,
+			},
 			{ field: "priority", label: "Priority", value: this.colorPriority(this.todo.priority) },
 			{ field: "effort", label: "Effort", value: this.colorEffort(this.todo.effort) },
 			{
@@ -396,14 +428,24 @@ export class TodoDetailComponent {
 		});
 
 		out.push(truncateToWidth(`  ${th.fg("dim", "Readonly")}`, width));
-		out.push(truncateToWidth(`  ${th.fg("muted", "Parent:")} ${this.todo.parentId !== undefined ? th.fg("accent", `#${this.todo.parentId}`) : th.fg("dim", "(none)")}`, width));
+		out.push(
+			truncateToWidth(
+				`  ${th.fg("muted", "Parent:")} ${this.todo.parentId !== undefined ? th.fg("accent", `#${this.todo.parentId}`) : th.fg("dim", "(none)")}`,
+				width,
+			),
+		);
 		out.push(
 			truncateToWidth(
 				`  ${th.fg("muted", "Blockers:")} ${this.todo.blockerIds.length ? this.todo.blockerIds.map((id) => th.fg("accent", `#${id}`)).join(", ") : th.fg("dim", "(none)")}`,
 				width,
 			),
 		);
-		out.push(truncateToWidth(`  ${th.fg("muted", "Archived:")} ${this.todo.archived ? th.fg("dim", "yes") : "no"}`, width));
+		out.push(
+			truncateToWidth(
+				`  ${th.fg("muted", "Archived:")} ${this.todo.archived ? th.fg("dim", "yes") : "no"}`,
+				width,
+			),
+		);
 		out.push("");
 
 		this.cachedWidth = width;
@@ -443,7 +485,10 @@ export class TodoPanelWidgetComponent {
 
 		const title = th.fg("accent", ` ${this.title} `);
 		const left = th.fg("borderMuted", "──");
-		const right = th.fg("borderMuted", "─".repeat(Math.max(0, contentWidth - visibleWidth(left) - visibleWidth(title))));
+		const right = th.fg(
+			"borderMuted",
+			"─".repeat(Math.max(0, contentWidth - visibleWidth(left) - visibleWidth(title))),
+		);
 		out.push(toWidgetLine(`${left}${title}${right}`));
 
 		const rows = this.getRows();

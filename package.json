@@ -1,18 +1,24 @@
 {
-  "workspaces": [
-    "agent/extensions/*"
-  ],
-  "scripts": {
-    "generate:footer-schema": "cd agent/extensions/footer && bun run generate:footer-schema",
-    "lefthook:install": "lefthook install",
-    "format": "prettier --ignore-path .prettierignore --write \"agent/extensions/tasks/**/*.ts\"",
-    "format:check": "prettier --ignore-path .prettierignore --check \"agent/extensions/tasks/**/*.ts\"",
-    "test": "bun run --filter './agent/extensions/*' test --only-failures"
-  },
-  "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.6",
-    "@types/bun": "^1.3.14",
-    "lefthook": "^2.1.6",
-    "prettier": "3.9.5"
-  }
+	"workspaces": [
+		"agent/extensions/*"
+	],
+	"scripts": {
+		"lefthook:install": "lefthook install",
+		"test": "bun run --filter './agent/extensions/*' test --only-failures",
+		"typecheck": "tsc --noEmit",
+		"lint": "oxlint $(find agent -type f -name '*.ts')",
+		"lint:fix": "oxlint --fix $(find agent -type f -name '*.ts')",
+		"format:check": "oxfmt --check 'agent/**/*.ts'",
+		"format": "oxfmt --write 'agent/**/*.ts'",
+		"check": "bun run format:check && bun run lint && bun run typecheck && bun run test",
+		"generate:footer-schema": "cd agent/extensions/footer && bun run generate:footer-schema"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "0.80.6",
+		"@types/bun": "^1.3.14",
+		"lefthook": "^2.1.6",
+		"oxfmt": "0.59.0",
+		"oxlint": "1.74.0",
+		"typescript": "5.9.3"
+	}
 }

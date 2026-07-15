@@ -18,7 +18,9 @@ afterEach(() => {
 
 describe("WebsearchParams", () => {
 	test("constrains limit schema to whole numbers in the supported range", () => {
-		const limit = (WebsearchParams as { properties: { limit: { minimum?: number; maximum?: number; multipleOf?: number } } }).properties.limit;
+		const limit = (
+			WebsearchParams as { properties: { limit: { minimum?: number; maximum?: number; multipleOf?: number } } }
+		).properties.limit;
 		expect(limit.minimum).toBe(1);
 		expect(limit.maximum).toBe(10);
 		expect(limit.multipleOf).toBe(1);

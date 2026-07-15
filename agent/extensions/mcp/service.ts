@@ -97,7 +97,8 @@ function expandHome(value: string): string {
 }
 
 function resolveConfigPath(configPath: string | undefined): string {
-	const configured = configPath ?? process.env.PI_MCP_CONFIG ?? process.env.MCPORTER_CONFIG ?? path.join(getAgentDir(), "mcp.json");
+	const configured =
+		configPath ?? process.env.PI_MCP_CONFIG ?? process.env.MCPORTER_CONFIG ?? path.join(getAgentDir(), "mcp.json");
 	return path.resolve(expandHome(configured));
 }
 
@@ -152,7 +153,12 @@ function normalizeCallResult(raw: unknown): McpNormalizedCallResult {
 
 async function getMcporterCommand(): Promise<{ command: string; argsPrefix: string[] }> {
 	const extensionDir = path.dirname(fileURLToPath(import.meta.url));
-	const localBin = path.join(extensionDir, "node_modules", ".bin", process.platform === "win32" ? "mcporter.cmd" : "mcporter");
+	const localBin = path.join(
+		extensionDir,
+		"node_modules",
+		".bin",
+		process.platform === "win32" ? "mcporter.cmd" : "mcporter",
+	);
 	try {
 		await fs.access(localBin);
 		return { command: localBin, argsPrefix: [] };
@@ -161,7 +167,10 @@ async function getMcporterCommand(): Promise<{ command: string; argsPrefix: stri
 	}
 }
 
-async function runMcporterCli(args: string[], options: { cwd: string; timeoutMs?: number }): Promise<{ exitCode: number | null; output: string; error?: string }> {
+async function runMcporterCli(
+	args: string[],
+	options: { cwd: string; timeoutMs?: number },
+): Promise<{ exitCode: number | null; output: string; error?: string }> {
 	const invocation = await getMcporterCommand();
 	const timeoutMs = clampTimeoutMs(options.timeoutMs ?? STATUS_TIMEOUT_MS);
 	return await new Promise((resolve) => {
@@ -275,7 +284,10 @@ export class McpService {
 	async status(): Promise<McpStatus> {
 		applyMcpEnvironment(this.options.cwd, this.options.sessionId);
 		const servers = await this.servers();
-		const daemon = await runMcporterCli(["daemon", "status"], { cwd: this.options.cwd, timeoutMs: STATUS_TIMEOUT_MS });
+		const daemon = await runMcporterCli(["daemon", "status"], {
+			cwd: this.options.cwd,
+			timeoutMs: STATUS_TIMEOUT_MS,
+		});
 		return {
 			ok: !daemon.error,
 			configPath: this.configPath,

@@ -66,7 +66,9 @@ export function parseTreeSitterTagsOutput(
 			continue;
 		}
 
-		const match = line.match(/^\s*(.*?)\s+\|\s+(\S+)\s+(def|ref)\s+\((\d+),\s*(\d+)\)\s*-\s*\((\d+),\s*(\d+)\)(?:\s+`([^`]*)`)?/);
+		const match = line.match(
+			/^\s*(.*?)\s+\|\s+(\S+)\s+(def|ref)\s+\((\d+),\s*(\d+)\)\s*-\s*\((\d+),\s*(\d+)\)(?:\s+`([^`]*)`)?/,
+		);
 		if (!match || !currentFile) continue;
 		const name = match[1]?.trim();
 		const kind = match[2]?.trim() || "symbol";
@@ -115,10 +117,18 @@ export async function extractDefinitionsForLoadedSource(
 ): Promise<Definition[]> {
 	const syntaxDefinitions = extractDefinitions(file, text);
 	const treeSitterTags = await extractTreeSitterTags(pi, root, [file], signal);
-	const treeSitterDefinitions = hydrateTreeSitterDefinitions(file, text, treeSitterTags?.byFile.get(file.relPath)?.definitions ?? []);
+	const treeSitterDefinitions = hydrateTreeSitterDefinitions(
+		file,
+		text,
+		treeSitterTags?.byFile.get(file.relPath)?.definitions ?? [],
+	);
 	const lspService = getLspService(pi);
-	const lspSymbols = lspService?.documentSymbols && (!lspService.supportsFile || lspService.supportsFile(file.absPath))
-		? await lspService.documentSymbols(file.absPath, { signal }).catch(() => [])
-		: [];
-	return mergeDefinitions(hydrateLspDocumentSymbols(file, text, lspSymbols), mergeDefinitions(treeSitterDefinitions, syntaxDefinitions));
+	const lspSymbols =
+		lspService?.documentSymbols && (!lspService.supportsFile || lspService.supportsFile(file.absPath))
+			? await lspService.documentSymbols(file.absPath, { signal }).catch(() => [])
+			: [];
+	return mergeDefinitions(
+		hydrateLspDocumentSymbols(file, text, lspSymbols),
+		mergeDefinitions(treeSitterDefinitions, syntaxDefinitions),
+	);
 }

@@ -136,7 +136,16 @@ export class LearningStore {
 		const data = await this.read();
 		return data.candidates
 			.map((candidate) => {
-				const haystack = [candidate.text, candidate.kind, candidate.scope, candidate.destination, candidate.reason, ...candidate.evidence.map((item) => item.quote)].join(" ").toLowerCase();
+				const haystack = [
+					candidate.text,
+					candidate.kind,
+					candidate.scope,
+					candidate.destination,
+					candidate.reason,
+					...candidate.evidence.map((item) => item.quote),
+				]
+					.join(" ")
+					.toLowerCase();
 				const score = terms.filter((term) => haystack.includes(term)).length;
 				return { candidate, score };
 			})

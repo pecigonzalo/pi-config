@@ -102,12 +102,16 @@ export async function callMcpTool(
 		const body = decodeBuffer(bodyRead.buffer, contentType.charset);
 		const text = extractMcpTextResponse(body);
 		if (!response.ok) {
-			const truncationHint = bodyRead.truncated ? ` (response body truncated at ${Math.round(MCP_MAX_RESPONSE_BYTES / 1024)}KB)` : "";
+			const truncationHint = bodyRead.truncated
+				? ` (response body truncated at ${Math.round(MCP_MAX_RESPONSE_BYTES / 1024)}KB)`
+				: "";
 			throw new Error(`MCP endpoint returned HTTP ${response.status}${text ? `: ${text}` : ""}${truncationHint}`);
 		}
 		if (!text) {
 			if (bodyRead.truncated) {
-				throw new Error(`MCP response exceeded ${Math.round(MCP_MAX_RESPONSE_BYTES / 1024)}KB and was truncated before text extraction`);
+				throw new Error(
+					`MCP response exceeded ${Math.round(MCP_MAX_RESPONSE_BYTES / 1024)}KB and was truncated before text extraction`,
+				);
 			}
 			throw new Error("MCP response did not contain any text output");
 		}

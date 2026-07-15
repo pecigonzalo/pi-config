@@ -96,18 +96,20 @@ export function hydrateLspDocumentSymbols(file: SourceFile, text: string, symbol
 		if (!isMappableLspDocumentSymbol(symbol)) return [];
 		const kind = normalizeLspSymbolKind(symbol.kind);
 		const line = Math.max(0, symbol.line - 1);
-		return [{
-			name: symbol.name,
-			kind,
-			file: file.relPath,
-			line,
-			column: Math.max(0, symbol.column - 1),
-			text: lines[line]?.trimEnd() ?? symbol.name,
-			signatureLines: captureSignature(lines, line, file.language),
-			score: 0,
-			backend: "lsp-document-symbol" as const,
-			container: symbol.container,
-		}];
+		return [
+			{
+				name: symbol.name,
+				kind,
+				file: file.relPath,
+				line,
+				column: Math.max(0, symbol.column - 1),
+				text: lines[line]?.trimEnd() ?? symbol.name,
+				signatureLines: captureSignature(lines, line, file.language),
+				score: 0,
+				backend: "lsp-document-symbol" as const,
+				container: symbol.container,
+			},
+		];
 	});
 }
 
@@ -130,7 +132,8 @@ export function isMappableLspDocumentSymbol(symbol: LspDocumentSymbol): boolean 
 }
 
 function shouldIncludeLspSymbol(kind: string, symbol: LspDocumentSymbol): boolean {
-	if (["class", "enum", "function", "interface", "method", "module", "namespace", "struct"].includes(kind)) return true;
+	if (["class", "enum", "function", "interface", "method", "module", "namespace", "struct"].includes(kind))
+		return true;
 	return !symbol.container && ["const", "variable"].includes(kind);
 }
 

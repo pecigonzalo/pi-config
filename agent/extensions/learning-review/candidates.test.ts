@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { extractCandidatesFromEntries, extractExplicitCandidateFromEntryId, listUserMessageChoices, looksLikeCorrectionOrAdvice } from "./candidates";
+import {
+	extractCandidatesFromEntries,
+	extractExplicitCandidateFromEntryId,
+	listUserMessageChoices,
+	looksLikeCorrectionOrAdvice,
+} from "./candidates";
 
 describe("learning candidate extraction", () => {
 	test("detects strong corrections", () => {
@@ -14,10 +19,42 @@ describe("learning candidate extraction", () => {
 
 	test("extracts user-message candidates with evidence context window", () => {
 		const entries = [
-			{ type: "message", id: "u1", timestamp: "2026-01-01T00:00:00.000Z", message: { role: "user", content: [{ type: "text", text: "Can you explore the API?" }] } },
-			{ type: "message", id: "a", timestamp: "2026-01-01T00:00:30.000Z", message: { role: "assistant", content: [{ type: "text", text: "I used python." }, { type: "toolCall", name: "bash", arguments: { command: "python <<'PY'" } }] } },
-			{ type: "message", id: "b", timestamp: "2026-01-01T00:01:00.000Z", message: { role: "user", content: [{ type: "text", text: "Why did you use python << instead of your typescript tool?" }] } },
-			{ type: "message", id: "c", timestamp: "2026-01-01T00:02:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "You're right, I should have used typescript." }] } },
+			{
+				type: "message",
+				id: "u1",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				message: { role: "user", content: [{ type: "text", text: "Can you explore the API?" }] },
+			},
+			{
+				type: "message",
+				id: "a",
+				timestamp: "2026-01-01T00:00:30.000Z",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "text", text: "I used python." },
+						{ type: "toolCall", name: "bash", arguments: { command: "python <<'PY'" } },
+					],
+				},
+			},
+			{
+				type: "message",
+				id: "b",
+				timestamp: "2026-01-01T00:01:00.000Z",
+				message: {
+					role: "user",
+					content: [{ type: "text", text: "Why did you use python << instead of your typescript tool?" }],
+				},
+			},
+			{
+				type: "message",
+				id: "c",
+				timestamp: "2026-01-01T00:02:00.000Z",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "You're right, I should have used typescript." }],
+				},
+			},
 		];
 
 		const candidates = extractCandidatesFromEntries(entries, "/tmp/session.jsonl", "/tmp/project", 10);
@@ -33,8 +70,21 @@ describe("learning candidate extraction", () => {
 
 	test("lists user messages and creates explicit candidates", () => {
 		const entries = [
-			{ type: "message", id: "u1", timestamp: "2026-01-01T00:00:00.000Z", message: { role: "user", content: [{ type: "text", text: "Please remember this workflow preference." }] } },
-			{ type: "message", id: "a1", timestamp: "2026-01-01T00:01:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "Acknowledged." }] } },
+			{
+				type: "message",
+				id: "u1",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				message: {
+					role: "user",
+					content: [{ type: "text", text: "Please remember this workflow preference." }],
+				},
+			},
+			{
+				type: "message",
+				id: "a1",
+				timestamp: "2026-01-01T00:01:00.000Z",
+				message: { role: "assistant", content: [{ type: "text", text: "Acknowledged." }] },
+			},
 		];
 
 		const choices = listUserMessageChoices(entries);

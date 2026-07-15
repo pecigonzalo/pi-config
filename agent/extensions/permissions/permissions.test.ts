@@ -210,7 +210,9 @@ describe("permissions config merge", () => {
 					},
 				},
 			});
-			expect(config.sandbox?.env?.GIT_SSH_COMMAND).toBe("ssh -o ControlMaster=no -o ControlPath=/tmp/pi sockets/git.sock");
+			expect(config.sandbox?.env?.GIT_SSH_COMMAND).toBe(
+				"ssh -o ControlMaster=no -o ControlPath=/tmp/pi sockets/git.sock",
+			);
 		} finally {
 			if (old === undefined) delete process.env.PI_TEST_SOCKET_DIR;
 			else process.env.PI_TEST_SOCKET_DIR = old;
@@ -242,9 +244,21 @@ describe("permissions config merge", () => {
 					bypassCommands: ["^bunx\\s+@playwright/cli@latest\\s+open\\s+http://${PI_TEST_HOST}$"],
 				},
 			});
-			expect(config.sandbox?.bypassCommands).toEqual(["^bunx\\s+@playwright/cli@latest\\s+open\\s+http://localhost:5173$"]);
-			expect(matchSandboxBypassCommand("bunx @playwright/cli@latest open http://localhost:5173", config.sandbox?.bypassCommands)).toBe(config.sandbox?.bypassCommands?.[0]);
-			expect(matchSandboxBypassCommand("bunx @playwright/cli@latest open http://localhostX5173", config.sandbox?.bypassCommands)).toBeUndefined();
+			expect(config.sandbox?.bypassCommands).toEqual([
+				"^bunx\\s+@playwright/cli@latest\\s+open\\s+http://localhost:5173$",
+			]);
+			expect(
+				matchSandboxBypassCommand(
+					"bunx @playwright/cli@latest open http://localhost:5173",
+					config.sandbox?.bypassCommands,
+				),
+			).toBe(config.sandbox?.bypassCommands?.[0]);
+			expect(
+				matchSandboxBypassCommand(
+					"bunx @playwright/cli@latest open http://localhostX5173",
+					config.sandbox?.bypassCommands,
+				),
+			).toBeUndefined();
 		} finally {
 			if (old === undefined) delete process.env.PI_TEST_HOST;
 			else process.env.PI_TEST_HOST = old;
@@ -258,10 +272,14 @@ describe("permissions config merge", () => {
 		await fs.mkdir(path.join(root, "docs"), { recursive: true });
 		await fs.mkdir(path.join(root, "examples"), { recursive: true });
 		await fs.writeFile(path.join(root, "README.md"), "# Pi\n", "utf8");
-		await fs.writeFile(path.join(root, "package.json"), JSON.stringify({
-			name: "@earendil-works/pi-coding-agent",
-			bin: { pi: "dist/cli.js" },
-		}), "utf8");
+		await fs.writeFile(
+			path.join(root, "package.json"),
+			JSON.stringify({
+				name: "@earendil-works/pi-coding-agent",
+				bin: { pi: "dist/cli.js" },
+			}),
+			"utf8",
+		);
 		await fs.writeFile(path.join(root, "dist", "cli.js"), "", "utf8");
 
 		try {
@@ -278,7 +296,9 @@ describe("permissions config merge", () => {
 		const warnings: string[] = [];
 
 		try {
-			expect(configModule.readJsonFile(filePath, { onWarning: (message) => warnings.push(message) })).toBeUndefined();
+			expect(
+				configModule.readJsonFile(filePath, { onWarning: (message) => warnings.push(message) }),
+			).toBeUndefined();
 			expect(warnings.some((message) => message.includes(filePath))).toBe(true);
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
@@ -295,7 +315,9 @@ describe("permissions config merge", () => {
 
 		try {
 			configModule.loadConfig(tmp, { onWarning: (message) => warnings.push(message) });
-			expect(warnings.some((message) => message.includes(configPath) && message.includes("expected object root"))).toBe(true);
+			expect(
+				warnings.some((message) => message.includes(configPath) && message.includes("expected object root")),
+			).toBe(true);
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
 		}
@@ -430,9 +452,7 @@ describe("external path canonicalization", () => {
 			expect(() => canonicalizePathToken("cycle-a/secret.txt", cwd)).toThrow(
 				"Unable to safely resolve symlink chain",
 			);
-			expect(() => isPathOutsideCwd("cycle-a/secret.txt", cwd)).toThrow(
-				"Unable to safely resolve symlink chain",
-			);
+			expect(() => isPathOutsideCwd("cycle-a/secret.txt", cwd)).toThrow("Unable to safely resolve symlink chain");
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
 		}
@@ -683,13 +703,22 @@ describe("approval file parsing", () => {
 			{ tool: "bash", scopeType: "tool", scopeValue: "bash", createdAt: now + APPROVAL_CLOCK_SKEW_MS + 1 },
 		];
 		const warnings: string[] = [];
-		expect(extractApprovalRecords({ approvals: invalid }, (warning) => warnings.push(warning), "test", now)).toEqual([]);
+		expect(
+			extractApprovalRecords({ approvals: invalid }, (warning) => warnings.push(warning), "test", now),
+		).toEqual([]);
 		expect(warnings).toHaveLength(invalid.length);
 	});
 
 	it("rejects malformed concrete custom-tool names", () => {
 		const now = 1_000_000;
-		const names = ["extension tool", "extension\u00a0tool", "extension\ntool", "extension\u0000tool", "extension\u007ftool", "extension*tool"];
+		const names = [
+			"extension tool",
+			"extension\u00a0tool",
+			"extension\ntool",
+			"extension\u0000tool",
+			"extension\u007ftool",
+			"extension*tool",
+		];
 		const approvals = names.map((tool) => ({ tool, scopeType: "tool", scopeValue: tool, createdAt: now }));
 
 		expect(extractApprovalRecords({ approvals }, undefined, "test", now)).toEqual([]);
@@ -727,7 +756,14 @@ describe("approval file parsing", () => {
 		const approvals: ApprovalRecord[] = [
 			{ tool: "bash", scopeType: "bash-exact", scopeValue: "git status", createdAt: now },
 			{ tool: "read", scopeType: "path-prefix", scopeValue: "/repo", createdAt: now + APPROVAL_CLOCK_SKEW_MS },
-			{ tool: "mcp", scopeType: "tool", scopeValue: "mcp", createdAt: 0, projectRoot: "/repo", agentName: "default" },
+			{
+				tool: "mcp",
+				scopeType: "tool",
+				scopeValue: "mcp",
+				createdAt: 0,
+				projectRoot: "/repo",
+				agentName: "default",
+			},
 		];
 		expect(extractApprovalRecords({ approvals }, undefined, "test", now)).toEqual(approvals);
 	});
@@ -855,20 +891,28 @@ describe("codemode policy", () => {
 
 describe("sandbox command bypass matching", () => {
 	it("matches explicit localhost Playwright commands only", () => {
-		const patterns = ["^bunx\\s+@playwright/cli(@[^\\s]+)?\\s+--browser\\s+firefox\\s+open\\s+https?://localhost(?::[0-9]+)?(?:/[^\\s]*)?\\s*$"];
+		const patterns = [
+			"^bunx\\s+@playwright/cli(@[^\\s]+)?\\s+--browser\\s+firefox\\s+open\\s+https?://localhost(?::[0-9]+)?(?:/[^\\s]*)?\\s*$",
+		];
 
-		expect(matchSandboxBypassCommand(
-			"bunx @playwright/cli@latest --browser firefox open http://localhost:5173",
-			patterns,
-		)).toBe(patterns[0]);
-		expect(matchSandboxBypassCommand(
-			"bunx @playwright/cli@latest --browser chromium open http://localhost:5173",
-			patterns,
-		)).toBeUndefined();
-		expect(matchSandboxBypassCommand(
-			"bunx @playwright/cli@latest --browser firefox open https://example.com",
-			patterns,
-		)).toBeUndefined();
+		expect(
+			matchSandboxBypassCommand(
+				"bunx @playwright/cli@latest --browser firefox open http://localhost:5173",
+				patterns,
+			),
+		).toBe(patterns[0]);
+		expect(
+			matchSandboxBypassCommand(
+				"bunx @playwright/cli@latest --browser chromium open http://localhost:5173",
+				patterns,
+			),
+		).toBeUndefined();
+		expect(
+			matchSandboxBypassCommand(
+				"bunx @playwright/cli@latest --browser firefox open https://example.com",
+				patterns,
+			),
+		).toBeUndefined();
 	});
 
 	it("supports simple bash-prefix bypass patterns", () => {
@@ -912,7 +956,8 @@ describe("sandboxed command runner", () => {
 					wrapWithSandbox: async (command) => command,
 				},
 				{
-					command: "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$TMPDIR\" \"$XDG_CACHE_HOME\" \"$BUN_INSTALL_CACHE_DIR\" \"$NPM_CONFIG_CACHE\" \"$GOCACHE\" \"$GOTMPDIR\" \"$GOPATH\" \"$GOMODCACHE\"",
+					command:
+						'printf \'%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n\' "$TMPDIR" "$XDG_CACHE_HOME" "$BUN_INSTALL_CACHE_DIR" "$NPM_CONFIG_CACHE" "$GOCACHE" "$GOTMPDIR" "$GOPATH" "$GOMODCACHE"',
 					cwd: process.cwd(),
 					env: { TMPDIR: sandboxTmpDir },
 					onData: (chunk) => chunks.push(chunk.toString("utf8")),
@@ -924,17 +969,19 @@ describe("sandboxed command runner", () => {
 		}
 
 		expect(result.exitCode).toBe(0);
-		expect(chunks.join("")).toBe([
-			sandboxTmpDir,
-			path.join(sandboxTmpDir, "xdg-cache"),
-			path.join(sandboxTmpDir, "bun-cache"),
-			path.join(sandboxTmpDir, "npm-cache"),
-			globalGoCache,
-			sandboxTmpDir,
-			path.join(sandboxTmpDir, "go"),
-			path.join(sandboxTmpDir, "go", "pkg", "mod"),
-			"",
-		].join("\n"));
+		expect(chunks.join("")).toBe(
+			[
+				sandboxTmpDir,
+				path.join(sandboxTmpDir, "xdg-cache"),
+				path.join(sandboxTmpDir, "bun-cache"),
+				path.join(sandboxTmpDir, "npm-cache"),
+				globalGoCache,
+				sandboxTmpDir,
+				path.join(sandboxTmpDir, "go"),
+				path.join(sandboxTmpDir, "go", "pkg", "mod"),
+				"",
+			].join("\n"),
+		);
 	});
 
 	it("lets sandbox env override Go cache redirection", async () => {
@@ -946,7 +993,7 @@ describe("sandboxed command runner", () => {
 				wrapWithSandbox: async (command) => command,
 			},
 			{
-				command: "printf '%s\n%s\n%s\n%s\n' \"$GOCACHE\" \"$GOTMPDIR\" \"$GOPATH\" \"$GOMODCACHE\"",
+				command: 'printf \'%s\n%s\n%s\n%s\n\' "$GOCACHE" "$GOTMPDIR" "$GOPATH" "$GOMODCACHE"',
 				cwd: process.cwd(),
 				env: {
 					GOCACHE: "/tmp/custom-go-cache",
@@ -959,13 +1006,11 @@ describe("sandboxed command runner", () => {
 		);
 
 		expect(result.exitCode).toBe(0);
-		expect(chunks.join("")).toBe([
-			"/tmp/custom-go-cache",
-			"/tmp/custom-go-tmp",
-			"/tmp/custom-go-path",
-			"/tmp/custom-go-mod-cache",
-			"",
-		].join("\n"));
+		expect(chunks.join("")).toBe(
+			["/tmp/custom-go-cache", "/tmp/custom-go-tmp", "/tmp/custom-go-path", "/tmp/custom-go-mod-cache", ""].join(
+				"\n",
+			),
+		);
 	});
 
 	it("uses runtime tmpdir overrides without mutating process env", async () => {
@@ -989,7 +1034,7 @@ describe("sandboxed command runner", () => {
 			runtimeTmpDir,
 		);
 
-		await ops.exec("printf '%s\n%s\n' \"$TMPDIR\" \"${CLAUDE_TMPDIR-unset}\"", process.cwd(), {
+		await ops.exec('printf \'%s\n%s\n\' "$TMPDIR" "${CLAUDE_TMPDIR-unset}"', process.cwd(), {
 			onData: (chunk) => chunks.push(chunk.toString("utf8")),
 		});
 
@@ -1094,9 +1139,11 @@ describe("sandboxed command runner", () => {
 			network: { allowLocalBinding: true },
 		};
 
-		await expect(adapter.initialize(sandboxConfig, "key-1", {
-			onResetError: (err) => resetErrors.push(err),
-		})).rejects.toThrow("stale reset failed");
+		await expect(
+			adapter.initialize(sandboxConfig, "key-1", {
+				onResetError: (err) => resetErrors.push(err),
+			}),
+		).rejects.toThrow("stale reset failed");
 
 		expect(calls).toEqual(["reset"]);
 		expect(resetErrors).toHaveLength(1);
@@ -1126,7 +1173,7 @@ describe("sandboxed command runner", () => {
 		});
 
 		const result = await adapter.runCommand(execution, {
-			command: "printf '%s\\n%s\\n' \"$TMPDIR\" \"$PI_TEST_ADAPTER_ENV\"",
+			command: 'printf \'%s\\n%s\\n\' "$TMPDIR" "$PI_TEST_ADAPTER_ENV"',
 			cwd: process.cwd(),
 			onData: (chunk) => chunks.push(chunk.toString("utf8")),
 		});
@@ -1227,14 +1274,16 @@ describe("sandboxed command runner", () => {
 	it("keeps sandbox health timestamps unchanged when pre-command checks fail", async () => {
 		const healthMonitor = new SandboxHealthMonitor(1_000, 1_000);
 
-		await expect(runSandboxedCommandAfterHealthCheck({
-			healthMonitor,
-			ensureHealthy: async () => {
-				throw new Error("health check failed");
-			},
-			execute: async () => "unreachable",
-			now: () => 3_000,
-		})).rejects.toThrow("health check failed");
+		await expect(
+			runSandboxedCommandAfterHealthCheck({
+				healthMonitor,
+				ensureHealthy: async () => {
+					throw new Error("health check failed");
+				},
+				execute: async () => "unreachable",
+				now: () => 3_000,
+			}),
+		).rejects.toThrow("health check failed");
 
 		expect(healthMonitor.getLastCommandAt()).toBe(1_000);
 	});
@@ -1244,16 +1293,18 @@ describe("sandboxed command runner", () => {
 		const controller = new AbortController();
 		let receivedSignal: AbortSignal | undefined;
 
-		await expect(runSandboxedCommandAfterHealthCheck({
-			healthMonitor,
-			ensureHealthy: async (signal) => {
-				receivedSignal = signal;
-				controller.abort();
-			},
-			execute: async () => "unreachable",
-			signal: controller.signal,
-			now: () => 3_000,
-		})).rejects.toThrow("aborted");
+		await expect(
+			runSandboxedCommandAfterHealthCheck({
+				healthMonitor,
+				ensureHealthy: async (signal) => {
+					receivedSignal = signal;
+					controller.abort();
+				},
+				execute: async () => "unreachable",
+				signal: controller.signal,
+				now: () => 3_000,
+			}),
+		).rejects.toThrow("aborted");
 
 		expect(receivedSignal).toBe(controller.signal);
 		expect(healthMonitor.getLastCommandAt()).toBe(1_000);
@@ -1287,14 +1338,16 @@ describe("sandboxed command runner", () => {
 	it("records sandbox command completion after failed command execution", async () => {
 		const healthMonitor = new SandboxHealthMonitor(1_000, 1_000);
 
-		await expect(runSandboxedCommandAfterHealthCheck({
-			healthMonitor,
-			ensureHealthy: async () => {},
-			execute: async () => {
-				throw new Error("command failed");
-			},
-			now: () => 3_000,
-		})).rejects.toThrow("command failed");
+		await expect(
+			runSandboxedCommandAfterHealthCheck({
+				healthMonitor,
+				ensureHealthy: async () => {},
+				execute: async () => {
+					throw new Error("command failed");
+				},
+				now: () => 3_000,
+			}),
+		).rejects.toThrow("command failed");
 
 		expect(healthMonitor.getLastCommandAt()).toBe(3_000);
 	});
@@ -1325,7 +1378,11 @@ describe("permissions extension sandbox lifecycle", () => {
 		mode: "plan" | "workspace-write" | "full-access";
 		rules?: Rule[];
 		sandbox?: Record<string, unknown>;
-		sandboxManager: { initialize: () => Promise<void>; reset: () => Promise<void>; wrapWithSandbox: (command: string) => Promise<string> };
+		sandboxManager: {
+			initialize: () => Promise<void>;
+			reset: () => Promise<void>;
+			wrapWithSandbox: (command: string) => Promise<string>;
+		};
 		now: () => number;
 		notifications?: string[];
 		approvalSelection?: string | ((choices: string[]) => string | undefined);
@@ -1353,7 +1410,10 @@ describe("permissions extension sandbox lifecycle", () => {
 		Date.now = options.now;
 		const tools = new Map<string, RegisteredTool>();
 		const commands = new Map<string, RegisteredCommand>();
-		const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => Promise<unknown> | unknown>>();
+		const handlers = new Map<
+			string,
+			Array<(event: unknown, ctx: ExtensionContext) => Promise<unknown> | unknown>
+		>();
 		const pi = {
 			registerFlag: () => {},
 			getFlag: () => false,
@@ -1422,10 +1482,9 @@ describe("permissions extension sandbox lifecycle", () => {
 		try {
 			const toolCall = harness.handlers.get("tool_call")?.[0];
 			if (!toolCall) throw new Error("tool_call handler was not registered");
-			const result = await toolCall(
-				{ toolName: "read", input: { path: "README.md" } },
-				harness.ctx,
-			) as { block: true; reason: string } | undefined;
+			const result = (await toolCall({ toolName: "read", input: { path: "README.md" } }, harness.ctx)) as
+				| { block: true; reason: string }
+				| undefined;
 			return { result, approvalOptions };
 		} finally {
 			await harness.restore();
@@ -1455,10 +1514,9 @@ describe("permissions extension sandbox lifecycle", () => {
 
 			const toolCall = harness.handlers.get("tool_call")?.[0];
 			if (!toolCall) throw new Error("tool_call handler was not registered");
-			await expect(toolCall(
-				{ toolName: "read", input: { path: "cycle-a/secret.txt" } },
-				harness.ctx,
-			)).rejects.toThrow("Unable to safely resolve symlink chain");
+			await expect(
+				toolCall({ toolName: "read", input: { path: "cycle-a/secret.txt" } }, harness.ctx),
+			).rejects.toThrow("Unable to safely resolve symlink chain");
 		} finally {
 			await harness.restore();
 		}
@@ -1490,12 +1548,19 @@ describe("permissions extension sandbox lifecycle", () => {
 		const command = `echo safe && ${dangerousSuffix}`;
 		const harness = await setupPermissionsHarness({
 			mode: "full-access",
-			rules: [{ tool: "bash", match: "^echo\\b", action: "allow" }, { tool: "bash", action: "ask" }],
+			rules: [
+				{ tool: "bash", match: "^echo\\b", action: "allow" },
+				{ tool: "bash", action: "ask" },
+			],
 			now: () => 0,
 			approvalSelection: "Allow once",
 			approvalOptions,
 			approvalTitles,
-			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (value: string) => value },
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (value: string) => value,
+			},
 		});
 		try {
 			const toolCall = harness.handlers.get("tool_call")?.[0];
@@ -1518,12 +1583,19 @@ describe("permissions extension sandbox lifecycle", () => {
 		const command = `echo ${"x".repeat(20_000)} && ${target}`;
 		const harness = await setupPermissionsHarness({
 			mode: "full-access",
-			rules: [{ tool: "bash", match: "^echo\\b", action: "allow" }, { tool: "bash", action: "ask" }],
+			rules: [
+				{ tool: "bash", match: "^echo\\b", action: "allow" },
+				{ tool: "bash", action: "ask" },
+			],
 			now: () => 0,
 			approvalSelection: "Allow once",
 			approvalOptions,
 			approvalTitles,
-			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (value: string) => value },
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (value: string) => value,
+			},
 		});
 		try {
 			const toolCall = harness.handlers.get("tool_call")?.[0];
@@ -1547,11 +1619,18 @@ describe("permissions extension sandbox lifecycle", () => {
 		const command = `echo safe && printf '${"x".repeat(20_000)}'\n${finalLine}`;
 		const harness = await setupPermissionsHarness({
 			mode: "full-access",
-			rules: [{ tool: "bash", match: "^echo\\b", action: "allow" }, { tool: "bash", action: "ask" }],
+			rules: [
+				{ tool: "bash", match: "^echo\\b", action: "allow" },
+				{ tool: "bash", action: "ask" },
+			],
 			now: () => 0,
 			approvalSelection: "Allow once",
 			approvalTitles,
-			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (value: string) => value },
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (value: string) => value,
+			},
 		});
 		try {
 			const toolCall = harness.handlers.get("tool_call")?.[0];
@@ -1581,7 +1660,11 @@ describe("permissions extension sandbox lifecycle", () => {
 			approvalOptions,
 			approvalTitles,
 			notifications,
-			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (value: string) => value },
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (value: string) => value,
+			},
 		});
 		try {
 			const toolCall = harness.handlers.get("tool_call")?.[0];
@@ -1592,8 +1675,12 @@ describe("permissions extension sandbox lifecycle", () => {
 			expect(title).toContain("Reusable prefix:\n  ");
 			expect(title).toContain("[Preview shortened: omitted");
 			expect(options[0]).toBe("Allow once");
-			expect(options.some((option) => option.startsWith("Allow `tool-") && option.endsWith("` for this session"))).toBe(true);
-			expect(options.some((option) => option.startsWith("Save `tool-") && option.endsWith("` permanently"))).toBe(true);
+			expect(
+				options.some((option) => option.startsWith("Allow `tool-") && option.endsWith("` for this session")),
+			).toBe(true);
+			expect(options.some((option) => option.startsWith("Save `tool-") && option.endsWith("` permanently"))).toBe(
+				true,
+			);
 			expect(Math.max(...options.map((option) => option.length))).toBeLessThan(80);
 			const prefixNotification = notifications.find((message) => message.includes("bash-prefix:"));
 			expect(prefixNotification).toContain("tool-");
@@ -1607,11 +1694,18 @@ describe("permissions extension sandbox lifecycle", () => {
 		const approvalTitles: string[] = [];
 		const harness = await setupPermissionsHarness({
 			mode: "full-access",
-			rules: [{ tool: "bash", action: "ask" }, { tool: "mcp", action: "ask" }],
+			rules: [
+				{ tool: "bash", action: "ask" },
+				{ tool: "mcp", action: "ask" },
+			],
 			now: () => 0,
 			approvalSelection: "Block",
 			approvalTitles,
-			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (value: string) => value },
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (value: string) => value,
+			},
 		});
 		try {
 			const toolCall = harness.handlers.get("tool_call")?.[0];
@@ -1647,37 +1741,49 @@ describe("permissions extension sandbox lifecycle", () => {
 			rules: [{ tool: "mcp", action: "ask" }] as Rule[],
 			pick: (choices: string[]) => choices.find((choice) => choice === "Allow tool permanently"),
 		},
-	])("warns, suppresses success, rolls back, and prompts again for $name", async ({ toolName, input, rules, pick }) => {
-		const notifications: string[] = [];
-		const approvalOptions: string[][] = [];
-		const harness = await setupPermissionsHarness({
-			mode: "full-access",
-			rules,
-			now: () => 0,
-			notifications,
-			approvalOptions,
-			approvalSelection: pick,
-			writeApprovalFile: () => { throw new Error("injected save failure"); },
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
-		});
-		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
-			await toolCall({ toolName, input }, harness.ctx);
-			await toolCall({ toolName, input }, harness.ctx);
+	])(
+		"warns, suppresses success, rolls back, and prompts again for $name",
+		async ({ toolName, input, rules, pick }) => {
+			const notifications: string[] = [];
+			const approvalOptions: string[][] = [];
+			const harness = await setupPermissionsHarness({
+				mode: "full-access",
+				rules,
+				now: () => 0,
+				notifications,
+				approvalOptions,
+				approvalSelection: pick,
+				writeApprovalFile: () => {
+					throw new Error("injected save failure");
+				},
+				sandboxManager: {
+					initialize: async () => {},
+					reset: async () => {},
+					wrapWithSandbox: async (command: string) => command,
+				},
+			});
+			try {
+				const toolCall = harness.handlers.get("tool_call")?.[0];
+				if (!toolCall) throw new Error("tool_call handler was not registered");
+				await toolCall({ toolName, input }, harness.ctx);
+				await toolCall({ toolName, input }, harness.ctx);
 
-			expect(approvalOptions).toHaveLength(2);
-			expect(notifications.filter((message) => message.includes("Failed to save approvals"))).toHaveLength(2);
-			expect(notifications.some((message) => message.includes("injected save failure"))).toBe(true);
-			expect(notifications.some((message) => message.includes("saved permanently") || message.includes("allowed permanently") || message.includes("approved permanently"))).toBe(false);
-		} finally {
-			await harness.restore();
-		}
-	});
+				expect(approvalOptions).toHaveLength(2);
+				expect(notifications.filter((message) => message.includes("Failed to save approvals"))).toHaveLength(2);
+				expect(notifications.some((message) => message.includes("injected save failure"))).toBe(true);
+				expect(
+					notifications.some(
+						(message) =>
+							message.includes("saved permanently") ||
+							message.includes("allowed permanently") ||
+							message.includes("approved permanently"),
+					),
+				).toBe(false);
+			} finally {
+				await harness.restore();
+			}
+		},
+	);
 
 	it("does not claim saved approvals were cleared when reset persistence fails", async () => {
 		const notifications: string[] = [];
@@ -1764,7 +1870,9 @@ describe("permissions extension sandbox lifecycle", () => {
 			await harness.restore();
 		}
 
-		expect(notifications).toContain("Bash sandbox disabled for this session; bash exec mode: local (block-all-bash)");
+		expect(notifications).toContain(
+			"Bash sandbox disabled for this session; bash exec mode: local (block-all-bash)",
+		);
 	});
 
 	it("keeps the sandbox disabled across the next bash execution", async () => {
@@ -1800,7 +1908,9 @@ describe("permissions extension sandbox lifecycle", () => {
 
 		expect(initializeCount).toBe(1);
 		expect(wrappedCommands).toEqual([]);
-		expect(notifications).toContain("Bash sandbox: disabled by /permissions sandbox disable; bash exec mode: local");
+		expect(notifications).toContain(
+			"Bash sandbox: disabled by /permissions sandbox disable; bash exec mode: local",
+		);
 	});
 
 	it("runs bash rules with sandbox=false without wrapping them", async () => {
@@ -1831,7 +1941,9 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 
 		expect(wrappedCommands).toEqual([]);
-		expect(notifications).toContain("Bash sandbox bypassed for command matching: sandbox=false rule /^printf\\s+bypass$/");
+		expect(notifications).toContain(
+			"Bash sandbox bypassed for command matching: sandbox=false rule /^printf\\s+bypass$/",
+		);
 	});
 
 	it("keeps non-matching commands sandboxed when sandbox=false rules are configured", async () => {
@@ -1854,7 +1966,13 @@ describe("permissions extension sandbox lifecycle", () => {
 			const bashTool = harness.tools.get("bash");
 			if (!bashTool) throw new Error("bash tool was not registered");
 
-			await bashTool.execute("sandboxed-test", { command: "printf sandboxed" }, undefined, undefined, harness.ctx);
+			await bashTool.execute(
+				"sandboxed-test",
+				{ command: "printf sandboxed" },
+				undefined,
+				undefined,
+				harness.ctx,
+			);
 		} finally {
 			await harness.restore();
 		}
@@ -1896,7 +2014,9 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 
 		expect(wrappedCommands).toEqual([]);
-		expect(notifications).toContain("Bash sandbox bypassed for command matching: sandbox=false rule /printf bypass */ (matched shell segment)");
+		expect(notifications).toContain(
+			"Bash sandbox bypassed for command matching: sandbox=false rule /printf bypass */ (matched shell segment)",
+		);
 	});
 
 	it("runs sandbox repair through reset, initialize, and probe", async () => {
@@ -1953,8 +2073,14 @@ describe("permissions extension sandbox lifecycle", () => {
 			await harness.restore();
 		}
 
-		expect(wrappedCommands.some((command) => command.includes(`${harness.sandboxTmpDir}${path.sep}.pi-sandbox-write-probe-`))).toBe(true);
-		expect(wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`))).toBe(false);
+		expect(
+			wrappedCommands.some((command) =>
+				command.includes(`${harness.sandboxTmpDir}${path.sep}.pi-sandbox-write-probe-`),
+			),
+		).toBe(true);
+		expect(
+			wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`)),
+		).toBe(false);
 	});
 
 	it("runs manual sandbox probes against tmpdir by default", async () => {
@@ -1981,8 +2107,14 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 
 		expect(notifications.some((message) => message.includes("TMPDIR writes are allowed"))).toBe(true);
-		expect(wrappedCommands.some((command) => command.includes(`${harness.sandboxTmpDir}${path.sep}.pi-sandbox-write-probe-`))).toBe(true);
-		expect(wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`))).toBe(false);
+		expect(
+			wrappedCommands.some((command) =>
+				command.includes(`${harness.sandboxTmpDir}${path.sep}.pi-sandbox-write-probe-`),
+			),
+		).toBe(true);
+		expect(
+			wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`)),
+		).toBe(false);
 	});
 
 	it("runs manual workspace probes only when explicitly requested", async () => {
@@ -2009,7 +2141,9 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 
 		expect(notifications.some((message) => message.includes("workspace writes are allowed"))).toBe(true);
-		expect(wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`))).toBe(true);
+		expect(
+			wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`)),
+		).toBe(true);
 	});
 
 	it("reports explicit manual workspace probes as skipped when policy does not allow workspace writes", async () => {
@@ -2036,7 +2170,9 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 
 		expect(notifications.some((message) => message.includes("workspace write check skipped"))).toBe(true);
-		expect(wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`))).toBe(false);
+		expect(
+			wrappedCommands.some((command) => command.includes(`${harness.cwd}${path.sep}.pi-sandbox-write-probe-`)),
+		).toBe(false);
 	});
 
 	it("blocks local fallback when sandbox state disappears before execution", async () => {
@@ -2141,8 +2277,12 @@ describe("permissions extension sandbox lifecycle", () => {
 			const bashTool = harness.tools.get("bash");
 			if (!bashTool) throw new Error("bash tool was not registered");
 
-			await expect(bashTool.execute("probe-test-1", { command: "true" }, undefined, undefined, harness.ctx)).rejects.toThrow("automatic repair failed");
-			await expect(bashTool.execute("probe-test-2", { command: "true" }, undefined, undefined, harness.ctx)).rejects.toThrow("automatic repair failed");
+			await expect(
+				bashTool.execute("probe-test-1", { command: "true" }, undefined, undefined, harness.ctx),
+			).rejects.toThrow("automatic repair failed");
+			await expect(
+				bashTool.execute("probe-test-2", { command: "true" }, undefined, undefined, harness.ctx),
+			).rejects.toThrow("automatic repair failed");
 		} finally {
 			await harness.restore();
 		}
@@ -2202,7 +2342,10 @@ describe("permissions extension sandbox lifecycle", () => {
 			if (!userBash) throw new Error("user_bash handler was not registered");
 			const ctx = { ...harness.ctx, hasUI: false } as ExtensionContext;
 
-			const result = await userBash({ command: "npm test", excludeFromContext: true, cwd: harness.cwd }, ctx) as { result?: { output?: string; exitCode?: number } } | undefined;
+			const result = (await userBash(
+				{ command: "npm test", excludeFromContext: true, cwd: harness.cwd },
+				ctx,
+			)) as { result?: { output?: string; exitCode?: number } } | undefined;
 
 			expect(result?.result?.exitCode).toBe(1);
 			expect(result?.result?.output).toContain("Requires confirmation for bash but no UI is available");
@@ -2232,7 +2375,10 @@ describe("permissions extension sandbox lifecycle", () => {
 		try {
 			const userBash = harness.handlers.get("user_bash")?.[0];
 			if (!userBash) throw new Error("user_bash handler was not registered");
-			const result = await userBash({ command: "printf user-bypass", excludeFromContext: false, cwd: harness.cwd }, harness.ctx) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
+			const result = (await userBash(
+				{ command: "printf user-bypass", excludeFromContext: false, cwd: harness.cwd },
+				harness.ctx,
+			)) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
 
 			expect(result?.operations).toBeDefined();
 			await result!.operations!.exec("printf user-bypass", harness.cwd, { onData: () => {} });
@@ -2241,7 +2387,9 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 
 		expect(wrappedCommands).toEqual([]);
-		expect(notifications).toContain("Bash sandbox bypassed for command matching: sandbox=false rule /^printf\\s+user-bypass$/");
+		expect(notifications).toContain(
+			"Bash sandbox bypassed for command matching: sandbox=false rule /^printf\\s+user-bypass$/",
+		);
 	});
 
 	it("keeps intentionally disabled user bash execution local", async () => {
@@ -2287,10 +2435,10 @@ describe("permissions extension sandbox lifecycle", () => {
 		try {
 			const userBash = harness.handlers.get("user_bash")?.[0];
 			if (!userBash) throw new Error("user_bash handler was not registered");
-			const result = await userBash(
+			const result = (await userBash(
 				{ command: "true", excludeFromContext: false, cwd: harness.cwd },
 				harness.ctx,
-			) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
+			)) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
 			if (!result?.operations) throw new Error("sandboxed user bash operations were not returned");
 
 			for (const handler of harness.handlers.get("session_shutdown") ?? []) {
@@ -2324,7 +2472,10 @@ describe("permissions extension sandbox lifecycle", () => {
 		try {
 			const userBash = harness.handlers.get("user_bash")?.[0];
 			if (!userBash) throw new Error("user_bash handler was not registered");
-			const result = await userBash({ command: "printf user-bash", excludeFromContext: false, cwd: harness.cwd }, harness.ctx) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
+			const result = (await userBash(
+				{ command: "printf user-bash", excludeFromContext: false, cwd: harness.cwd },
+				harness.ctx,
+			)) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
 
 			expect(result?.operations).toBeDefined();
 			await result!.operations!.exec("printf user-bash", harness.cwd, { onData: () => {} });
@@ -2431,7 +2582,9 @@ describe("sandbox network config", () => {
 			allowMachLookup: ["com.example.service", "com.example.service"],
 		});
 		expect(compiled.config.network?.allowMachLookup).toContain("com.example.service");
-		expect(compiled.config.network?.allowMachLookup?.filter((value) => value === "com.example.service")).toHaveLength(1);
+		expect(
+			compiled.config.network?.allowMachLookup?.filter((value) => value === "com.example.service"),
+		).toHaveLength(1);
 	});
 
 	it("forwards weaker macOS network isolation for Go TLS verification when configured", () => {
@@ -2481,7 +2634,10 @@ describe("sandbox network config", () => {
 	});
 
 	it("treats plan mode tmpdir writes as healthy without expecting cwd writes", () => {
-		const compiled = compileSandboxConfig({ ...policy, mode: "plan" }, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
+		const compiled = compileSandboxConfig({ ...policy, mode: "plan" }, "/repo", {
+			enabled: true,
+			tmpDir: "/tmp/custom-pi",
+		});
 		expect(isSandboxWriteAllowedForPath(compiled.config, "/tmp/custom-pi")).toBe(true);
 		expect(isSandboxWriteAllowedForPath(compiled.config, "/repo")).toBe(false);
 	});
@@ -2499,29 +2655,33 @@ describe("sandbox network config", () => {
 	});
 
 	it("keeps protected-resource globs from masking workspace write expectations", () => {
-		expect(isSandboxWriteAllowedForPath(
-			{
-				filesystem: {
-					allowWrite: ["/repo"],
-					denyRead: [],
-					denyWrite: ["/repo/**/.env", "/repo/**/.git/hooks/**"],
+		expect(
+			isSandboxWriteAllowedForPath(
+				{
+					filesystem: {
+						allowWrite: ["/repo"],
+						denyRead: [],
+						denyWrite: ["/repo/**/.env", "/repo/**/.git/hooks/**"],
+					},
 				},
-			},
-			"/repo",
-		)).toBe(true);
+				"/repo",
+			),
+		).toBe(true);
 	});
 
 	it("recognizes broad deny globs that block direct workspace writes", () => {
-		expect(isSandboxWriteAllowedForPath(
-			{
-				filesystem: {
-					allowWrite: ["/repo"],
-					denyRead: [],
-					denyWrite: ["/repo/**"],
+		expect(
+			isSandboxWriteAllowedForPath(
+				{
+					filesystem: {
+						allowWrite: ["/repo"],
+						denyRead: [],
+						denyWrite: ["/repo/**"],
+					},
 				},
-			},
-			"/repo",
-		)).toBe(false);
+				"/repo",
+			),
+		).toBe(false);
 	});
 
 	it("expects workspace writes for the default protected-resource sandbox policy", () => {
@@ -2531,7 +2691,9 @@ describe("sandbox network config", () => {
 
 	it("allows Docker Buildx activity writes by default", () => {
 		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
-		expect(compiled.config.filesystem?.allowWrite).toContain(path.join(os.homedir(), ".docker", "buildx", "activity"));
+		expect(compiled.config.filesystem?.allowWrite).toContain(
+			path.join(os.homedir(), ".docker", "buildx", "activity"),
+		);
 	});
 
 	it("uses sandbox DOCKER_CONFIG for Docker Buildx write allowances", () => {
@@ -2545,7 +2707,9 @@ describe("sandbox network config", () => {
 
 	it("allows common Docker Unix sockets by default", () => {
 		const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
-		expect(compiled.config.network?.allowUnixSockets).toContain(path.join(os.homedir(), ".docker", "run", "docker.sock"));
+		expect(compiled.config.network?.allowUnixSockets).toContain(
+			path.join(os.homedir(), ".docker", "run", "docker.sock"),
+		);
 		expect(compiled.config.network?.allowUnixSockets).toContain("/var/run/docker.sock");
 		expect(compiled.config.network?.allowUnixSockets).toContain("/private/var/run/docker.sock");
 	});
@@ -2660,14 +2824,17 @@ describe("sandbox network config", () => {
 		try {
 			await fs.mkdir(repo, { recursive: true });
 			await fs.writeFile(path.join(repo, "go.mod"), "module example.com/pi-go-cache-test\n\ngo 1.18\n");
-			await fs.writeFile(path.join(repo, "main_test.go"), `package gocachetest
+			await fs.writeFile(
+				path.join(repo, "main_test.go"),
+				`package gocachetest
 
 import "testing"
 
 const cacheBust = "${path.basename(tmp)}"
 
 func TestGoCache(t *testing.T) {}
-`);
+`,
+			);
 			process.env.GOCACHE = currentGoCache;
 
 			const compiled = compileSandboxConfig(policy, repo, { enabled: true, network: true });
@@ -2797,13 +2964,18 @@ func TestGoCache(t *testing.T) {}
 		await execTestGit(["init", "-q"], repo);
 		await fs.writeFile(path.join(repo, "README.md"), "# test\n");
 		await execTestGit(["add", "README.md"], repo);
-		await execTestGit(["-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-q", "-m", "initial"], repo);
+		await execTestGit(
+			["-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-q", "-m", "initial"],
+			repo,
+		);
 		await execTestGit(["worktree", "add", "-q", worktree], repo);
 
 		try {
 			const repoRealPath = await fs.realpath(repo);
 			const worktreeGitDir = (await execTestGit(["rev-parse", "--git-dir"], worktree)).stdout.trim();
-			const worktreeGitPath = path.isAbsolute(worktreeGitDir) ? worktreeGitDir : path.resolve(worktree, worktreeGitDir);
+			const worktreeGitPath = path.isAbsolute(worktreeGitDir)
+				? worktreeGitDir
+				: path.resolve(worktree, worktreeGitDir);
 			const protectedPolicy = {
 				...policy,
 				protectedResources: { denyRead: [], denyWrite: [GIT_METADATA_PROTECTED_RESOURCE_MATCH] },
@@ -3026,16 +3198,14 @@ describe("tree-sitter policy integration", () => {
 import { PERMISSIONS_COMPLETIONS } from "./permissions";
 
 test("permissions completions list all accepted subcommands", () => {
-  expect(PERMISSIONS_COMPLETIONS.map((s) => s.value)).toEqual([
-    "help", "approvals", "reset", "mode", "sandbox",
-  ]);
+	expect(PERMISSIONS_COMPLETIONS.map((s) => s.value)).toEqual(["help", "approvals", "reset", "mode", "sandbox"]);
 });
 
 test("permissions completions filter by prefix", () => {
-  const results = PERMISSIONS_COMPLETIONS.filter((s) => s.value.startsWith("ap"));
-  expect(results.map((s) => s.value)).toEqual(["approvals"]);
+	const results = PERMISSIONS_COMPLETIONS.filter((s) => s.value.startsWith("ap"));
+	expect(results.map((s) => s.value)).toEqual(["approvals"]);
 });
 
 test("permissions completions return nothing for unrecognised prefix", () => {
-  expect(PERMISSIONS_COMPLETIONS.filter((s) => s.value.startsWith("xyz"))).toEqual([]);
+	expect(PERMISSIONS_COMPLETIONS.filter((s) => s.value.startsWith("xyz"))).toEqual([]);
 });

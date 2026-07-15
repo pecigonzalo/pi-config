@@ -17,7 +17,14 @@ import {
 } from "./src/actions";
 import { __analysisTest } from "./src/analysis";
 import { CODE_INTEL_SCHEMA } from "./src/constants";
-import { extractDefinitions, extractImportLines, findDefinitionEnd, getDefinitionEnd, matchDefinition, mergeDefinitions } from "./src/extractors";
+import {
+	extractDefinitions,
+	extractImportLines,
+	findDefinitionEnd,
+	getDefinitionEnd,
+	matchDefinition,
+	mergeDefinitions,
+} from "./src/extractors";
 import { buildDetails, formatAction, formatCallHint, textResult, truncateForTool } from "./src/helpers";
 import { hydrateLspDocumentSymbols, identifierAtPosition } from "./src/lsp";
 import { languageForPath } from "./src/source-files";
@@ -25,8 +32,8 @@ import { hydrateTreeSitterDefinitions, parseTreeSitterTagsOutput } from "./src/t
 import type { CodeIntelParams } from "./src/types";
 
 const CODE_INTEL_COMPLETIONS = [
-	{ value: "status",   label: "status: show code intelligence status" },
-	{ value: "map",      label: "map: generate repo map" },
+	{ value: "status", label: "status: show code intelligence status" },
+	{ value: "map", label: "map: generate repo map" },
 	{ value: "repo-map", label: "repo-map: generate repo map (alias for map)" },
 ] as const;
 
@@ -36,7 +43,8 @@ export default function codeIntelExtension(pi: ExtensionAPI) {
 		label: "Code Intel",
 		description:
 			"Generate compact codebase orientation maps and symbol drilldowns without reading whole files into context. Uses LSP when available, with Tree-sitter/syntax fallback.",
-		promptSnippet: "Generate compact repo maps, file outlines, symbol search results, and symbol slices before reading many files.",
+		promptSnippet:
+			"Generate compact repo maps, file outlines, symbol search results, and symbol slices before reading many files.",
 		promptGuidelines: [
 			"Use code_intel repo_map before broad file reads when you need to understand an unfamiliar codebase or locate important APIs.",
 			"Use code_intel outline for file structure and code_intel slice for targeted symbol bodies instead of reading entire files.",
@@ -111,8 +119,7 @@ export default function codeIntelExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("code-intel", {
 		description: "Code intelligence helpers: /code-intel status | /code-intel map [tokens]",
-		getArgumentCompletions: (prefix) =>
-			CODE_INTEL_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
+		getArgumentCompletions: (prefix) => CODE_INTEL_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			const [subcommandRaw, maybeTokens] = args.trim().split(/\s+/, 2);
 			const subcommand = subcommandRaw || "status";

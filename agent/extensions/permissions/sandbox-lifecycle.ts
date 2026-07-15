@@ -5,7 +5,10 @@ export function shouldProbeSandboxAfterIdle(lastCommandAt: number, now: number, 
 export class SandboxHealthMonitor {
 	private lastCommandAt: number;
 
-	constructor(private readonly idleProbeIntervalMs: number, initialCommandAt = Date.now()) {
+	constructor(
+		private readonly idleProbeIntervalMs: number,
+		initialCommandAt = Date.now(),
+	) {
 		this.lastCommandAt = initialCommandAt;
 	}
 

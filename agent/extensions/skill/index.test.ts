@@ -8,7 +8,11 @@ mock.module("@earendil-works/pi-tui", () => ({
 
 mock.module("typebox", () => ({
 	Type: {
-		Object: (properties: unknown, options?: Record<string, unknown>) => ({ type: "object", properties, ...options }),
+		Object: (properties: unknown, options?: Record<string, unknown>) => ({
+			type: "object",
+			properties,
+			...options,
+		}),
 		String: (options?: Record<string, unknown>) => ({ type: "string", ...options }),
 		Optional: (value: unknown) => value,
 		Number: (options?: Record<string, unknown>) => ({ type: "number", ...options }),
@@ -53,8 +57,12 @@ describe("skill extension lookup", () => {
 
 	it("resolves by path when the skill is already loaded", () => {
 		const lookup = __test__.createSkillLookup(loaded);
-		expect(__test__.resolveSkillRecord(lookup, "/repo/.pi/skills/release-checklist.md", "/repo")?.name).toBe("team-skills");
-		expect(__test__.resolveSkillRecord(lookup, ".pi/skills/release-checklist.md", "/repo")?.name).toBe("team-skills");
+		expect(__test__.resolveSkillRecord(lookup, "/repo/.pi/skills/release-checklist.md", "/repo")?.name).toBe(
+			"team-skills",
+		);
+		expect(__test__.resolveSkillRecord(lookup, ".pi/skills/release-checklist.md", "/repo")?.name).toBe(
+			"team-skills",
+		);
 	});
 
 	it("does not resolve unknown skills", () => {

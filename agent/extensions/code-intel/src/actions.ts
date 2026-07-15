@@ -6,7 +6,14 @@ import { EXT_TO_LANGUAGE, LANGUAGE_SPECIFIC_PATTERN_SUPPORT } from "./constants"
 import { buildRepoAnalysis, generateRepoMapOutput, renderScanDiagnostics } from "./analysis";
 import { extractImportLines, findEnclosingDefinition, getDefinitionEnd } from "./extractors";
 import { clampInt } from "./helpers";
-import { formatLspLocations, formatRelativeLocation, getLspService, identifierAtPosition, type LspManagerService, type LspPosition } from "./lsp";
+import {
+	formatLspLocations,
+	formatRelativeLocation,
+	getLspService,
+	identifierAtPosition,
+	type LspManagerService,
+	type LspPosition,
+} from "./lsp";
 import { findProjectRoot, loadRequestedSourceFile } from "./source-files";
 import { commandVersion, extractDefinitionsForLoadedSource } from "./tree-sitter";
 import type { Definition, RepoMapOptions, SourceFile } from "./types";
@@ -33,7 +40,9 @@ export async function buildStatus(pi: ExtensionAPI, ctx: ExtensionContext, signa
 		`- LSP manager: ${formatLspStatus(pi)}`,
 		`- supported extensions: ${Array.from(EXT_TO_LANGUAGE.keys()).sort().join(", ")}`,
 		`- dedicated syntax patterns: ${Array.from(LANGUAGE_SPECIFIC_PATTERN_SUPPORT).sort().join(", ")}`,
-		fallbackPatternLanguages.length > 0 ? `- generic fallback patterns only: ${fallbackPatternLanguages.join(", ")}` : undefined,
+		fallbackPatternLanguages.length > 0
+			? `- generic fallback patterns only: ${fallbackPatternLanguages.join(", ")}`
+			: undefined,
 		"- notes: repo_map is approximate and meant for orientation; read targeted files/ranges before editing.",
 	]
 		.filter(Boolean)
@@ -185,11 +194,17 @@ function parseSymbolQuery(query: string): ParsedSymbolQuery {
 		rest = rest.replace(declMatch[0], " ").trim();
 	}
 
-	const backendMatch = rest.match(/(?:^|\s)backend:(lsp|tree|tree-sitter|syntax|lsp-document-symbol|tree-sitter-tags|syntax-pattern)/i);
+	const backendMatch = rest.match(
+		/(?:^|\s)backend:(lsp|tree|tree-sitter|syntax|lsp-document-symbol|tree-sitter-tags|syntax-pattern)/i,
+	);
 	const backendValue = backendMatch?.[1];
 	if (backendMatch && backendValue !== undefined) {
 		const raw = backendValue.toLowerCase();
-		parsed.backend = raw.startsWith("lsp") ? "lsp-document-symbol" : raw.startsWith("tree") ? "tree-sitter-tags" : "syntax-pattern";
+		parsed.backend = raw.startsWith("lsp")
+			? "lsp-document-symbol"
+			: raw.startsWith("tree")
+				? "tree-sitter-tags"
+				: "syntax-pattern";
 		parsed.filters.push(`backend=${backendValue}`);
 		rest = rest.replace(backendMatch[0], " ").trim();
 	}
@@ -200,7 +215,12 @@ function parseSymbolQuery(query: string): ParsedSymbolQuery {
 
 function matchesSymbolQuery(definition: Definition, query: ParsedSymbolQuery): boolean {
 	if (query.kind && definition.kind.toLowerCase() !== query.kind) return false;
-	if (query.name && definition.name.toLowerCase() !== query.name && !definition.name.toLowerCase().includes(query.name)) return false;
+	if (
+		query.name &&
+		definition.name.toLowerCase() !== query.name &&
+		!definition.name.toLowerCase().includes(query.name)
+	)
+		return false;
 	if (query.file && !definition.file.toLowerCase().includes(query.file)) return false;
 	if (query.declaration !== undefined && isDeclaration(definition) !== query.declaration) return false;
 	if (query.backend && definition.backend !== query.backend) return false;
@@ -233,7 +253,11 @@ export async function sliceSymbol(
 		const analysis = await buildRepoAnalysis(pi, ctx, params, signal);
 		const symbolLower = (params.symbol ?? "").toLowerCase();
 		const candidates = filterBySliceMode(
-			analysis.rankedDefinitions.filter((definition) => definition.name.toLowerCase() === symbolLower || definition.name.toLowerCase().includes(symbolLower)),
+			analysis.rankedDefinitions.filter(
+				(definition) =>
+					definition.name.toLowerCase() === symbolLower ||
+					definition.name.toLowerCase().includes(symbolLower),
+			),
 			sliceMode,
 		);
 		const definition = candidates[0];
@@ -258,21 +282,25 @@ export async function sliceSymbol(
 		}
 	}
 
-	if (!target) return `No matching symbol found${params.symbol ? ` for "${params.symbol}"` : ""} (sliceMode=${sliceMode}).`;
+	if (!target)
+		return `No matching symbol found${params.symbol ? ` for "${params.symbol}"` : ""} (sliceMode=${sliceMode}).`;
 	const lines = target.text.split(/\r?\n/);
 	const endLine = getDefinitionEnd(target.definition, lines, target.file.language);
 	const slice = lines.slice(target.definition.line, endLine + 1).join("\n");
 	const declarationMarker = target.definition.declaration ? " declaration" : "";
 	const header = `${target.file.relPath}:${target.definition.line + 1}-${endLine + 1} │ ${target.definition.kind}${declarationMarker} ${target.definition.name}${target.definition.backend ? ` │ ${target.definition.backend}` : ""}`;
-	const summary = loadedDefinitions ? formatBackendSummary(loadedDefinitions) : formatBackendSummary([target.definition]);
+	const summary = loadedDefinitions
+		? formatBackendSummary(loadedDefinitions)
+		: formatBackendSummary([target.definition]);
 
-	const links = target.definition.declaration && params.symbol
-		? await renderImplementationLinks(pi, ctx, params, params.symbol, signal, {
-				excludeFile: target.file.relPath,
-				excludeLine: target.definition.line,
-				reference: target.definition,
-			})
-		: undefined;
+	const links =
+		target.definition.declaration && params.symbol
+			? await renderImplementationLinks(pi, ctx, params, params.symbol, signal, {
+					excludeFile: target.file.relPath,
+					excludeLine: target.definition.line,
+					reference: target.definition,
+				})
+			: undefined;
 
 	return [header, summary, "", slice, links ? `\n${links}` : undefined].filter(Boolean).join("\n");
 }
@@ -301,21 +329,36 @@ export async function findEnclosingSymbol(
 	].join("\n");
 }
 
-export async function findDefinitionWithLsp(pi: ExtensionAPI, ctx: ExtensionContext, params: RepoMapOptions, signal?: AbortSignal): Promise<string> {
+export async function findDefinitionWithLsp(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	params: RepoMapOptions,
+	signal?: AbortSignal,
+): Promise<string> {
 	const request = await getLspLookupRequest(pi, ctx, params, "definition", signal);
 	if (typeof request === "string") return request;
 	const locations = await request.service.definition(request.path, request.position, { signal });
 	return formatLspLocations(ctx.cwd, `LSP definition for ${formatLspLookupTarget(ctx.cwd, request)}`, locations);
 }
 
-export async function findReferencesWithLsp(pi: ExtensionAPI, ctx: ExtensionContext, params: RepoMapOptions, signal?: AbortSignal): Promise<string> {
+export async function findReferencesWithLsp(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	params: RepoMapOptions,
+	signal?: AbortSignal,
+): Promise<string> {
 	const request = await getLspLookupRequest(pi, ctx, params, "references", signal);
 	if (typeof request === "string") return request;
 	const locations = await request.service.references(request.path, request.position, { signal });
 	return formatLspLocations(ctx.cwd, `LSP references for ${formatLspLookupTarget(ctx.cwd, request)}`, locations);
 }
 
-export async function findHoverWithLsp(pi: ExtensionAPI, ctx: ExtensionContext, params: RepoMapOptions, signal?: AbortSignal): Promise<string> {
+export async function findHoverWithLsp(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	params: RepoMapOptions,
+	signal?: AbortSignal,
+): Promise<string> {
 	const request = await getLspLookupRequest(pi, ctx, params, "hover", signal);
 	if (typeof request === "string") return request;
 	const hover = await request.service.hover(request.path, request.position, { signal });
@@ -376,12 +419,19 @@ async function resolveLspSymbolRequest(
 		const definitions = await extractDefinitionsForLoadedSource(pi, loaded.root, loaded.file, loaded.text, signal);
 		const definition = chooseSymbolDefinition(definitions, symbol);
 		if (!definition) return `No matching symbol found for "${symbol}" in ${loaded.file.relPath}.`;
-		return { service, path: loaded.file.absPath, position: positionForDefinition(definition, loaded.text, symbol), symbol: definition.name };
+		return {
+			service,
+			path: loaded.file.absPath,
+			position: positionForDefinition(definition, loaded.text, symbol),
+			symbol: definition.name,
+		};
 	}
 
 	const analysis = await buildRepoAnalysis(pi, ctx, { ...params, query: symbol }, signal);
 	const lspSupportedDefinitions = service.supportsFile
-		? analysis.rankedDefinitions.filter((definition) => service.supportsFile?.(resolve(analysis.root, definition.file)) ?? true)
+		? analysis.rankedDefinitions.filter(
+				(definition) => service.supportsFile?.(resolve(analysis.root, definition.file)) ?? true,
+			)
 		: analysis.rankedDefinitions;
 	const definition = chooseSymbolDefinition(lspSupportedDefinitions, symbol);
 	if (!definition) return `No matching LSP-supported symbol found for "${symbol}".`;
@@ -445,12 +495,16 @@ function chooseDefinition(
 	}
 	const symbol = params.symbol?.toLowerCase();
 	const definition = symbol
-		? scoped.find((item) => item.name.toLowerCase() === symbol) ?? scoped.find((item) => item.name.toLowerCase().includes(symbol))
+		? (scoped.find((item) => item.name.toLowerCase() === symbol) ??
+			scoped.find((item) => item.name.toLowerCase().includes(symbol)))
 		: scoped[0];
 	return definition ? { file, text, definition } : undefined;
 }
 
-function filterBySliceMode(definitions: Definition[], sliceMode: "implementation" | "declaration" | "any"): Definition[] {
+function filterBySliceMode(
+	definitions: Definition[],
+	sliceMode: "implementation" | "declaration" | "any",
+): Definition[] {
 	if (sliceMode === "any") return definitions;
 	if (sliceMode === "declaration") return definitions.filter(isDeclaration);
 	return definitions.filter((definition) => !isDeclaration(definition));
@@ -548,7 +602,9 @@ function inferCallableArity(definition: Definition): number | undefined {
 		paramsText = groups[0] ?? "";
 	}
 
-	const parts = splitTopLevel(paramsText, ",").map((part) => part.trim()).filter(Boolean);
+	const parts = splitTopLevel(paramsText, ",")
+		.map((part) => part.trim())
+		.filter(Boolean);
 	return parts.length;
 }
 
@@ -599,7 +655,12 @@ function splitTopLevel(text: string, delimiter: string): string[] {
 	return parts;
 }
 
-export function renderTextMatchFallback(file: SourceFile, text: string, definitions: Definition[], symbol: string): string | undefined {
+export function renderTextMatchFallback(
+	file: SourceFile,
+	text: string,
+	definitions: Definition[],
+	symbol: string,
+): string | undefined {
 	const matches = findIdentifierLineMatches(text.split(/\r?\n/), symbol);
 	if (matches.length === 0) return;
 
@@ -635,7 +696,9 @@ export function renderTextMatchFallback(file: SourceFile, text: string, definiti
 				if (containerDef) {
 					const containerEnd = getDefinitionEnd(containerDef, lines, file.language);
 					out.push("");
-					out.push(`${file.relPath}:${containerDef.line + 1}-${containerEnd + 1} │ container type ${containerDef.name}`);
+					out.push(
+						`${file.relPath}:${containerDef.line + 1}-${containerEnd + 1} │ container type ${containerDef.name}`,
+					);
 					out.push(lines.slice(containerDef.line, containerEnd + 1).join("\n"));
 				}
 			}

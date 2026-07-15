@@ -14,7 +14,12 @@
 
 import { complete, type Message } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { BorderedLoader, buildSessionContext, convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
+import {
+	BorderedLoader,
+	buildSessionContext,
+	convertToLlm,
+	serializeConversation,
+} from "@earendil-works/pi-coding-agent";
 
 const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
 
@@ -78,7 +83,8 @@ export default function (pi: ExtensionAPI) {
 					? ""
 					: `\n\n## Compaction Checkpoints\n\n${compactionEntries
 							.map(
-								(entry, index) => `### Compaction ${index + 1} (tokens before: ${entry.tokensBefore})\n${entry.summary}`,
+								(entry, index) =>
+									`### Compaction ${index + 1} (tokens before: ${entry.tokensBefore})\n${entry.summary}`,
 							)
 							.join("\n\n")}`;
 			const handoffContext = `## Conversation History\n\n${conversationText}${compactionSection}\n\n## User's Goal for New Thread\n\n${goal}`;
@@ -114,8 +120,12 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					return response.content
-						.filter((c: unknown): c is { type: "text"; text: string } =>
-							typeof c === "object" && c !== null && (c as { type?: unknown }).type === "text" && typeof (c as { text?: unknown }).text === "string",
+						.filter(
+							(c: unknown): c is { type: "text"; text: string } =>
+								typeof c === "object" &&
+								c !== null &&
+								(c as { type?: unknown }).type === "text" &&
+								typeof (c as { text?: unknown }).text === "string",
 						)
 						.map((c: { text: string }) => c.text)
 						.join("\n");

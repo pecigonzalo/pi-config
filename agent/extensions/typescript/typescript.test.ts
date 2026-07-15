@@ -46,7 +46,11 @@ beforeAll(async () => {
 	}));
 	mock.module("typebox", () => ({
 		Type: {
-			Object: (properties: unknown, options?: Record<string, unknown>) => ({ type: "object", properties, ...options }),
+			Object: (properties: unknown, options?: Record<string, unknown>) => ({
+				type: "object",
+				properties,
+				...options,
+			}),
 			String: (options?: Record<string, unknown>) => ({ type: "string", ...options }),
 			Optional: (value: unknown) => value,
 			Number: (options?: Record<string, unknown>) => ({ type: "number", ...options }),
@@ -59,8 +63,18 @@ beforeAll(async () => {
 		discoverAgents: () => ({ agents: [], errors: [] }),
 		discoverProfiles: () => ({
 			profiles: [
-				{ name: "read-only", description: "Read-only analysis", enabled: true, permissionsProfile: "read-only" },
-				{ name: "read-write", description: "Implementation access", enabled: true, permissionsProfile: "default" },
+				{
+					name: "read-only",
+					description: "Read-only analysis",
+					enabled: true,
+					permissionsProfile: "read-only",
+				},
+				{
+					name: "read-write",
+					description: "Implementation access",
+					enabled: true,
+					permissionsProfile: "default",
+				},
 			],
 			projectProfilesDir: null,
 		}),
@@ -85,7 +99,7 @@ describe("typescript tool helpers", () => {
 		expect(registeredTool?.parameters?.properties.profile.description).toContain("permissions profile");
 		expect(registeredTool?.parameters?.properties.profile.description).toContain("read-only (Read-only analysis)");
 		expect(registeredTool?.promptGuidelines?.length).toBeGreaterThan(0);
-		expect(registeredTool?.promptGuidelines?.join("\n")).toContain("mode \"analysis\"");
+		expect(registeredTool?.promptGuidelines?.join("\n")).toContain('mode "analysis"');
 		expect(registeredTool?.promptGuidelines?.join("\n")).toContain("profile parameter");
 		for (const guideline of registeredTool!.promptGuidelines!) {
 			expect(guideline).toContain("typescript");
@@ -117,7 +131,9 @@ describe("typescript tool helpers", () => {
 
 		expect(__test__.resolvePermissionsProfileName("read-write", "isolated", profiles)).toBe("default");
 		expect(__test__.resolvePermissionsProfileName(undefined, "isolated", profiles)).toBe("isolated");
-		expect(() => __test__.resolvePermissionsProfileName("missing", undefined, profiles)).toThrow("Available profiles: read-write, read-only");
+		expect(() => __test__.resolvePermissionsProfileName("missing", undefined, profiles)).toThrow(
+			"Available profiles: read-write, read-only",
+		);
 	});
 
 	it("parses protocol output lines", () => {
@@ -144,7 +160,9 @@ describe("typescript tool helpers", () => {
 	});
 
 	it("truncates tool output with a byte+line notice", () => {
-		const output = __test__.truncateToolOutput(Array.from({ length: 1200 }, (_, index) => `line-${index}`).join("\n"));
+		const output = __test__.truncateToolOutput(
+			Array.from({ length: 1200 }, (_, index) => `line-${index}`).join("\n"),
+		);
 		expect(output.truncation.truncated).toBe(true);
 		expect(output.text).toContain("[Output truncated: showing");
 	});
@@ -176,24 +194,24 @@ describe("typescript tool helpers", () => {
 		const result = __test__.splitImportsAndBody(
 			'import { readFileSync } from "node:fs";\nimport { join } from "node:path";\n\nconst x = 1;\nreturn x;',
 		);
-		expect(result.imports).toContain('import { readFileSync }');
-		expect(result.imports).toContain('import { join }');
-		expect(result.body).toContain('const x = 1;');
-		expect(result.body).toContain('return x;');
+		expect(result.imports).toContain("import { readFileSync }");
+		expect(result.imports).toContain("import { join }");
+		expect(result.body).toContain("const x = 1;");
+		expect(result.body).toContain("return x;");
 	});
 
 	it("splits code with no imports", () => {
-		const result = __test__.splitImportsAndBody('const x = 1;\nreturn x;');
+		const result = __test__.splitImportsAndBody("const x = 1;\nreturn x;");
 		expect(result.imports).toBe("");
-		expect(result.body).toBe('const x = 1;\nreturn x;');
+		expect(result.body).toBe("const x = 1;\nreturn x;");
 	});
 
 	it("handles multi-line imports", () => {
 		const code = 'import {\n  readFileSync,\n  writeFileSync,\n} from "node:fs";\n\nreturn 1;';
 		const result = __test__.splitImportsAndBody(code);
-		expect(result.imports).toContain('readFileSync');
-		expect(result.imports).toContain('writeFileSync');
-		expect(result.body).toContain('return 1;');
+		expect(result.imports).toContain("readFileSync");
+		expect(result.imports).toContain("writeFileSync");
+		expect(result.body).toContain("return 1;");
 	});
 
 	it("builds user module with imports at top level", () => {
@@ -201,8 +219,8 @@ describe("typescript tool helpers", () => {
 			'import { readFileSync } from "node:fs";\nconst x: string = "hello";\nreturn x;',
 		);
 		expect(mod).toMatch(/^import \{ readFileSync \}/);
-		expect(mod).toContain('export default async function(host: any, state: any) {');
-		expect(mod).toContain('return x;');
+		expect(mod).toContain("export default async function(host: any, state: any) {");
+		expect(mod).toContain("return x;");
 	});
 
 	it("sanitizes artifact names", () => {
@@ -240,5 +258,4 @@ describe("typescript tool helpers", () => {
 			expect(proc.signals).toEqual(["SIGTERM"]);
 		});
 	});
-
 });

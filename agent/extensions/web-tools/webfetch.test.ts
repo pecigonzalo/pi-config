@@ -3,7 +3,9 @@ import { executeWebfetch, WebfetchParams } from "./webfetch";
 
 describe("WebfetchParams", () => {
 	test("constrains timeout schema to whole seconds in the supported range", () => {
-		const timeout = (WebfetchParams as { properties: { timeout: { minimum?: number; maximum?: number; multipleOf?: number } } }).properties.timeout;
+		const timeout = (
+			WebfetchParams as { properties: { timeout: { minimum?: number; maximum?: number; multipleOf?: number } } }
+		).properties.timeout;
 		expect(timeout.minimum).toBe(1);
 		expect(timeout.maximum).toBe(120);
 		expect(timeout.multipleOf).toBe(1);
@@ -16,10 +18,13 @@ describe("executeWebfetch", () => {
 			{ url: "https://example.com/docs" },
 			{
 				fetchImpl: async () =>
-					new Response("<html><head><title>Example Docs</title></head><body><h1>Hello</h1><p>world</p></body></html>", {
-						status: 200,
-						headers: { "content-type": "text/html; charset=utf-8" },
-					}),
+					new Response(
+						"<html><head><title>Example Docs</title></head><body><h1>Hello</h1><p>world</p></body></html>",
+						{
+							status: 200,
+							headers: { "content-type": "text/html; charset=utf-8" },
+						},
+					),
 			},
 		);
 

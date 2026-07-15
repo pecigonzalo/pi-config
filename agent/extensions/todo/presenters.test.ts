@@ -1,9 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-	buildTodoBrowserRows,
-	buildTodoPanelRows,
-	listText,
-} from "./presenters";
+import { buildTodoBrowserRows, buildTodoPanelRows, listText } from "./presenters";
 import { applyPersistedDetails, createTodoState } from "./state";
 
 const FIXED_TIMESTAMP = "2024-01-01T00:00:00.000Z";

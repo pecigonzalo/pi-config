@@ -6,5 +6,5 @@ output:
 
 pre-commit:
   jobs:
-    - name: test
-      run: bun run test
+    - name: check
+      run: bun run check

@@ -41,7 +41,9 @@ export function approvalsCoverPaths(
 	settings: ResolvedApprovalsSettings,
 ): boolean {
 	if (paths.length === 0) return true;
-	return paths.every((p) => approvals.some((a) => approvalScopeMatch(a, toolName, p, projectRoot, agentName, settings)));
+	return paths.every((p) =>
+		approvals.some((a) => approvalScopeMatch(a, toolName, p, projectRoot, agentName, settings)),
+	);
 }
 
 export function dedupeApprovals(approvals: ApprovalRecord[]): ApprovalRecord[] {
@@ -111,7 +113,9 @@ function isApprovalScopeType(value: unknown): value is ApprovalRecord["scopeType
 }
 
 function isConcretePersistedToolName(value: unknown): value is string {
-	return typeof value === "string" && value.length > 0 && !/[\p{White_Space}\u0000-\u001f\u007f-\u009f*]/u.test(value);
+	return (
+		typeof value === "string" && value.length > 0 && !/[\p{White_Space}\u0000-\u001f\u007f-\u009f*]/u.test(value)
+	);
 }
 
 function toApprovalRecord(candidate: unknown, now: number): ApprovalRecord | undefined {
@@ -121,9 +125,17 @@ function toApprovalRecord(candidate: unknown, now: number): ApprovalRecord | und
 	if (!isApprovalScopeType(value.scopeType)) return undefined;
 	if (typeof value.scopeValue !== "string" || value.scopeValue.trim().length === 0) return undefined;
 	if (value.scopeType === "tool" && value.scopeValue !== value.tool) return undefined;
-	if ((value.scopeType === "bash-exact" || value.scopeType === "bash-prefix") && value.tool !== "bash") return undefined;
-	if (value.scopeType === "path-prefix" && !FILESYSTEM_APPROVAL_TOOLS.has(value.tool as RuleToolName)) return undefined;
-	if (typeof value.createdAt !== "number" || !Number.isFinite(value.createdAt) || value.createdAt < 0 || value.createdAt > now + APPROVAL_CLOCK_SKEW_MS) return undefined;
+	if ((value.scopeType === "bash-exact" || value.scopeType === "bash-prefix") && value.tool !== "bash")
+		return undefined;
+	if (value.scopeType === "path-prefix" && !FILESYSTEM_APPROVAL_TOOLS.has(value.tool as RuleToolName))
+		return undefined;
+	if (
+		typeof value.createdAt !== "number" ||
+		!Number.isFinite(value.createdAt) ||
+		value.createdAt < 0 ||
+		value.createdAt > now + APPROVAL_CLOCK_SKEW_MS
+	)
+		return undefined;
 	if (value.projectRoot !== undefined && typeof value.projectRoot !== "string") return undefined;
 	if (value.agentName !== undefined && typeof value.agentName !== "string") return undefined;
 	return {

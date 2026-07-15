@@ -67,41 +67,113 @@ export interface ParsedBash {
 
 const ARITY: Record<string, number> = {
 	// Basic Unix
-	cat: 1, cd: 1, chmod: 1, chown: 1, cp: 1, echo: 1, env: 1, export: 1,
-	grep: 1, head: 1, kill: 1, killall: 1, ln: 1, ls: 1, mkdir: 1, mv: 1,
-	ps: 1, pwd: 1, rm: 1, rmdir: 1, set: 1, sleep: 1, sort: 1, source: 1, tail: 1,
-	tee: 1, touch: 1, uniq: 1, unset: 1, wc: 1, which: 1,
+	cat: 1,
+	cd: 1,
+	chmod: 1,
+	chown: 1,
+	cp: 1,
+	echo: 1,
+	env: 1,
+	export: 1,
+	grep: 1,
+	head: 1,
+	kill: 1,
+	killall: 1,
+	ln: 1,
+	ls: 1,
+	mkdir: 1,
+	mv: 1,
+	ps: 1,
+	pwd: 1,
+	rm: 1,
+	rmdir: 1,
+	set: 1,
+	sleep: 1,
+	sort: 1,
+	source: 1,
+	tail: 1,
+	tee: 1,
+	touch: 1,
+	uniq: 1,
+	unset: 1,
+	wc: 1,
+	which: 1,
 	// Build tools
-	make: 2, task: 2, just: 2,
+	make: 2,
+	task: 2,
+	just: 2,
 	// Node ecosystem
-	bun: 2, "bun run": 3, "bun x": 3,
-	npm: 2, "npm run": 3, "npm exec": 3, "npm init": 3,
-	npx: 2, yarn: 2, "yarn run": 3, "yarn dlx": 3,
-	pnpm: 2, "pnpm run": 3, "pnpm exec": 3, "pnpm dlx": 3,
+	bun: 2,
+	"bun run": 3,
+	"bun x": 3,
+	npm: 2,
+	"npm run": 3,
+	"npm exec": 3,
+	"npm init": 3,
+	npx: 2,
+	yarn: 2,
+	"yarn run": 3,
+	"yarn dlx": 3,
+	pnpm: 2,
+	"pnpm run": 3,
+	"pnpm exec": 3,
+	"pnpm dlx": 3,
 	node: 2,
 	// Go
 	go: 2,
 	// Rust
-	cargo: 2, "cargo add": 3, "cargo run": 3,
+	cargo: 2,
+	"cargo add": 3,
+	"cargo run": 3,
 	rustup: 2,
 	// Python
-	python: 2, python3: 2, pip: 2, pip3: 2,
-	uv: 2, poetry: 2, pytest: 2,
+	python: 2,
+	python3: 2,
+	pip: 2,
+	pip3: 2,
+	uv: 2,
+	poetry: 2,
+	pytest: 2,
 	// Git
-	git: 2, "git config": 3, "git remote": 3, "git stash": 3,
+	git: 2,
+	"git config": 3,
+	"git remote": 3,
+	"git stash": 3,
 	// Docker
-	docker: 2, "docker compose": 3, "docker container": 3,
-	"docker image": 3, "docker volume": 3, "docker network": 3,
-	podman: 2, "podman container": 3,
+	docker: 2,
+	"docker compose": 3,
+	"docker container": 3,
+	"docker image": 3,
+	"docker volume": 3,
+	"docker network": 3,
+	podman: 2,
+	"podman container": 3,
 	// Cloud / infra
-	terraform: 2, "terraform workspace": 3,
-	tofu: 2, "tofu workspace": 3,
-	aws: 3, gcloud: 3, az: 3,
-	kubectl: 2, "kubectl rollout": 3,
-	helm: 2, pulumi: 2,
+	terraform: 2,
+	"terraform workspace": 3,
+	tofu: 2,
+	"tofu workspace": 3,
+	aws: 3,
+	gcloud: 3,
+	az: 3,
+	kubectl: 2,
+	"kubectl rollout": 3,
+	helm: 2,
+	pulumi: 2,
 	// Other
-	brew: 2, gh: 3, sst: 2, turbo: 2, nx: 2, vercel: 2,
-	rg: 1, find: 1, diff: 1, file: 1, stat: 1, du: 1, df: 1,
+	brew: 2,
+	gh: 3,
+	sst: 2,
+	turbo: 2,
+	nx: 2,
+	vercel: 2,
+	rg: 1,
+	find: 1,
+	diff: 1,
+	file: 1,
+	stat: 1,
+	du: 1,
+	df: 1,
 };
 
 /**
@@ -123,8 +195,13 @@ export function arityPrefix(tokens: string[]): string[] {
 
 // Node types that indicate complex/dangerous constructs beyond simple commands
 const COMPLEX_NODE_TYPES = new Set([
-	"for_statement", "while_statement", "if_statement", "case_statement",
-	"subshell", "function_definition", "c_style_for_statement",
+	"for_statement",
+	"while_statement",
+	"if_statement",
+	"case_statement",
+	"subshell",
+	"function_definition",
+	"c_style_for_statement",
 ]);
 
 function isComplexNode(node: any): boolean {
@@ -154,8 +231,11 @@ function extractTokens(node: any): string[] {
 			continue;
 		}
 		// Include word, string, raw_string, number, concatenation, simple_expansion, expansion
-		if (["word", "string", "raw_string", "number", "concatenation",
-			"simple_expansion", "expansion"].includes(child.type)) {
+		if (
+			["word", "string", "raw_string", "number", "concatenation", "simple_expansion", "expansion"].includes(
+				child.type,
+			)
+		) {
 			tokens.push(unquote(child.text));
 		}
 	}

@@ -1,5 +1,9 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { extractCandidatesFromEntries, extractExplicitCandidateFromEntryId, listUserMessageChoices } from "./candidates";
+import {
+	extractCandidatesFromEntries,
+	extractExplicitCandidateFromEntryId,
+	listUserMessageChoices,
+} from "./candidates";
 import { applyClassification } from "./classify";
 import { loadConfig } from "./config";
 import { distillCandidate, distillCandidates } from "./distill";
@@ -20,9 +24,13 @@ function renderCandidate(candidate: LearningCandidate): string {
 		`- Confidence: ${candidate.confidence.toFixed(2)}`,
 		`- Text: ${candidate.text}`,
 		candidate.rawText && candidate.rawText !== candidate.text ? `- Raw: ${candidate.rawText}` : undefined,
-		candidate.distillationStatus ? `- Distillation: ${candidate.distillationStatus}${candidate.distillationError ? ` (${candidate.distillationError})` : ""}` : undefined,
+		candidate.distillationStatus
+			? `- Distillation: ${candidate.distillationStatus}${candidate.distillationError ? ` (${candidate.distillationError})` : ""}`
+			: undefined,
 		`- Evidence: ${evidence?.sessionFile ?? "current session"}${evidence?.entryId ? `#${evidence.entryId}` : ""}`,
-	].filter(Boolean).join("\n");
+	]
+		.filter(Boolean)
+		.join("\n");
 }
 
 function sendLearningMessage(pi: ExtensionAPI, content: string): void {
@@ -65,7 +73,11 @@ function helpText(): string {
 	].join("\n");
 }
 
-async function pickExplicitLearning(pi: ExtensionAPI, ctx: ExtensionCommandContext, runtime: LearnRuntime): Promise<void> {
+async function pickExplicitLearning(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	runtime: LearnRuntime,
+): Promise<void> {
 	const entries = ctx.sessionManager.getBranch();
 	const choices = listUserMessageChoices(entries);
 	if (choices.length === 0) {
@@ -118,7 +130,9 @@ async function review(pi: ExtensionAPI, ctx: ExtensionCommandContext, runtime: L
 	const store = LearningStore.global(config);
 	const entries = ctx.sessionManager.getBranch();
 	const sessionFile = ctx.sessionManager.getSessionFile();
-	const candidates = extractCandidatesFromEntries(entries, sessionFile, ctx.cwd, config.maxCandidatesPerReview).map(applyClassification);
+	const candidates = extractCandidatesFromEntries(entries, sessionFile, ctx.cwd, config.maxCandidatesPerReview).map(
+		applyClassification,
+	);
 
 	if (candidates.length === 0) {
 		ctx.ui.notify("No learning candidates found in the current session", "info");
@@ -182,25 +196,25 @@ async function search(pi: ExtensionAPI, ctx: ExtensionCommandContext, query: str
 
 	sendLearningMessage(
 		pi,
-		[
-			"# Learning search",
-			"",
-			`Query: ${query}`,
-			"",
-			...matches.map(renderCandidate),
-		].join("\n"),
+		["# Learning search", "", `Query: ${query}`, "", ...matches.map(renderCandidate)].join("\n"),
 	);
 }
 
 async function distill(pi: ExtensionAPI, ctx: ExtensionCommandContext, selector?: string): Promise<void> {
 	const config = loadConfig(ctx.cwd);
 	const store = LearningStore.global(config);
-	const found = selector && selector !== "all"
-		? [await store.get(selector)].filter((candidate): candidate is LearningCandidate => !!candidate)
-		: await store.list("pending");
+	const found =
+		selector && selector !== "all"
+			? [await store.get(selector)].filter((candidate): candidate is LearningCandidate => !!candidate)
+			: await store.list("pending");
 
 	if (found.length === 0) {
-		ctx.ui.notify(selector && selector !== "all" ? `No learning candidate found for ${selector}` : "No pending learning candidates to distill", "warning");
+		ctx.ui.notify(
+			selector && selector !== "all"
+				? `No learning candidate found for ${selector}`
+				: "No pending learning candidates to distill",
+			"warning",
+		);
 		return;
 	}
 
@@ -219,7 +233,10 @@ async function distill(pi: ExtensionAPI, ctx: ExtensionCommandContext, selector?
 
 	const distilledCount = result.candidates.filter((candidate) => candidate.distillationStatus === "distilled").length;
 	const failedCount = result.candidates.filter((candidate) => candidate.distillationStatus === "failed").length;
-	ctx.ui.notify(`Distilled ${distilledCount}/${found.length} learning candidate(s)${failedCount ? `; ${failedCount} failed` : ""}`, distilledCount > 0 ? "info" : "warning");
+	ctx.ui.notify(
+		`Distilled ${distilledCount}/${found.length} learning candidate(s)${failedCount ? `; ${failedCount} failed` : ""}`,
+		distilledCount > 0 ? "info" : "warning",
+	);
 	if (selector && selector !== "all") await recall(pi, ctx, selector);
 	else await list(pi, ctx, "pending");
 }
@@ -262,18 +279,22 @@ async function recall(pi: ExtensionAPI, ctx: ExtensionCommandContext, id?: strin
 			renderCandidate(candidate),
 			"",
 			"## Evidence",
-			...candidate.evidence.map((item) => [
-				`- Session: ${item.sessionFile ?? "unknown"}`,
-				`  Entry: ${item.entryId ?? "unknown"}`,
-				`  Time: ${item.timestamp ?? "unknown"}`,
-				`  CWD: ${item.cwd ?? "unknown"}`,
-				`  User: ${item.quote}`,
-				item.previousUserText ? `  Previous user: ${item.previousUserText}` : undefined,
-				item.previousAssistantText ? `  Previous assistant: ${item.previousAssistantText}` : undefined,
-				item.toolCalls?.length ? `  Previous tool calls: ${item.toolCalls.join(", ")}` : undefined,
-				item.nextAssistantText ? `  Next assistant: ${item.nextAssistantText}` : undefined,
-				item.contextEntryIds?.length ? `  Context entries: ${item.contextEntryIds.join(", ")}` : undefined,
-			].filter(Boolean).join("\n")),
+			...candidate.evidence.map((item) =>
+				[
+					`- Session: ${item.sessionFile ?? "unknown"}`,
+					`  Entry: ${item.entryId ?? "unknown"}`,
+					`  Time: ${item.timestamp ?? "unknown"}`,
+					`  CWD: ${item.cwd ?? "unknown"}`,
+					`  User: ${item.quote}`,
+					item.previousUserText ? `  Previous user: ${item.previousUserText}` : undefined,
+					item.previousAssistantText ? `  Previous assistant: ${item.previousAssistantText}` : undefined,
+					item.toolCalls?.length ? `  Previous tool calls: ${item.toolCalls.join(", ")}` : undefined,
+					item.nextAssistantText ? `  Next assistant: ${item.nextAssistantText}` : undefined,
+					item.contextEntryIds?.length ? `  Context entries: ${item.contextEntryIds.join(", ")}` : undefined,
+				]
+					.filter(Boolean)
+					.join("\n"),
+			),
 		].join("\n"),
 	);
 }
@@ -288,7 +309,11 @@ const DESTINATIONS = new Set<LearningDestination>([
 	"undecided",
 ]);
 
-async function route(ctx: ExtensionCommandContext, id: string | undefined, destination: string | undefined): Promise<void> {
+async function route(
+	ctx: ExtensionCommandContext,
+	id: string | undefined,
+	destination: string | undefined,
+): Promise<void> {
 	if (!id || !destination) {
 		ctx.ui.notify("Usage: /learn route <id> <destination>", "warning");
 		return;
@@ -300,10 +325,17 @@ async function route(ctx: ExtensionCommandContext, id: string | undefined, desti
 
 	const config = loadConfig(ctx.cwd);
 	const changed = await LearningStore.global(config).updateDestination(id, destination as LearningDestination);
-	ctx.ui.notify(changed ? `Learning candidate ${id} routed to ${destination}` : `No learning candidate found for ${id}`, changed ? "info" : "warning");
+	ctx.ui.notify(
+		changed ? `Learning candidate ${id} routed to ${destination}` : `No learning candidate found for ${id}`,
+		changed ? "info" : "warning",
+	);
 }
 
-async function setStatus(ctx: ExtensionCommandContext, id: string | undefined, status: LearningCandidate["status"]): Promise<void> {
+async function setStatus(
+	ctx: ExtensionCommandContext,
+	id: string | undefined,
+	status: LearningCandidate["status"],
+): Promise<void> {
 	if (!id) {
 		ctx.ui.notify(`Usage: /learn ${status === "rejected" ? "reject" : "accept"} <id>`, "warning");
 		return;
@@ -311,7 +343,10 @@ async function setStatus(ctx: ExtensionCommandContext, id: string | undefined, s
 
 	const config = loadConfig(ctx.cwd);
 	const changed = await LearningStore.global(config).updateStatus(id, status);
-	ctx.ui.notify(changed ? `Learning candidate ${id} marked ${status}` : `No learning candidate found for ${id}`, changed ? "info" : "warning");
+	ctx.ui.notify(
+		changed ? `Learning candidate ${id} marked ${status}` : `No learning candidate found for ${id}`,
+		changed ? "info" : "warning",
+	);
 }
 
 async function status(pi: ExtensionAPI, ctx: ExtensionCommandContext, runtime: LearnRuntime): Promise<void> {
@@ -345,24 +380,23 @@ async function status(pi: ExtensionAPI, ctx: ExtensionCommandContext, runtime: L
 }
 
 export const LEARN_COMPLETIONS = [
-	{ value: "review",   label: "review: interactively review candidates" },
-	{ value: "list",     label: "list: list learnings" },
-	{ value: "recall",   label: "recall: show a learning by ID" },
-	{ value: "search",   label: "search: search learnings" },
+	{ value: "review", label: "review: interactively review candidates" },
+	{ value: "list", label: "list: list learnings" },
+	{ value: "recall", label: "recall: show a learning by ID" },
+	{ value: "search", label: "search: search learnings" },
 	{ value: "classify", label: "classify: classify a candidate" },
-	{ value: "distill",  label: "distill: distill a candidate into learnings" },
-	{ value: "route",    label: "route: route a candidate to a file" },
-	{ value: "accept",   label: "accept: accept a candidate" },
-	{ value: "reject",   label: "reject: reject a candidate" },
-	{ value: "status",   label: "status: show review stats" },
-	{ value: "help",     label: "help: show usage" },
+	{ value: "distill", label: "distill: distill a candidate into learnings" },
+	{ value: "route", label: "route: route a candidate to a file" },
+	{ value: "accept", label: "accept: accept a candidate" },
+	{ value: "reject", label: "reject: reject a candidate" },
+	{ value: "status", label: "status: show review stats" },
+	{ value: "help", label: "help: show usage" },
 ] as const;
 
 export function registerLearnCommand(pi: ExtensionAPI, runtime: LearnRuntime): void {
 	pi.registerCommand("learn", {
 		description: "Review and manage source-backed learnings from session corrections/advice",
-		getArgumentCompletions: (prefix) =>
-			LEARN_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
+		getArgumentCompletions: (prefix) => LEARN_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			const [command, ...rest] = args.trim().split(/\s+/).filter(Boolean);
 			try {

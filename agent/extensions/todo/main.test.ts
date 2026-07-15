@@ -2,9 +2,7 @@ import { expect, test } from "bun:test";
 import { TODOS_COMPLETIONS } from "./main";
 
 test("todos completions list all accepted subcommands", () => {
-	expect(TODOS_COMPLETIONS.map((s) => s.value)).toEqual([
-		"ready", "all", "todo", "in-progress", "done", "widget",
-	]);
+	expect(TODOS_COMPLETIONS.map((s) => s.value)).toEqual(["ready", "all", "todo", "in-progress", "done", "widget"]);
 });
 
 test("todos completions filter by prefix", () => {

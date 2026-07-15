@@ -29,7 +29,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizeSkillName(name: string): string {
-	return name.trim().replace(/^skill:/i, "").trim().toLowerCase();
+	return name
+		.trim()
+		.replace(/^skill:/i, "")
+		.trim()
+		.toLowerCase();
 }
 
 function normalizePath(filePath: string): string {
@@ -150,7 +154,7 @@ function extractSkillBlocksFromText(text: string, knownSkills: KnownSkillIndex):
 		const location = extractAttributeValue(attributes, "location");
 
 		const byPath = location ? findKnownSkillByPath(knownSkills, location) : null;
-		const byName = name ? knownSkills.byName.get(normalizeSkillName(name)) ?? null : null;
+		const byName = name ? (knownSkills.byName.get(normalizeSkillName(name)) ?? null) : null;
 		const resolved = byPath ?? byName;
 		const resolvedName = name ?? resolved?.name ?? (location ? inferSkillNameFromPath(location) : null);
 		if (!resolvedName) continue;
@@ -174,7 +178,11 @@ function extractTextParts(content: unknown): string[] {
 		.map((part) => part.text as string);
 }
 
-function extractSkillFromSkillToolResult(details: unknown, content: unknown, knownSkills: KnownSkillIndex): SkillRecord | null {
+function extractSkillFromSkillToolResult(
+	details: unknown,
+	content: unknown,
+	knownSkills: KnownSkillIndex,
+): SkillRecord | null {
 	let name: string | undefined;
 	let filePath: string | undefined;
 	let baseDir: string | undefined;
@@ -199,7 +207,7 @@ function extractSkillFromSkillToolResult(details: unknown, content: unknown, kno
 	}
 
 	const knownByPath = filePath ? findKnownSkillByPath(knownSkills, filePath) : null;
-	const knownByName = name ? knownSkills.byName.get(normalizeSkillName(name)) ?? null : null;
+	const knownByName = name ? (knownSkills.byName.get(normalizeSkillName(name)) ?? null) : null;
 	const known = knownByPath ?? knownByName;
 
 	const resolvedName = name ?? known?.name ?? (filePath ? inferSkillNameFromPath(filePath) : null);
@@ -252,7 +260,7 @@ function reconstructActiveSkills(entries: readonly unknown[], knownSkills: Known
 		if (message.toolName === "read") {
 			const directPath = extractReadPathFromInput((message as Record<string, unknown>).input);
 			const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : null;
-			const filePath = directPath ?? (toolCallId ? readToolCallPaths.get(toolCallId) ?? null : null);
+			const filePath = directPath ?? (toolCallId ? (readToolCallPaths.get(toolCallId) ?? null) : null);
 			if (!filePath) continue;
 			const resolved = resolveSkillFromReadPath(filePath, knownSkills);
 			if (resolved) addActiveSkill(activeSkills, resolved);
@@ -278,7 +286,7 @@ function buildSkillPreservationNotice(skills: SkillRecord[]): string {
 		"",
 		"---",
 		"**Skill Preservation Notice**: Skills used before the last compaction may still be relevant.",
-		"Reload them if needed using `skill(name: \"...\")` or `read(path: \"...\")`:",
+		'Reload them if needed using `skill(name: "...")` or `read(path: "...")`:',
 		...lines,
 		"---",
 	].join("\n");

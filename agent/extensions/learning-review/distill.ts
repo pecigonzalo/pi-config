@@ -1,9 +1,25 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { LearningCandidate, LearningDestination, LearningKind, LearningScope } from "./types";
 
-const KINDS: LearningKind[] = ["correction", "preference", "tool-habit", "workflow", "project-convention", "avoidance", "unknown"];
+const KINDS: LearningKind[] = [
+	"correction",
+	"preference",
+	"tool-habit",
+	"workflow",
+	"project-convention",
+	"avoidance",
+	"unknown",
+];
 const SCOPES: LearningScope[] = ["global-user", "project-shared", "project-local", "session-only", "unknown"];
-const DESTINATIONS: LearningDestination[] = ["global-agents", "project-agents", "global-memory", "project-memory", "skill", "discard", "undecided"];
+const DESTINATIONS: LearningDestination[] = [
+	"global-agents",
+	"project-agents",
+	"global-memory",
+	"project-memory",
+	"skill",
+	"discard",
+	"undecided",
+];
 
 type DistilledLearning = {
 	id?: string;
@@ -88,7 +104,10 @@ function extractJson(text: string): unknown | undefined {
 
 function resultObjects(parsed: unknown): Array<Record<string, unknown>> {
 	if (!parsed || typeof parsed !== "object") return [];
-	if (Array.isArray(parsed)) return parsed.filter((item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item));
+	if (Array.isArray(parsed))
+		return parsed.filter(
+			(item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item),
+		);
 	const input = parsed as Record<string, unknown>;
 	for (const key of ["results", "candidates", "learnings", "items"]) {
 		if (Array.isArray(input[key])) return resultObjects(input[key]);
@@ -110,12 +129,15 @@ function parseObject(input: Record<string, unknown>, fallback: LearningCandidate
 	const rawDestination = enumValue(input.destination, DESTINATIONS, fallback.destination);
 	const keep = typeof input.keep === "boolean" ? input.keep : rawDestination !== "discard";
 	const destination = keep ? rawDestination : "discard";
-	const distilledText = stringField(input, ["text", "learning", "normalizedLearning", "normalized_learning", "rule", "summary"])
-		|| (fallback.rawText ?? fallback.text);
+	const distilledText =
+		stringField(input, ["text", "learning", "normalizedLearning", "normalized_learning", "rule", "summary"]) ||
+		(fallback.rawText ?? fallback.text);
 	if (!distilledText) return undefined;
 
 	return {
-		id: stringField(input, ["id", "candidateId", "candidate_id", "sourceCandidateId", "source_candidate_id"]) || fallback.id,
+		id:
+			stringField(input, ["id", "candidateId", "candidate_id", "sourceCandidateId", "source_candidate_id"]) ||
+			fallback.id,
 		keep,
 		text: distilledText.length > 400 ? `${distilledText.slice(0, 397)}...` : distilledText,
 		kind: enumValue(input.kind, KINDS, fallback.kind),
@@ -130,15 +152,28 @@ export function parseDistillationResponse(text: string, fallback: LearningCandid
 	return parseDistillationBatchResponse(text, [fallback]).get(fallback.id);
 }
 
-export function parseDistillationBatchResponse(text: string, fallbacks: LearningCandidate[]): Map<string, DistilledLearning> {
+export function parseDistillationBatchResponse(
+	text: string,
+	fallbacks: LearningCandidate[],
+): Map<string, DistilledLearning> {
 	const parsed = extractJson(text);
 	const objects = resultObjects(parsed);
 	const fallbackById = new Map(fallbacks.map((candidate) => [candidate.id, candidate]));
 	const results = new Map<string, DistilledLearning>();
 
 	for (const [index, object] of objects.entries()) {
-		const explicitId = stringField(object, ["id", "candidateId", "candidate_id", "sourceCandidateId", "source_candidate_id"]);
-		const fallback = explicitId ? fallbackById.get(explicitId) : fallbacks.length === 1 ? fallbacks[0] : fallbacks[index];
+		const explicitId = stringField(object, [
+			"id",
+			"candidateId",
+			"candidate_id",
+			"sourceCandidateId",
+			"source_candidate_id",
+		]);
+		const fallback = explicitId
+			? fallbackById.get(explicitId)
+			: fallbacks.length === 1
+				? fallbacks[0]
+				: fallbacks[index];
 		if (!fallback) continue;
 		const result = parseObject(object, fallback);
 		if (result) results.set(fallback.id, result);
@@ -262,7 +297,10 @@ function markFailed(candidate: LearningCandidate, error: string): LearningCandid
 	};
 }
 
-export async function distillCandidates(candidates: LearningCandidate[], ctx: ExtensionContext): Promise<DistillationBatchResult> {
+export async function distillCandidates(
+	candidates: LearningCandidate[],
+	ctx: ExtensionContext,
+): Promise<DistillationBatchResult> {
 	if (candidates.length === 0) return { candidates: [], failed: [] };
 	const prompt = buildBatchDistillationPrompt(candidates);
 	let responseText = await runCompletion(prompt, ctx);
@@ -287,7 +325,10 @@ export async function distillCandidates(candidates: LearningCandidate[], ctx: Ex
 	return { candidates: next, failed };
 }
 
-export async function distillCandidate(candidate: LearningCandidate, ctx: ExtensionContext): Promise<LearningCandidate> {
+export async function distillCandidate(
+	candidate: LearningCandidate,
+	ctx: ExtensionContext,
+): Promise<LearningCandidate> {
 	const result = await distillCandidates([candidate], ctx);
 	return result.candidates[0] ?? markFailed(candidate, "No distillation result returned");
 }

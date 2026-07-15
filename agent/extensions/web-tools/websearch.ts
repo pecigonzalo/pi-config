@@ -134,7 +134,11 @@ interface ExaMcpRequestConfig {
 
 function isSensitiveQueryParam(paramName: string): boolean {
 	const normalized = paramName.toLowerCase();
-	return normalized === "exaapikey" || /(^|[_-])(api)?key$/i.test(normalized) || /(token|secret|auth|password)/i.test(normalized);
+	return (
+		normalized === "exaapikey" ||
+		/(^|[_-])(api)?key$/i.test(normalized) ||
+		/(token|secret|auth|password)/i.test(normalized)
+	);
 }
 
 function sanitizeEndpointForDetails(endpoint: string): string {
@@ -270,7 +274,10 @@ function renderResults(query: string, mode: WebsearchMode, domains: string[], re
 
 async function callExaMcpSearch(
 	request: { query: string; limit: number; domains: string[]; mode: WebsearchMode },
-	options?: { signal?: AbortSignal; fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response> },
+	options?: {
+		signal?: AbortSignal;
+		fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+	},
 ): Promise<{ response: Response; requestId?: string; text: string; endpoint: string; bodyTruncated: boolean }> {
 	const mcpRequest = buildExaMcpRequest();
 
@@ -296,7 +303,9 @@ async function callExaMcpSearch(
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (/HTTP 401|HTTP 403|auth/i.test(message)) {
-			throw new Error("websearch authentication failed; check EXA_API_KEY or remove it to use unauthenticated MCP access");
+			throw new Error(
+				"websearch authentication failed; check EXA_API_KEY or remove it to use unauthenticated MCP access",
+			);
 		}
 		if (/HTTP 429|rate limit/i.test(message)) {
 			throw new Error("websearch rate limited by provider");
@@ -307,7 +316,10 @@ async function callExaMcpSearch(
 
 export async function executeWebsearch(
 	params: WebsearchParamsInput,
-	options?: { signal?: AbortSignal; fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response> },
+	options?: {
+		signal?: AbortSignal;
+		fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+	},
 ): Promise<{ content: { type: "text"; text: string }[]; details: WebsearchDetails }> {
 	const query = normalizeQuery(params.query);
 	const appliedLimit = normalizeLimit(params.limit);
@@ -315,9 +327,14 @@ export async function executeWebsearch(
 	const domains = normalizeDomainFilters(params.domains);
 	const warnings: string[] = [];
 
-	const { response, requestId, text, endpoint, bodyTruncated } = await callExaMcpSearch({ query, limit: appliedLimit, domains, mode }, options);
+	const { response, requestId, text, endpoint, bodyTruncated } = await callExaMcpSearch(
+		{ query, limit: appliedLimit, domains, mode },
+		options,
+	);
 	if (bodyTruncated) {
-		warnings.push(`MCP response exceeded ${Math.round(MCP_MAX_RESPONSE_BYTES / 1024)}KB and was truncated before parsing.`);
+		warnings.push(
+			`MCP response exceeded ${Math.round(MCP_MAX_RESPONSE_BYTES / 1024)}KB and was truncated before parsing.`,
+		);
 	}
 	const parsedBlocks = parseMcpSearchText(text);
 	const normalizedResults = parsedBlocks
@@ -329,7 +346,9 @@ export async function executeWebsearch(
 		warnings.push("MCP search response did not match the expected result block format.");
 	}
 	if (parsedBlocks.length > normalizedResults.length) {
-		warnings.push(`${parsedBlocks.length - normalizedResults.length} malformed result(s) were discarded during normalization.`);
+		warnings.push(
+			`${parsedBlocks.length - normalizedResults.length} malformed result(s) were discarded during normalization.`,
+		);
 	}
 
 	const rendered = renderResults(query, mode, domains, normalizedResults);
@@ -394,10 +413,14 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 			return executeWebsearch(params, { signal });
 		},
 		renderCall(args, theme) {
-			const rawQuery = typeof (args as { query?: unknown })?.query === "string"
-				? ((args as { query: string }).query ?? "")
-				: "(missing query)";
-			const mode = typeof (args as { mode?: unknown })?.mode === "string" ? ` ${theme.fg("muted", `[${(args as { mode: string }).mode}]`)}` : "";
+			const rawQuery =
+				typeof (args as { query?: unknown })?.query === "string"
+					? ((args as { query: string }).query ?? "")
+					: "(missing query)";
+			const mode =
+				typeof (args as { mode?: unknown })?.mode === "string"
+					? ` ${theme.fg("muted", `[${(args as { mode: string }).mode}]`)}`
+					: "";
 			return new Text(
 				`${theme.fg("toolTitle", theme.bold("websearch"))} ${theme.fg("accent", `\"${clipText(rawQuery, 90)}\"`)}${mode}`,
 				0,
@@ -420,7 +443,10 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 				const count = details?.resultCount ?? 0;
 				const query = details?.query ? ` for \"${details.query}\"` : "";
 				const warnings = details?.warnings?.length
-					? theme.fg("warning", ` · ${details.warnings.length} warning${details.warnings.length === 1 ? "" : "s"}`)
+					? theme.fg(
+							"warning",
+							` · ${details.warnings.length} warning${details.warnings.length === 1 ? "" : "s"}`,
+						)
 					: "";
 				return new Text(
 					`${theme.fg("success", "✓")} ${theme.fg("toolOutput", `${count} result${count === 1 ? "" : "s"}${query}`)}${warnings}${theme.fg("dim", ` (${keyHint("app.tools.expand", "to expand")})`)}`,

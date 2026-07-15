@@ -35,7 +35,11 @@ interface SkillLookup {
 }
 
 function normalizeSkillName(name: string): string {
-	return name.trim().replace(/^skill:/i, "").trim().toLowerCase();
+	return name
+		.trim()
+		.replace(/^skill:/i, "")
+		.trim()
+		.toLowerCase();
 }
 
 function normalizePathKey(filePath: string): string {
@@ -112,11 +116,7 @@ function truncateUtf8(text: string, maxBytes: number): { text: string; truncated
 }
 
 function formatSkillContent(skill: LoadedSkillRecord, content: string, truncated: boolean): string {
-	const parts = [
-		`Loaded skill: ${skill.name}`,
-		`Path: ${skill.filePath}`,
-		`Base directory: ${skill.baseDir}`,
-	];
+	const parts = [`Loaded skill: ${skill.name}`, `Path: ${skill.filePath}`, `Base directory: ${skill.baseDir}`];
 
 	if (skill.description) {
 		parts.push(`Description: ${skill.description}`);
@@ -128,7 +128,9 @@ function formatSkillContent(skill: LoadedSkillRecord, content: string, truncated
 
 	if (truncated) {
 		parts.push("");
-		parts.push(`[Output truncated at ${MAX_SKILL_BYTES / 1024}KB. Use read(path: "${skill.filePath}", offset: ...) if you need more.]`);
+		parts.push(
+			`[Output truncated at ${MAX_SKILL_BYTES / 1024}KB. Use read(path: "${skill.filePath}", offset: ...) if you need more.]`,
+		);
 	}
 
 	return parts.join("\n");
@@ -211,10 +213,10 @@ export default function skillExtension(pi: ExtensionAPI) {
 		name: "skill",
 		label: "Skill",
 		description:
-			"Load a discovered skill by name. Compatibility shim for prompts and harnesses that use skill(name: \"...\"). Returns the skill instructions plus path metadata.",
-		promptSnippet: "Load a discovered skill by name for compatibility with skill(name: \"...\") conventions.",
+			'Load a discovered skill by name. Compatibility shim for prompts and harnesses that use skill(name: "..."). Returns the skill instructions plus path metadata.',
+		promptSnippet: 'Load a discovered skill by name for compatibility with skill(name: "...") conventions.',
 		promptGuidelines: [
-			"Use `skill` when a prompt or skill document explicitly references `skill(name: \"...\")`.",
+			'Use `skill` when a prompt or skill document explicitly references `skill(name: "...")`.',
 			"Prefer `skill` over manual path hunting when you know the skill name but not its file path.",
 			"Use `read` for direct file access when you already know the exact path to SKILL.md or a related file.",
 		],
@@ -258,17 +260,14 @@ export default function skillExtension(pi: ExtensionAPI) {
 		renderCall(args, theme) {
 			const requestedName = typeof args.name === "string" ? args.name.trim() : "";
 			const name = requestedName || "...";
-			return new Text(
-				theme.fg("toolTitle", theme.bold("skill")) + " " + theme.fg("accent", name),
-				0,
-				0,
-			);
+			return new Text(theme.fg("toolTitle", theme.bold("skill")) + " " + theme.fg("accent", name), 0, 0);
 		},
 
 		renderResult(result, _options, theme) {
 			const details = result.details as SkillToolDetails | undefined;
 			const text = result.content[0];
-			const fallbackName = text?.type === "text" ? text.text.match(/^Loaded skill: (.+)$/m)?.[1]?.trim() : undefined;
+			const fallbackName =
+				text?.type === "text" ? text.text.match(/^Loaded skill: (.+)$/m)?.[1]?.trim() : undefined;
 			return new Text(theme.fg("success", getSummaryText({ details }, fallbackName)), 0, 0);
 		},
 	});

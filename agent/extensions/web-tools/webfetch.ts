@@ -86,7 +86,7 @@ function cleanHtml(html: string): string {
 }
 
 function safeCodePointToString(code: number): string | undefined {
-	if (!Number.isInteger(code) || code < 0 || code > 0x10FFFF) return undefined;
+	if (!Number.isInteger(code) || code < 0 || code > 0x10ffff) return undefined;
 	try {
 		return String.fromCodePoint(code);
 	} catch {
@@ -231,7 +231,9 @@ export async function executeWebfetch(
 		const outputTruncation = truncateToolText(outputSource);
 
 		if (bodyRead.truncated) {
-			warnings.push(`Response exceeded ${Math.round(MAX_FETCH_BYTES / 1024)}KB and was truncated before normalization.`);
+			warnings.push(
+				`Response exceeded ${Math.round(MAX_FETCH_BYTES / 1024)}KB and was truncated before normalization.`,
+			);
 		}
 		if (outputTruncation.truncated) {
 			warnings.push("Normalized output was truncated for model context safety.");
@@ -295,13 +297,12 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 			return executeWebfetch(params, { signal });
 		},
 		renderCall(args, theme) {
-			const rawUrl = typeof (args as { url?: unknown })?.url === "string" ? ((args as { url: string }).url ?? "") : "(missing url)";
+			const rawUrl =
+				typeof (args as { url?: unknown })?.url === "string"
+					? ((args as { url: string }).url ?? "")
+					: "(missing url)";
 			const displayUrl = clipText(rawUrl, 100);
-			return new Text(
-				`${theme.fg("toolTitle", theme.bold("webfetch"))} ${theme.fg("accent", displayUrl)}`,
-				0,
-				0,
-			);
+			return new Text(`${theme.fg("toolTitle", theme.bold("webfetch"))} ${theme.fg("accent", displayUrl)}`, 0, 0);
 		},
 		renderResult(result, { expanded, isPartial }, theme) {
 			const textOutput = result.content
@@ -319,7 +320,10 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 				const target = details?.title ?? details?.finalUrl ?? details?.url ?? "URL fetched";
 				const format = details?.appliedFormat ? ` (${details.appliedFormat})` : "";
 				const warnings = details?.warnings?.length
-					? theme.fg("warning", ` · ${details.warnings.length} warning${details.warnings.length === 1 ? "" : "s"}`)
+					? theme.fg(
+							"warning",
+							` · ${details.warnings.length} warning${details.warnings.length === 1 ? "" : "s"}`,
+						)
 					: "";
 				return new Text(
 					`${theme.fg("success", "✓")} ${theme.fg("toolOutput", target)}${theme.fg("muted", format)}${warnings}${theme.fg("dim", ` (${keyHint("app.tools.expand", "to expand")})`)}`,

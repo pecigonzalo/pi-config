@@ -28,12 +28,14 @@ export function constrainCodemodePolicy(
 	activePolicy: EffectivePolicy,
 	selectedPolicy: EffectivePolicy,
 ): EffectivePolicy {
-	const mode = MODE_RESTRICTION[activePolicy.mode] <= MODE_RESTRICTION[selectedPolicy.mode]
-		? activePolicy.mode
-		: selectedPolicy.mode;
-	const externalPath = EXTERNAL_PATH_RESTRICTION[activePolicy.externalPath] <= EXTERNAL_PATH_RESTRICTION[selectedPolicy.externalPath]
-		? activePolicy.externalPath
-		: selectedPolicy.externalPath;
+	const mode =
+		MODE_RESTRICTION[activePolicy.mode] <= MODE_RESTRICTION[selectedPolicy.mode]
+			? activePolicy.mode
+			: selectedPolicy.mode;
+	const externalPath =
+		EXTERNAL_PATH_RESTRICTION[activePolicy.externalPath] <= EXTERNAL_PATH_RESTRICTION[selectedPolicy.externalPath]
+			? activePolicy.externalPath
+			: selectedPolicy.externalPath;
 	return {
 		mode,
 		externalPath,

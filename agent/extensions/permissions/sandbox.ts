@@ -87,11 +87,14 @@ function getGoBuildCacheDir(): string | undefined {
 
 function getPlatformCacheWritePaths(): string[] {
 	const darwinCacheDir = getDarwinUserCacheDir();
-	const darwinLibraryCacheDir = process.platform === "darwin" ? path.join(os.homedir(), "Library", "Caches") : undefined;
+	const darwinLibraryCacheDir =
+		process.platform === "darwin" ? path.join(os.homedir(), "Library", "Caches") : undefined;
 	const goCacheDir = getGoBuildCacheDir();
-	return dedupeStrings([darwinCacheDir, darwinLibraryCacheDir, goCacheDir]
-		.filter((value): value is string => value !== undefined)
-		.flatMap(existingPathAliases));
+	return dedupeStrings(
+		[darwinCacheDir, darwinLibraryCacheDir, goCacheDir]
+			.filter((value): value is string => value !== undefined)
+			.flatMap(existingPathAliases),
+	);
 }
 
 // c-ares-based tools on macOS (for example Nix curl) read DNS settings via
@@ -122,7 +125,11 @@ function formatSandboxHintPath(value: string, cwd: string | undefined): string {
 	return formatted;
 }
 
-function summarizeSandboxHintItems(values: string[] | undefined, cwd?: string, maxItems = SANDBOX_HINT_MAX_ITEMS): string {
+function summarizeSandboxHintItems(
+	values: string[] | undefined,
+	cwd?: string,
+	maxItems = SANDBOX_HINT_MAX_ITEMS,
+): string {
 	const uniqueValues = dedupeStrings((values ?? []).filter((value) => value.trim().length > 0));
 	if (uniqueValues.length === 0) return "(none)";
 
@@ -136,10 +143,11 @@ function summarizeSandboxNetwork(network: SandboxRuntimeConfigLike["network"]): 
 
 	const allowedDomains = network.allowedDomains;
 	const deniedDomains = network.deniedDomains;
-	const domainsBlocked = Array.isArray(allowedDomains)
-		&& allowedDomains.length === 0
-		&& Array.isArray(deniedDomains)
-		&& deniedDomains.length === 0;
+	const domainsBlocked =
+		Array.isArray(allowedDomains) &&
+		allowedDomains.length === 0 &&
+		Array.isArray(deniedDomains) &&
+		deniedDomains.length === 0;
 	const segments: string[] = [];
 
 	if (domainsBlocked) {
@@ -188,7 +196,9 @@ export function formatSandboxPromptHint(
 
 	lines.push(`- Network: ${summarizeSandboxNetwork(config.network)}.`);
 	if (options.tmpDir) {
-		lines.push(`- Prefer temporary/cache writes under TMPDIR=${formatSandboxHintPath(options.tmpDir, options.cwd)}.`);
+		lines.push(
+			`- Prefer temporary/cache writes under TMPDIR=${formatSandboxHintPath(options.tmpDir, options.cwd)}.`,
+		);
 	}
 	lines.push("- If a command needs broader filesystem or network access, ask instead of retrying blocked variants.");
 
@@ -270,18 +280,17 @@ function getGitMetadataWritePaths(cwd: string): string[] {
 }
 
 function getProtectedGitDenyWritePaths(cwd: string): string[] {
-	return dedupeStrings(getGitMetadataWritePaths(cwd).flatMap((metadataPath) => [
-		path.join(metadataPath, "hooks"),
-		path.join(metadataPath, "hooks", "**"),
-		path.join(metadataPath, "config"),
-	]));
+	return dedupeStrings(
+		getGitMetadataWritePaths(cwd).flatMap((metadataPath) => [
+			path.join(metadataPath, "hooks"),
+			path.join(metadataPath, "hooks", "**"),
+			path.join(metadataPath, "config"),
+		]),
+	);
 }
 
 export function getWorkspaceWritePaths(cwd: string): string[] {
-	return dedupeStrings([
-		...existingPathAliases(cwd),
-		...getGitMetadataWritePaths(cwd),
-	]);
+	return dedupeStrings([...existingPathAliases(cwd), ...getGitMetadataWritePaths(cwd)]);
 }
 
 function getDockerBuildxWritePaths(cwd: string, overrides: SandboxSettings | undefined): string[] {
@@ -328,24 +337,28 @@ function dockerHostUnixSocketPath(): string | undefined {
 }
 
 function getDefaultDockerUnixSockets(): string[] {
-	return dedupeStrings([
-		dockerHostUnixSocketPath(),
-		path.join(os.homedir(), ".docker", "run", "docker.sock"),
-		"/var/run/docker.sock",
-		"/private/var/run/docker.sock",
-	].filter((value): value is string => value !== undefined));
+	return dedupeStrings(
+		[
+			dockerHostUnixSocketPath(),
+			path.join(os.homedir(), ".docker", "run", "docker.sock"),
+			"/var/run/docker.sock",
+			"/private/var/run/docker.sock",
+		].filter((value): value is string => value !== undefined),
+	);
 }
 
 function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
 	const overrides = env ?? {};
 	const mergedEnv: NodeJS.ProcessEnv = { ...DEFAULT_SANDBOX_ENV, ...process.env, ...overrides };
 	if (!mergedEnv.GIT_SSH_COMMAND?.trim()) mergedEnv.GIT_SSH_COMMAND = DEFAULT_SANDBOX_ENV.GIT_SSH_COMMAND;
-	const effectiveTmpDir = (overrides.TMPDIR && overrides.TMPDIR.trim().length > 0)
-		? resolveToken(overrides.TMPDIR, cwd)
-		: getEffectiveSandboxTmpDir(cwd, undefined);
+	const effectiveTmpDir =
+		overrides.TMPDIR && overrides.TMPDIR.trim().length > 0
+			? resolveToken(overrides.TMPDIR, cwd)
+			: getEffectiveSandboxTmpDir(cwd, undefined);
 	const xdgCacheHome = overrides.XDG_CACHE_HOME ?? path.join(effectiveTmpDir, "xdg-cache");
 	const xdgStateHome = overrides.XDG_STATE_HOME ?? path.join(effectiveTmpDir, "xdg-state");
-	const npmCache = overrides.NPM_CONFIG_CACHE ?? overrides.npm_config_cache ?? path.join(effectiveTmpDir, "npm-cache");
+	const npmCache =
+		overrides.NPM_CONFIG_CACHE ?? overrides.npm_config_cache ?? path.join(effectiveTmpDir, "npm-cache");
 	const goPath = overrides.GOPATH ?? path.join(effectiveTmpDir, "go");
 	const goModCache = overrides.GOMODCACHE ?? path.join(goPath, "pkg", "mod");
 	const goBuildCache = overrides.GOCACHE ?? getGoBuildCacheDir() ?? path.join(effectiveTmpDir, "go-build-cache");
@@ -437,7 +450,9 @@ function compileSandboxFilesystemConfig(
 	]);
 	const warnings = dedupeStrings([
 		...protectedDenyRead.unmappedPatterns.map((pattern) => formatUnmappedProtectedPatternWarning("read", pattern)),
-		...protectedDenyWrite.unmappedPatterns.map((pattern) => formatUnmappedProtectedPatternWarning("write", pattern)),
+		...protectedDenyWrite.unmappedPatterns.map((pattern) =>
+			formatUnmappedProtectedPatternWarning("write", pattern),
+		),
 	]);
 
 	return {
@@ -454,10 +469,7 @@ function compileSandboxNetworkConfig(
 	networkEnabled: boolean,
 	overrides: SandboxSettings | undefined,
 ): SandboxRuntimeConfigLike["network"] {
-	const socketSet = new Set<string>([
-		...getDefaultDockerUnixSockets(),
-		...(overrides?.allowUnixSockets ?? []),
-	]);
+	const socketSet = new Set<string>([...getDefaultDockerUnixSockets(), ...(overrides?.allowUnixSockets ?? [])]);
 	if (overrides?.allowSshAuthSock && process.env.SSH_AUTH_SOCK) socketSet.add(process.env.SSH_AUTH_SOCK);
 	const allowUnixSockets = [...socketSet];
 	const allowAllUnixSockets = overrides?.allowAllUnixSockets ?? false;
@@ -551,9 +563,9 @@ export interface SandboxCommandExecution {
 function sandboxCommandEnv(execution: SandboxCommandExecution): NodeJS.ProcessEnv | undefined {
 	return execution.tmpDir
 		? {
-			...(execution.env ?? {}),
-			TMPDIR: execution.tmpDir,
-		}
+				...(execution.env ?? {}),
+				TMPDIR: execution.tmpDir,
+			}
 		: execution.env;
 }
 
@@ -621,8 +633,10 @@ function deniedWritePathCoversTarget(writePath: string, targetPath: string): boo
 export function isSandboxWriteAllowedForPath(config: SandboxRuntimeConfigLike, targetPath: string): boolean {
 	const allowWrite = config.filesystem?.allowWrite ?? [];
 	const denyWrite = config.filesystem?.denyWrite ?? [];
-	return allowWrite.some((writePath) => allowedWritePathCoversTarget(writePath, targetPath))
-		&& !denyWrite.some((writePath) => deniedWritePathCoversTarget(writePath, targetPath));
+	return (
+		allowWrite.some((writePath) => allowedWritePathCoversTarget(writePath, targetPath)) &&
+		!denyWrite.some((writePath) => deniedWritePathCoversTarget(writePath, targetPath))
+	);
 }
 
 interface SandboxManagerLeaseState {
@@ -646,7 +660,10 @@ async function withSandboxManagerLease<T>(manager: SandboxManagerLike, work: () 
 	const nextTail = new Promise<void>((resolve) => {
 		release = resolve;
 	});
-	state.tail = previousTail.then(() => nextTail, () => nextTail);
+	state.tail = previousTail.then(
+		() => nextTail,
+		() => nextTail,
+	);
 
 	await previousTail;
 	try {
@@ -688,13 +705,14 @@ export class SandboxRuntimeAdapter {
 
 	createBashOperations(execution: SandboxCommandExecution): BashOperations {
 		return {
-			exec: (command, cwd, options) => this.runCommand(execution, {
-				command,
-				cwd,
-				timeout: options.timeout,
-				signal: options.signal,
-				onData: options.onData,
-			}),
+			exec: (command, cwd, options) =>
+				this.runCommand(execution, {
+					command,
+					cwd,
+					timeout: options.timeout,
+					signal: options.signal,
+					onData: options.onData,
+				}),
 		};
 	}
 
@@ -821,9 +839,9 @@ export function createSandboxedBashOps(
 				cwd,
 				env: runtimeTmpDir
 					? {
-						...(sandboxEnv ?? {}),
-						TMPDIR: runtimeTmpDir,
-					}
+							...(sandboxEnv ?? {}),
+							TMPDIR: runtimeTmpDir,
+						}
 					: sandboxEnv,
 				timeout,
 				signal,

@@ -9,7 +9,14 @@ import { clampInt, looksBinary } from "./helpers";
 import { getLspService, hydrateLspDocumentSymbols, isMappableLspDocumentSymbol, type LspDocumentSymbol } from "./lsp";
 import { findProjectRoot, listSourceFiles } from "./source-files";
 import { commandVersion, extractTreeSitterTags, hydrateTreeSitterDefinitions } from "./tree-sitter";
-import type { CachedAnalysisPayload, Definition, RepoAnalysis, RepoMapOptions, SourceFile, SourceScanDiagnostics } from "./types";
+import type {
+	CachedAnalysisPayload,
+	Definition,
+	RepoAnalysis,
+	RepoMapOptions,
+	SourceFile,
+	SourceScanDiagnostics,
+} from "./types";
 
 const MAX_LSP_DOCUMENT_SYMBOL_FILES = 250;
 
@@ -40,15 +47,25 @@ export async function buildRepoAnalysis(
 	const root = params.root ? resolve(ctx.cwd, params.root) : await findProjectRoot(pi, ctx.cwd, signal);
 	const maxFiles = clampInt(params.maxFiles ?? DEFAULT_MAX_FILES, 1, 25_000);
 	const maxFileBytes = clampInt(params.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, 1_000, 5 * 1024 * 1024);
-	const sourceDiscovery = await listSourceFiles(pi, root, { maxFiles, maxFileBytes, include: params.include, exclude: params.exclude }, signal);
+	const sourceDiscovery = await listSourceFiles(
+		pi,
+		root,
+		{ maxFiles, maxFileBytes, include: params.include, exclude: params.exclude },
+		signal,
+	);
 	const files = sourceDiscovery.files;
 	const backendSignature = await getBackendSignature(pi, signal);
 	const cached = await loadAnalysisCache(root, files, backendSignature, params);
 	if (cached) {
-		const rankedDefinitions = rankDefinitions(cached.definitionsByName, cached.referencesByName, splitQueryTerms(params.query), {
-			query: params.query,
-			preferPath: params.path,
-		});
+		const rankedDefinitions = rankDefinitions(
+			cached.definitionsByName,
+			cached.referencesByName,
+			splitQueryTerms(params.query),
+			{
+				query: params.query,
+				preferPath: params.path,
+			},
+		);
 		return { ...cached, rankedDefinitions };
 	}
 
@@ -85,16 +102,20 @@ export async function buildRepoAnalysis(
 			continue;
 		}
 
-
 		if (looksBinary(text)) continue;
 
 		const lspFileSymbols = lspDocumentSymbols?.byFile.get(file.relPath) ?? [];
 		const treeSitterFileTags = treeSitterTags?.byFile.get(file.relPath);
 		const definitions = mergeDefinitions(
 			hydrateLspDocumentSymbols(file, text, lspFileSymbols),
-			mergeDefinitions(hydrateTreeSitterDefinitions(file, text, treeSitterFileTags?.definitions ?? []), extractDefinitions(file, text)),
+			mergeDefinitions(
+				hydrateTreeSitterDefinitions(file, text, treeSitterFileTags?.definitions ?? []),
+				extractDefinitions(file, text),
+			),
 		);
-		const references = treeSitterFileTags?.references.size ? treeSitterFileTags.references : extractReferences(text);
+		const references = treeSitterFileTags?.references.size
+			? treeSitterFileTags.references
+			: extractReferences(text);
 		analyses.push({ file, definitions, references, text });
 
 		for (const definition of definitions) {
@@ -114,7 +135,15 @@ export async function buildRepoAnalysis(
 		query: params.query,
 		preferPath: params.path,
 	});
-	const analysis = { root, files, diagnostics: sourceDiscovery.diagnostics, analyses, definitionsByName, referencesByName, rankedDefinitions };
+	const analysis = {
+		root,
+		files,
+		diagnostics: sourceDiscovery.diagnostics,
+		analyses,
+		definitionsByName,
+		referencesByName,
+		rankedDefinitions,
+	};
 	await saveAnalysisCache(root, files, backendSignature, analysis).catch(() => undefined);
 	return analysis;
 }
@@ -151,7 +180,7 @@ async function extractLspDocumentSymbols(
 async function getBackendSignature(pi: ExtensionAPI, signal?: AbortSignal): Promise<string> {
 	const treeSitter = await commandVersion(pi, "tree-sitter", ["--version"], signal);
 	const lspDocumentSymbols = getLspService(pi)?.documentSymbols ? "available" : "missing";
-	return `lsp-document-symbols:${lspDocumentSymbols};tree-sitter:${treeSitter.available ? treeSitter.version ?? "available" : "missing"};extractor:${CODE_INTEL_CACHE_VERSION}`;
+	return `lsp-document-symbols:${lspDocumentSymbols};tree-sitter:${treeSitter.available ? (treeSitter.version ?? "available") : "missing"};extractor:${CODE_INTEL_CACHE_VERSION}`;
 }
 
 async function loadAnalysisCache(
@@ -169,7 +198,12 @@ async function loadAnalysisCache(
 		return undefined;
 	}
 
-	if (payload.version !== CODE_INTEL_CACHE_VERSION || payload.root !== root || payload.backendSignature !== backendSignature) return undefined;
+	if (
+		payload.version !== CODE_INTEL_CACHE_VERSION ||
+		payload.root !== root ||
+		payload.backendSignature !== backendSignature
+	)
+		return undefined;
 	if (payload.fileSignature !== fileSignature(files)) return undefined;
 
 	const analyses = payload.analyses.map((item) => ({
@@ -213,7 +247,12 @@ async function loadAnalysisCache(
 	};
 }
 
-async function saveAnalysisCache(root: string, files: SourceFile[], backendSignature: string, analysis: RepoAnalysis): Promise<void> {
+async function saveAnalysisCache(
+	root: string,
+	files: SourceFile[],
+	backendSignature: string,
+	analysis: RepoAnalysis,
+): Promise<void> {
 	const cachePath = getAnalysisCachePath(root);
 	await mkdir(dirname(cachePath), { recursive: true });
 	const payload: CachedAnalysisPayload = {
@@ -308,7 +347,10 @@ function rankDefinitions(
 }
 
 function isMeaningfulIdentifier(name: string): boolean {
-	return name.length >= 8 && (name.includes("_") || name.includes("-") || /[a-z][A-Z]/.test(name) || /[A-Z][a-z]/.test(name));
+	return (
+		name.length >= 8 &&
+		(name.includes("_") || name.includes("-") || /[a-z][A-Z]/.test(name) || /[A-Z][a-z]/.test(name))
+	);
 }
 
 function matchesQuery(definition: Definition, queryTerms: Set<string>): boolean {
@@ -322,18 +364,28 @@ function matchesQuery(definition: Definition, queryTerms: Set<string>): boolean 
 
 function isTestFile(path: string): boolean {
 	const lower = path.toLowerCase();
-	return lower.includes("/test/") || lower.includes("/__tests__/") || lower.endsWith("_test.go") || lower.includes(".test.") || lower.includes(".spec.");
+	return (
+		lower.includes("/test/") ||
+		lower.includes("/__tests__/") ||
+		lower.endsWith("_test.go") ||
+		lower.includes(".test.") ||
+		lower.includes(".spec.")
+	);
 }
 
 export function renderScanDiagnostics(diagnostics: SourceScanDiagnostics, analyzedSourceFiles: number): string[] {
 	const notes: string[] = [];
 	const unsupportedTotal = mapTotal(diagnostics.unsupportedExtensions);
 	if (unsupportedTotal > 0 && analyzedSourceFiles === 0) {
-		notes.push(`No supported source files were analyzed. Unsupported extensions in scope: ${formatCountBreakdown(diagnostics.unsupportedExtensions)}.`);
+		notes.push(
+			`No supported source files were analyzed. Unsupported extensions in scope: ${formatCountBreakdown(diagnostics.unsupportedExtensions)}.`,
+		);
 	}
 
 	if (diagnostics.lspDocumentSymbolsAvailable) {
-		const skipped = diagnostics.lspDocumentSymbolSkippedFiles ? `; skipped ${diagnostics.lspDocumentSymbolSkippedFiles} file(s) over LSP cap` : "";
+		const skipped = diagnostics.lspDocumentSymbolSkippedFiles
+			? `; skipped ${diagnostics.lspDocumentSymbolSkippedFiles} file(s) over LSP cap`
+			: "";
 		notes.push(
 			`LSP document symbols: ${diagnostics.lspDocumentSymbolDefinitions ?? 0} definition(s) from ${diagnostics.lspDocumentSymbolFiles ?? 0} file(s)${skipped}.`,
 		);
@@ -351,7 +403,9 @@ export function renderScanDiagnostics(diagnostics: SourceScanDiagnostics, analyz
 
 	const fallbackTotal = mapTotal(diagnostics.fallbackPatternLanguages);
 	if (fallbackTotal > 0) {
-		notes.push(`Limited extraction for languages using generic fallback patterns: ${formatCountBreakdown(diagnostics.fallbackPatternLanguages, " file(s)")}.`);
+		notes.push(
+			`Limited extraction for languages using generic fallback patterns: ${formatCountBreakdown(diagnostics.fallbackPatternLanguages, " file(s)")}.`,
+		);
 	}
 
 	return notes;
@@ -391,7 +445,9 @@ function renderRepoMap(args: {
 		if (Array.from(selected.values()).reduce((sum, defs) => sum + defs.length, 0) >= maxSymbols) break;
 	}
 
-	const rankedFiles = Array.from(selected.entries()).sort((a, b) => maxScore(b[1]) - maxScore(a[1]) || a[0].localeCompare(b[0]));
+	const rankedFiles = Array.from(selected.entries()).sort(
+		(a, b) => maxScore(b[1]) - maxScore(a[1]) || a[0].localeCompare(b[0]),
+	);
 	const header = [
 		`Repo map for ${args.root}`,
 		`Generated by code-intel structural backend (LSP document symbols when available, then Tree-sitter tags, then syntax fallback; approximate).`,
@@ -408,7 +464,10 @@ function renderRepoMap(args: {
 	let includedSymbols = 0;
 	let includedFiles = 0;
 	for (const [file, definitions] of rankedFiles) {
-		const block = renderFileBlock(file, definitions.sort((a, b) => a.line - b.line));
+		const block = renderFileBlock(
+			file,
+			definitions.sort((a, b) => a.line - b.line),
+		);
 		if (output.length + block.length > budgetChars && includedFiles > 0) break;
 		output += block;
 		includedSymbols += definitions.length;
@@ -416,7 +475,8 @@ function renderRepoMap(args: {
 	}
 
 	if (includedSymbols === 0) {
-		output += "No symbols found. Try increasing maxFiles/maxFileBytes or check backend status with code_intel action=status.\n";
+		output +=
+			"No symbols found. Try increasing maxFiles/maxFileBytes or check backend status with code_intel action=status.\n";
 	} else if (includedSymbols < args.rankedDefinitions.length) {
 		output += `\n⋮...\n[Map truncated to ~${args.mapTokens} tokens: showing ${includedSymbols} of ${args.rankedDefinitions.length} ranked definitions from ${includedFiles} file(s).]\n`;
 	}
@@ -440,7 +500,12 @@ function renderFileBlock(file: string, definitions: Definition[]): string {
 			const key = `${lineNumber}:${text}`;
 			if (seen.has(key)) continue;
 			seen.add(key);
-			const backendMarker = offset === 0 && definition.backend === "lsp-document-symbol" ? "  # lsp" : offset === 0 && definition.backend === "tree-sitter-tags" ? "  # tree-sitter" : "";
+			const backendMarker =
+				offset === 0 && definition.backend === "lsp-document-symbol"
+					? "  # lsp"
+					: offset === 0 && definition.backend === "tree-sitter-tags"
+						? "  # tree-sitter"
+						: "";
 			out += `${String(lineNumber).padStart(5, " ")} │${text}${backendMarker}\n`;
 			lastLine = definition.line + offset;
 		}

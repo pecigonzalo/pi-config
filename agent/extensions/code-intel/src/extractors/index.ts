@@ -171,7 +171,9 @@ export function extractImportLines(lines: string[], language?: string): Array<{ 
 			continue;
 		}
 
-		if (/^(import|export\s+.*from|from\s+\S+\s+import|package\s+|use\s+|mod\s+|require\(|#include\s+)/.test(trimmed)) {
+		if (
+			/^(import|export\s+.*from|from\s+\S+\s+import|package\s+|use\s+|mod\s+|require\(|#include\s+)/.test(trimmed)
+		) {
 			if (language === "go" && trimmed.startsWith("package ")) continue;
 			imports.push({ line: i, text: line.trimEnd() });
 		}

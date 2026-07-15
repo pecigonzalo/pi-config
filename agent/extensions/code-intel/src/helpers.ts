@@ -9,9 +9,12 @@ export function matchCount(text: string, re: RegExp): string | undefined {
 }
 
 export function summarizeResult(params: Partial<CodeIntelParams>, text: string): string {
-	const firstLine = text.split("\n").find((line) => line.trim())?.trim();
+	const firstLine = text
+		.split("\n")
+		.find((line) => line.trim())
+		?.trim();
 	const scope = params.path ?? params.query ?? params.symbol ?? params.root;
-	const prefix = scope ? `${scope}` : firstLine ?? "complete";
+	const prefix = scope ? `${scope}` : (firstLine ?? "complete");
 	const counts = [
 		matchCount(text, /Scanned (\d+) source file/),
 		matchCount(text, /found (\d+) definition/),
@@ -49,7 +52,10 @@ export function quoteArg(value: string): string {
 	return JSON.stringify(value.length > 80 ? `${value.slice(0, 77)}...` : value);
 }
 
-export function formatCallHint(args: Partial<CodeIntelParams>, theme: { fg: (name: any, value: string) => string; bold: (value: string) => string }): string {
+export function formatCallHint(
+	args: Partial<CodeIntelParams>,
+	theme: { fg: (name: any, value: string) => string; bold: (value: string) => string },
+): string {
 	const action = formatAction(args.action);
 	const parts: string[] = [];
 	if (args.path) parts.push(`path=${quoteArg(args.path)}`);

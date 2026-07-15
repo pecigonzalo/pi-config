@@ -26,11 +26,20 @@ function applyConfig(base: LearningReviewConfig, raw: unknown): LearningReviewCo
 	return {
 		...base,
 		promptOnShutdown: typeof input.promptOnShutdown === "boolean" ? input.promptOnShutdown : base.promptOnShutdown,
-		shutdownPromptTimeoutMs: typeof input.shutdownPromptTimeoutMs === "number" ? input.shutdownPromptTimeoutMs : base.shutdownPromptTimeoutMs,
+		shutdownPromptTimeoutMs:
+			typeof input.shutdownPromptTimeoutMs === "number"
+				? input.shutdownPromptTimeoutMs
+				: base.shutdownPromptTimeoutMs,
 		minUserMessages: typeof input.minUserMessages === "number" ? input.minUserMessages : base.minUserMessages,
-		maxCandidatesPerReview: typeof input.maxCandidatesPerReview === "number" ? input.maxCandidatesPerReview : base.maxCandidatesPerReview,
+		maxCandidatesPerReview:
+			typeof input.maxCandidatesPerReview === "number"
+				? input.maxCandidatesPerReview
+				: base.maxCandidatesPerReview,
 		storeDir: typeof input.storeDir === "string" && input.storeDir.trim() ? input.storeDir : base.storeDir,
-		projectMemoryPath: typeof input.projectMemoryPath === "string" && input.projectMemoryPath.trim() ? input.projectMemoryPath : base.projectMemoryPath,
+		projectMemoryPath:
+			typeof input.projectMemoryPath === "string" && input.projectMemoryPath.trim()
+				? input.projectMemoryPath
+				: base.projectMemoryPath,
 	};
 }
 

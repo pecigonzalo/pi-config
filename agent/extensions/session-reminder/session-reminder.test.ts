@@ -3,90 +3,86 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { __test__ } from "./session-reminder";
 
 interface TestTheme {
-  fg(color: string, text: string): string;
-  bold(text: string): string;
+	fg(color: string, text: string): string;
+	bold(text: string): string;
 }
 
 function createContext(options?: { hasUI?: boolean; sessionTitle?: string }): ExtensionContext {
-  const theme: TestTheme = {
-    fg: (color, text) => `<${color}>${text}</${color}>`,
-    bold: (text) => `*${text}*`,
-  };
+	const theme: TestTheme = {
+		fg: (color, text) => `<${color}>${text}</${color}>`,
+		bold: (text) => `*${text}*`,
+	};
 
-  return {
-    hasUI: options?.hasUI ?? false,
-    ui: { theme },
-    sessionManager: {
-      getSessionName: () => options?.sessionTitle,
-    },
-  } as unknown as ExtensionContext;
+	return {
+		hasUI: options?.hasUI ?? false,
+		ui: { theme },
+		sessionManager: {
+			getSessionName: () => options?.sessionTitle,
+		},
+	} as unknown as ExtensionContext;
 }
 
 function withStderrIsTTY(isTTY: boolean, callback: () => void): void {
-  const descriptor = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
+	const descriptor = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
 
-  Object.defineProperty(process.stderr, "isTTY", {
-    configurable: true,
-    value: isTTY,
-  });
+	Object.defineProperty(process.stderr, "isTTY", {
+		configurable: true,
+		value: isTTY,
+	});
 
-  try {
-    callback();
-  } finally {
-    if (descriptor) {
-      Object.defineProperty(process.stderr, "isTTY", descriptor);
-      return;
-    }
+	try {
+		callback();
+	} finally {
+		if (descriptor) {
+			Object.defineProperty(process.stderr, "isTTY", descriptor);
+			return;
+		}
 
-    Reflect.deleteProperty(process.stderr, "isTTY");
-  }
+		Reflect.deleteProperty(process.stderr, "isTTY");
+	}
 }
 
 describe("session reminder", () => {
-  it("returns the session name as the title when present", () => {
-    const ctx = createContext({ sessionTitle: "Ship the exit reminder" });
+	it("returns the session name as the title when present", () => {
+		const ctx = createContext({ sessionTitle: "Ship the exit reminder" });
 
-    expect(__test__.getSessionTitle(ctx)).toBe("Ship the exit reminder");
-  });
+		expect(__test__.getSessionTitle(ctx)).toBe("Ship the exit reminder");
+	});
 
-  it("falls back to an untitled placeholder when the title is missing", () => {
-    const ctx = createContext();
+	it("falls back to an untitled placeholder when the title is missing", () => {
+		const ctx = createContext();
 
-    expect(__test__.getSessionTitle(ctx)).toBe("(untitled)");
-  });
+		expect(__test__.getSessionTitle(ctx)).toBe("(untitled)");
+	});
 
-  it("prints the session title in plain terminal output", () => {
-    const ctx = createContext({ sessionTitle: "Ship the exit reminder" });
+	it("prints the session title in plain terminal output", () => {
+		const ctx = createContext({ sessionTitle: "Ship the exit reminder" });
 
-    withStderrIsTTY(false, () => {
-      expect(__test__.formatSessionReminder(ctx, "abc123", "Ship the exit reminder")).toBe(
-        [
-          "Session: abc123",
-          "Title:   Ship the exit reminder",
-          "Resume:  pi --session-id abc123",
-        ].join("\n"),
-      );
-    });
-  });
+		withStderrIsTTY(false, () => {
+			expect(__test__.formatSessionReminder(ctx, "abc123", "Ship the exit reminder")).toBe(
+				["Session: abc123", "Title:   Ship the exit reminder", "Resume:  pi --session-id abc123"].join("\n"),
+			);
+		});
+	});
 
-  it("prints the session title in styled terminal output", () => {
-    const ctx = createContext({ hasUI: true, sessionTitle: "Ship the exit reminder" });
+	it("prints the session title in styled terminal output", () => {
+		const ctx = createContext({ hasUI: true, sessionTitle: "Ship the exit reminder" });
 
-    withStderrIsTTY(true, () => {
-      expect(__test__.formatSessionReminder(ctx, "abc123", "Ship the exit reminder")).toBe(
-        [
-          "<muted>*Session:*</muted> *abc123*",
-          "<muted>*Title:  *</muted> *Ship the exit reminder*",
-          "<muted>*Resume: *</muted> *pi --session-id abc123*",
-        ].join("\n"),
-      );
-    });
-  });
+		withStderrIsTTY(true, () => {
+			expect(__test__.formatSessionReminder(ctx, "abc123", "Ship the exit reminder")).toBe(
+				[
+					"<muted>*Session:*</muted> *abc123*",
+					"<muted>*Title:  *</muted> *Ship the exit reminder*",
+					"<muted>*Resume: *</muted> *pi --session-id abc123*",
+				].join("\n"),
+			);
+		});
+	});
 
-  it("only writes reminders for process quit shutdowns", () => {
-    expect(__test__.shouldWriteSessionReminder("quit")).toBe(true);
-    for (const reason of ["reload", "new", "resume", "fork"]) {
-      expect(__test__.shouldWriteSessionReminder(reason)).toBe(false);
-    }
-  });
+	it("only writes reminders for process quit shutdowns", () => {
+		expect(__test__.shouldWriteSessionReminder("quit")).toBe(true);
+		for (const reason of ["reload", "new", "resume", "fork"]) {
+			expect(__test__.shouldWriteSessionReminder(reason)).toBe(false);
+		}
+	});
 });

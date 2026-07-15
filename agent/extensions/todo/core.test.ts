@@ -255,7 +255,9 @@ describe("todo core invariants", () => {
 		expect(todo?.history).toHaveLength(MAX_PERSISTED_HISTORY_ENTRIES);
 		expect(todo?.history[0]?.type).toBe("updated");
 		expect(todo?.history[0]?.meta).toMatchObject({ description: "revision-6" });
-		expect(todo?.history.at(-1)?.meta).toMatchObject({ description: `revision-${MAX_PERSISTED_HISTORY_ENTRIES + 5}` });
+		expect(todo?.history.at(-1)?.meta).toMatchObject({
+			description: `revision-${MAX_PERSISTED_HISTORY_ENTRIES + 5}`,
+		});
 
 		const snapshot = harness.execute({ action: "list" }).details;
 		expect(snapshot.todos[0]?.history).toHaveLength(MAX_PERSISTED_HISTORY_ENTRIES);
@@ -330,7 +332,13 @@ describe("todo regressions to fix", () => {
 		harness.execute({ action: "add", title: "Investigate filter", tags: ["Backend"] });
 
 		const parsed = parseTodosCommandArgs("tag:Backend");
-		const visible = filteredTodoPool(harness.state(), parsed.view, parsed.includeArchived, parsed.status, parsed.tag);
+		const visible = filteredTodoPool(
+			harness.state(),
+			parsed.view,
+			parsed.includeArchived,
+			parsed.status,
+			parsed.tag,
+		);
 		expect(visible.map((todo) => todo.id)).toEqual([1]);
 	});
 

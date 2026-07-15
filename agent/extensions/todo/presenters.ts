@@ -103,7 +103,11 @@ function summaryLine(todo: TodoItem, theme?: Theme): string {
 		theme ? theme.fg("accent", `#${todo.id}`) : `#${todo.id}`,
 		styleTitle(todo, theme),
 	];
-	const tags = todo.tags.length ? (theme ? theme.fg("dim", `[${todo.tags.join(",")}]`) : ` [${todo.tags.join(",")}]`) : "";
+	const tags = todo.tags.length
+		? theme
+			? theme.fg("dim", `[${todo.tags.join(",")}]`)
+			: ` [${todo.tags.join(",")}]`
+		: "";
 	const meta = [colorPriority(todo.priority, theme), colorEffort(todo.effort, theme)].join(separator(theme));
 	const archived = todo.archived ? (theme ? theme.fg("dim", "archived") : "archived") : "";
 	const suffix = [tags, meta, archived].filter(Boolean).join(separator(theme));
@@ -209,7 +213,9 @@ export function buildTodoBrowserRows(
 	return projectTodoRows(state, view, includeArchived, status, tag).map((row) => ({
 		todo: row.todo,
 		summary: `${row.summaryPrefix}${summaryLine(row.todo, theme)}`,
-		details: relationshipLines(state, row.todo, row.showParent, theme, true).map((line) => `${row.detailPrefix}${line}`),
+		details: relationshipLines(state, row.todo, row.showParent, theme, true).map(
+			(line) => `${row.detailPrefix}${line}`,
+		),
 		selectedLabel: selectedLabel(row.todo, theme),
 	}));
 }
@@ -231,7 +237,9 @@ function renderFlatTodo(state: TodoState, todo: TodoItem, indent = "  ", showPar
 function renderHierarchy(state: TodoState, pool: TodoItem[]): string[] {
 	return projectHierarchyRows(state, pool).flatMap((row) => [
 		`${row.summaryPrefix}${summaryLine(row.todo)}`,
-		...relationshipLines(state, row.todo, row.showParent, undefined, true).map((line) => `${row.detailPrefix}${line}`),
+		...relationshipLines(state, row.todo, row.showParent, undefined, true).map(
+			(line) => `${row.detailPrefix}${line}`,
+		),
 	]);
 }
 
@@ -244,7 +252,9 @@ export function listText(
 ): string {
 	const pool = filteredTodoPool(state, view, includeArchived, status, tag);
 	if (view === "ready") {
-		return pool.length ? pool.flatMap((todo) => renderFlatTodo(state, todo, "  ", true)).join("\n") : "No ready todos";
+		return pool.length
+			? pool.flatMap((todo) => renderFlatTodo(state, todo, "  ", true)).join("\n")
+			: "No ready todos";
 	}
 
 	const lines = renderHierarchy(state, pool);
