@@ -2,7 +2,7 @@
   "name": "footer",
   "scripts": {
     "generate:footer-schema": "bun run ./generate-schema.ts",
-    "test": "bun test"
+    "test": "bun test --dots --only-failures"
   },
   "dependencies": {
     "zod": "^4.4.3"

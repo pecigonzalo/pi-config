@@ -7,7 +7,7 @@
     ]
   },
   "scripts": {
-    "test": "bun test"
+    "test": "bun test --dots --only-failures"
   },
   "dependencies": {
     "yaml": "^2.8.2"

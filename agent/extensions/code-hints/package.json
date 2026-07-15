@@ -2,7 +2,7 @@
   "name": "code-hints",
   "private": true,
   "scripts": {
-    "test": "bun test"
+    "test": "bun test --dots --only-failures"
   },
   "pi": {
     "extensions": [

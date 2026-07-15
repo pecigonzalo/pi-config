@@ -1,7 +1,7 @@
 {
   "name": "permissions",
   "scripts": {
-    "test": "bun test"
+    "test": "bun test --dots --only-failures"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "^0.0.49",

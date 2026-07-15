@@ -2,7 +2,7 @@
   "name": "lsp-manager",
   "private": true,
   "scripts": {
-    "test": "bun test"
+    "test": "bun test --dots --only-failures"
   },
   "dependencies": {
     "vscode-languageserver-protocol": "^3.17.5"
