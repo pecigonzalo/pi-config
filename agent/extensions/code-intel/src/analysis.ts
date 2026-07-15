@@ -454,7 +454,7 @@ function renderRepoMap(args: {
 		`Scanned ${args.files.length} source file(s); found ${args.rankedDefinitions.length} definition(s).`,
 		...renderScanDiagnostics(args.diagnostics, args.files.length),
 		args.query ? `Query bias: ${args.query}` : undefined,
-		"Use this to choose targeted files/ranges to inspect with read before editing.",
+		"Next: locate candidates with symbols, then use slice; avoid broad file reads.",
 		"",
 	]
 		.filter(Boolean)

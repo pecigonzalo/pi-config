@@ -24,7 +24,7 @@ export const CODE_INTEL_SCHEMA = {
 				"hover",
 			],
 			description:
-				"Operation to run. Use repo_map for compact codebase orientation; outline/symbols/slice/enclosing_symbol for targeted drilldown; definition/references/hover for LSP-backed semantic lookup when available; status for backend availability.",
+				"Operation to run. Orient with repo_map, locate with symbols, inspect bodies with slice, find usages with references, convert usage locations to caller context with enclosing_symbol, then slice callers. Use outline for structure; definition/hover for focused LSP lookup; status for backend availability.",
 		},
 		root: {
 			type: "string",
@@ -45,22 +45,36 @@ export const CODE_INTEL_SCHEMA = {
 			items: { type: "string" },
 			description: "Optional substrings paths must not include.",
 		},
-		query: { type: "string", description: "Optional identifier/file hint for repo_map or symbols." },
+		query: {
+			type: "string",
+			description:
+				"Identifier/file hint for repo_map, or locator query for symbols; follow symbol matches with slice.",
+		},
 		path: {
 			type: "string",
-			description: "File path for outline, slice, enclosing_symbol, definition, references, or hover.",
+			description:
+				"File path for outline, slice, enclosing_symbol, definition, references, or hover. Pass a reference location to enclosing_symbol to identify its caller.",
 		},
-		symbol: { type: "string", description: "Symbol name for slice, definition, references, or hover." },
+		symbol: {
+			type: "string",
+			description:
+				"Symbol name. Prefer slice for its body and references for usages; symbols only locates candidates.",
+		},
 		line: {
 			type: "number",
-			description: "1-based line number for enclosing_symbol or LSP-backed position lookups.",
+			description:
+				"1-based line for enclosing_symbol or LSP lookup. Use enclosing_symbol on a reference line, then slice the returned caller.",
 		},
 		column: { type: "number", description: "1-based column number for LSP-backed position lookups." },
-		limit: { type: "number", description: "Maximum symbol results for symbols action. Default 50." },
+		limit: {
+			type: "number",
+			description:
+				"Maximum locator results for symbols. Default 50; use slice rather than reading matched files broadly.",
+		},
 		sliceMode: {
 			type: "string",
 			enum: ["implementation", "declaration", "any"],
-			description: 'Slice preference for symbol declarations vs implementations. Default "any".',
+			description: 'Preferred body for slice: implementation, declaration, or any. Default "any".',
 		},
 	},
 	required: ["action"],

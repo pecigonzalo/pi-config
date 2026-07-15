@@ -37,20 +37,24 @@ const CODE_INTEL_COMPLETIONS = [
 	{ value: "repo-map", label: "repo-map: generate repo map (alias for map)" },
 ] as const;
 
+export const CODE_INTEL_DESCRIPTION =
+	"Locate symbols and follow compact semantic drilldowns without loading whole files: symbols → slice → references → enclosing_symbol → slice. Uses LSP when available, with Tree-sitter/syntax fallback.";
+export const CODE_INTEL_PROMPT_SNIPPET =
+	"Locate with symbols, inspect bodies with slice, follow usages with references, convert usage locations to caller context with enclosing_symbol, then slice callers; avoid broad file reads.";
+export const CODE_INTEL_PROMPT_GUIDELINES = [
+	"Use repo_map for unfamiliar codebase orientation, then symbols only as a locator; do not follow symbols results with whole-file reads.",
+	"Prefer the sequence symbols → slice → references → enclosing_symbol → slice to inspect definitions, usages, and caller bodies.",
+	"Use outline only for file structure, and definition/hover for focused LSP-backed lookup by symbol or path+line+column.",
+	"Before editing, verify only the exact target with a small read of the relevant lines when code_intel output is insufficient; avoid broad reads.",
+];
+
 export default function codeIntelExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "code_intel",
 		label: "Code Intel",
-		description:
-			"Generate compact codebase orientation maps and symbol drilldowns without reading whole files into context. Uses LSP when available, with Tree-sitter/syntax fallback.",
-		promptSnippet:
-			"Generate compact repo maps, file outlines, symbol search results, and symbol slices before reading many files.",
-		promptGuidelines: [
-			"Use code_intel repo_map before broad file reads when you need to understand an unfamiliar codebase or locate important APIs.",
-			"Use code_intel outline for file structure and code_intel slice for targeted symbol bodies instead of reading entire files.",
-			"Use code_intel definition/references/hover with symbol for LSP-backed lookup by name, or path+line+column for cursor lookup.",
-			"Treat code_intel maps as approximate orientation; use read on targeted files/ranges before editing.",
-		],
+		description: CODE_INTEL_DESCRIPTION,
+		promptSnippet: CODE_INTEL_PROMPT_SNIPPET,
+		promptGuidelines: CODE_INTEL_PROMPT_GUIDELINES,
 		parameters: CODE_INTEL_SCHEMA as any,
 		renderCall(args, theme) {
 			return new Text(formatCallHint(args as Partial<CodeIntelParams>, theme), 0, 0);
@@ -147,6 +151,10 @@ export default function codeIntelExtension(pi: ExtensionAPI) {
 
 export const __test = {
 	CODE_INTEL_COMPLETIONS,
+	CODE_INTEL_DESCRIPTION,
+	CODE_INTEL_PROMPT_SNIPPET,
+	CODE_INTEL_PROMPT_GUIDELINES,
+	CODE_INTEL_SCHEMA,
 	extractDefinitions,
 	matchDefinition,
 	rankDefinitions: __analysisTest.rankDefinitions,
@@ -172,4 +180,5 @@ export const __test = {
 	inferCallableArity: __actionsTest.inferCallableArity,
 	chooseReferenceDeclaration: __actionsTest.chooseReferenceDeclaration,
 	formatLspLocations: __actionsTest.formatLspLocations,
+	ACTION_NEXT_STEPS: __actionsTest.ACTION_NEXT_STEPS,
 };

@@ -18,6 +18,13 @@ import { findProjectRoot, loadRequestedSourceFile } from "./source-files";
 import { commandVersion, extractDefinitionsForLoadedSource } from "./tree-sitter";
 import type { Definition, RepoMapOptions, SourceFile } from "./types";
 
+export const ACTION_NEXT_STEPS = {
+	symbols: "Next: use slice on the best match; do not read the whole file.",
+	slice: "Next: use references to find usages; verify only small target ranges before editing.",
+	references: "Next: run enclosing_symbol on a relevant location to identify its caller.",
+	enclosingSymbol: "Next: use slice on this enclosing symbol to inspect the caller body.",
+};
+
 export async function buildStatus(pi: ExtensionAPI, ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {
 	const root = await findProjectRoot(pi, ctx.cwd, signal);
 	const treeSitter = await commandVersion(pi, "tree-sitter", ["--version"], signal);
@@ -145,6 +152,7 @@ export async function findSymbols(
 		);
 		out.push(`  ${definition.signatureLines[0]?.trim() ?? definition.text.trim()}`);
 	}
+	out.push("", ACTION_NEXT_STEPS.symbols);
 	return out.join("\n");
 }
 
@@ -302,7 +310,9 @@ export async function sliceSymbol(
 				})
 			: undefined;
 
-	return [header, summary, "", slice, links ? `\n${links}` : undefined].filter(Boolean).join("\n");
+	return [header, summary, "", slice, links ? `\n${links}` : undefined, "", ACTION_NEXT_STEPS.slice]
+		.filter(Boolean)
+		.join("\n");
 }
 
 export async function findEnclosingSymbol(
@@ -326,6 +336,8 @@ export async function findEnclosingSymbol(
 		`${enclosing.definition.kind} ${enclosing.definition.name}${enclosing.definition.declaration ? " (declaration)" : ""}${enclosing.definition.backend ? ` (${enclosing.definition.backend})` : ""}`,
 		`range: ${enclosing.definition.line + 1}-${enclosing.endLine + 1}`,
 		`signature: ${enclosing.definition.signatureLines.map((line) => line.trim()).join(" ")}`,
+		"",
+		ACTION_NEXT_STEPS.enclosingSymbol,
 	].join("\n");
 }
 
@@ -350,7 +362,12 @@ export async function findReferencesWithLsp(
 	const request = await getLspLookupRequest(pi, ctx, params, "references", signal);
 	if (typeof request === "string") return request;
 	const locations = await request.service.references(request.path, request.position, { signal });
-	return formatLspLocations(ctx.cwd, `LSP references for ${formatLspLookupTarget(ctx.cwd, request)}`, locations);
+	const output = formatLspLocations(
+		ctx.cwd,
+		`LSP references for ${formatLspLookupTarget(ctx.cwd, request)}`,
+		locations,
+	);
+	return `${output}\n\n${ACTION_NEXT_STEPS.references}`;
 }
 
 export async function findHoverWithLsp(
@@ -742,6 +759,7 @@ function escapeRegExp(value: string): string {
 }
 
 export const __actionsTest = {
+	ACTION_NEXT_STEPS,
 	filterBySliceMode,
 	isDeclaration,
 	formatBackendSummary,

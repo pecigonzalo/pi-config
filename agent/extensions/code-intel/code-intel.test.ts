@@ -420,6 +420,50 @@ locals {
 	});
 });
 
+describe("code-intel workflow guidance", () => {
+	test("prompt metadata prescribes semantic drilldown before targeted reads", () => {
+		const guidance = [
+			__test.CODE_INTEL_DESCRIPTION,
+			__test.CODE_INTEL_PROMPT_SNIPPET,
+			...__test.CODE_INTEL_PROMPT_GUIDELINES,
+		].join("\n");
+
+		expect(guidance).toContain("symbols → slice → references → enclosing_symbol → slice");
+		expect(guidance).toContain("do not follow symbols results with whole-file reads");
+		expect(guidance).toContain("small read");
+	});
+
+	test("schema explains each drilldown action and parameter handoff", () => {
+		const schema = JSON.stringify(__test.CODE_INTEL_SCHEMA);
+
+		expect(schema).toContain("symbols only locates candidates");
+		expect(schema).toContain("Prefer slice for its body and references for usages");
+		expect(schema).toContain("enclosing_symbol on a reference line");
+		expect(schema).toContain("slice the returned caller");
+	});
+
+	test("action outputs provide concise next-step hints", () => {
+		expect(__test.ACTION_NEXT_STEPS).toEqual({
+			symbols: "Next: use slice on the best match; do not read the whole file.",
+			slice: "Next: use references to find usages; verify only small target ranges before editing.",
+			references: "Next: run enclosing_symbol on a relevant location to identify its caller.",
+			enclosingSymbol: "Next: use slice on this enclosing symbol to inspect the caller body.",
+		});
+	});
+
+	test("repo map directs agents to symbols and slice instead of broad reads", () => {
+		const output = __test.renderRepoMap({
+			root: "/repo",
+			files: [sourceFile],
+			diagnostics: { unsupportedExtensions: new Map(), fallbackPatternLanguages: new Map() },
+			rankedDefinitions: [definition({ name: "AuthService", kind: "class", file: "src/auth.ts" })],
+			mapTokens: 200,
+		});
+
+		expect(output).toContain("Next: locate candidates with symbols, then use slice; avoid broad file reads.");
+	});
+});
+
 test("code-intel completions list all accepted subcommands", () => {
 	expect(__test.CODE_INTEL_COMPLETIONS.map((s) => s.value)).toEqual(["status", "map", "repo-map"]);
 });
