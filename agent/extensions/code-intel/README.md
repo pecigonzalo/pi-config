@@ -16,9 +16,31 @@ Current actions:
 - `/code-intel map [tokens]`
 - `/code-intel status`
 
-The current backend prefers available project/git metadata, uses `tree-sitter tags` when the CLI/parsers/queries are configured, and falls back to deterministic syntax-pattern matching. It is intentionally compact and approximate.
+## Recommended workflows
 
-When the sibling `lsp-manager` extension is loaded, `definition`, `references`, and `hover` use live language-server data. Other actions still use the static Tree-sitter/syntax backend.
+To understand a named function, locate it with `symbols`, inspect its body with `slice`, find usages with LSP-backed `references`, run `enclosing_symbol` at relevant usage locations, and `slice` those callers:
+
+```text
+symbols → slice → references → enclosing_symbol → slice
+```
+
+For an unfamiliar subsystem, start broad and narrow before reading source:
+
+```text
+repo_map → outline or symbols → slice → references
+```
+
+Before editing, use a small `read` range only when you still need exact imports, adjacent setup, or replacement context. Avoid this broad-read pattern:
+
+```text
+symbols → read hundreds of lines
+```
+
+Use targeted text search for usages only when LSP references are unavailable or the usage is dynamic, generated, or stored outside supported source files.
+
+The current backend prefers LSP document symbols for structural actions when available, uses `tree-sitter tags` when the CLI/parsers/queries are configured, and falls back to deterministic syntax-pattern matching. It is intentionally compact and approximate.
+
+When the sibling `lsp-manager` extension is loaded, `definition`, `references`, and `hover` use live language-server data. These semantic actions require LSP; structural actions such as `outline`, `symbols`, and `slice` retain Tree-sitter/syntax fallback support.
 
 `repo_map`/`symbols` report when no supported source files were analyzed (for example, unsupported extensions), when files are using generic fallback patterns instead of language-specific extraction, and whether Tree-sitter tags contributed definitions/references.
 
