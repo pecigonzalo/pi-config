@@ -1,5 +1,6 @@
 import { compileSandboxConfig } from "./sandbox";
 import {
+	baseRestrictionMode,
 	type CodemodeCapability,
 	type CodemodeEffectivePolicy,
 	type CodemodeMode,
@@ -12,6 +13,8 @@ const MODE_CAPABILITIES: Record<CodemodeMode, CodemodeCapability[]> = {
 	orchestrator: ["message", "artifact", "task", "todo", "mcp"],
 };
 
+// Keyed on the restriction-tier base mode (see baseRestrictionMode) — "auto" resolves to
+// "workspace-write" before indexing, so it can't drift out of sync with a fourth copied entry.
 const MODE_RESTRICTION = {
 	plan: 0,
 	"workspace-write": 1,
@@ -29,7 +32,8 @@ export function constrainCodemodePolicy(
 	selectedPolicy: EffectivePolicy,
 ): EffectivePolicy {
 	const mode =
-		MODE_RESTRICTION[activePolicy.mode] <= MODE_RESTRICTION[selectedPolicy.mode]
+		MODE_RESTRICTION[baseRestrictionMode(activePolicy.mode)] <=
+		MODE_RESTRICTION[baseRestrictionMode(selectedPolicy.mode)]
 			? activePolicy.mode
 			: selectedPolicy.mode;
 	const externalPath =

@@ -71,6 +71,35 @@
  *                  false: agent rules completely replace default rules
  *   externalPath: overrides the default externalPath policy for this agent
  *                  (structured filesystem tools only)
+ *
+ * Auto mode ("mode": "auto"):
+ *   NOT enabled by default — the default mode is "workspace-write" unless a
+ *   profile/agent explicitly sets "mode": "auto". In auto mode, a rule that
+ *   resolves to "ask" is first offered to a small classifier model instead of
+ *   immediately prompting the human. The classifier can only ever *skip* the
+ *   human prompt (decision: "allow" above the confidence threshold); any
+ *   error, timeout, low confidence, or unparseable response always falls
+ *   back to the normal human prompt. A small hardcoded escalate list (see
+ *   classifier.ts) is checked first and the classifier can never override it
+ *   (e.g. `git push`, `rm`, `sudo`, MCP tool calls always ask). Every
+ *   classifier verdict is logged per-session to
+ *   `<sessionDir>/<sessionId>.permissions-classifier.jsonl`, colocated with
+ *   the session transcript, for audit.
+ *
+ *   {
+ *     "agents": { "auto-reviewer": { "mode": "auto" } },
+ *     "classifier": {
+ *       "enabled": true,
+ *       "provider": "anthropic",
+ *       "model": "claude-haiku-4-5",
+ *       "confidenceThreshold": 0.9,
+ *       "historyTurns": 6,
+ *       "timeoutMs": 8000
+ *     }
+ *   }
+ *
+ *   Rule field `autoReview: false` forces a human prompt for that rule even
+ *   in auto mode, regardless of classifier confidence.
  */
 
 import type {
@@ -83,8 +112,16 @@ import { createBashTool, createLocalBashOperations, getAgentDir } from "@earendi
 import { matchesKey, Key, Text } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { activePolicy, loadConfig, mergeDefaultConfig, readJsonFile, resolveProtectedResources } from "./config";
+import {
+	activePolicy,
+	getClassifierSettings,
+	loadConfig,
+	mergeDefaultConfig,
+	readJsonFile,
+	resolveProtectedResources,
+} from "./config";
 import { writeApprovalFileAtomic } from "./approval-store";
+import { classifyPermissionRequest as classifyPermissionRequestDefault } from "./classifier";
 import {
 	approvalsCoverBash,
 	approvalsCoverPaths,
@@ -207,10 +244,12 @@ export const PERMISSIONS_COMPLETIONS = [
 
 export interface PermissionsExtensionDependencies {
 	writeApprovalFile?: typeof writeApprovalFileAtomic;
+	classifyPermissionRequest?: typeof classifyPermissionRequestDefault;
 }
 
 export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDependencies = {}) {
 	const writeApprovalFile = dependencies.writeApprovalFile ?? writeApprovalFileAtomic;
+	const classifyPermissionRequest = dependencies.classifyPermissionRequest ?? classifyPermissionRequestDefault;
 	pi.registerFlag("agent-name", {
 		description: "Agent profile name to use for permissions (overrides PI_AGENT_NAME env var)",
 		type: "string",
@@ -1320,6 +1359,30 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		return decision;
 	}
 
+	// ── Auto mode classifier gate ─────────────────────────────────────────────
+	// Only reached for rules that already resolved to "ask" — explicit "allow"/"block" rules and
+	// existing approvals never go through the classifier.
+
+	async function maybeAutoApprove(
+		toolName: PermissionToolName,
+		input: PermissionToolInput,
+		rule: Rule,
+		command: string | undefined,
+		mode: PermissionMode,
+		ctx: ExtensionContext,
+	): Promise<boolean> {
+		if (mode !== "auto" || rule.autoReview === false) return false;
+		const verdict = await classifyPermissionRequest({
+			toolName,
+			input,
+			rule,
+			command,
+			ctx,
+			settings: getClassifierSettings(config),
+		});
+		return verdict.decision === "allow";
+	}
+
 	async function checkBashPermission(
 		command: string,
 		input: PermissionToolInput,
@@ -1390,6 +1453,9 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			const { segment: unapprovedSegment, parsed: unapprovedParsed } = getUnapprovedBashSegment();
 			const note =
 				rule.reason ?? (unapprovedSegment ? `Unapproved shell segment: ${unapprovedSegment}` : undefined);
+			if (await maybeAutoApprove("bash", input, rule, unapprovedSegment ?? command, policy.mode, ctx)) {
+				return ALLOW_PERMISSION;
+			}
 			return askPermission("bash", input, note, projectRoot, ctx, unapprovedSegment, unapprovedParsed);
 		}
 
@@ -1536,6 +1602,9 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 							return ALLOW_PERMISSION;
 						}
 					}
+				}
+				if (await maybeAutoApprove(toolName, input, rule, undefined, policy.mode, ctx)) {
+					return ALLOW_PERMISSION;
 				}
 				return askPermission(toolName, input, rule.reason, projectRoot, ctx);
 			}

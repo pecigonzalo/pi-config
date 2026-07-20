@@ -1,10 +1,11 @@
 import { matchRule } from "./matching";
-import type { PermissionMode, Rule } from "./shared";
+import { baseRestrictionMode, type PermissionMode, type Rule } from "./shared";
 import type { ParsedBash, ParsedCommand } from "./shell-parse";
 
 export function sandboxFallbackModeForPolicy(mode: PermissionMode): "normal" | "ask-all-bash" | "block-all-bash" {
-	if (mode === "plan") return "block-all-bash";
-	if (mode === "workspace-write") return "ask-all-bash";
+	const base = baseRestrictionMode(mode);
+	if (base === "plan") return "block-all-bash";
+	if (base === "workspace-write") return "ask-all-bash";
 	return "normal";
 }
 
@@ -20,6 +21,10 @@ const DANGEROUS_BASH_CHECKS = [
 		re: /\bcurl\b.+(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|PUT|DELETE|PATCH))/i,
 		reason: "HTTP write operation",
 	},
+	{ re: /\bgit\s+push\b/i, reason: "Pushes to a remote" },
+	{ re: /\bgit\s+reset\s+--hard\b/i, reason: "Discards uncommitted changes" },
+	{ re: /\bgit\s+clean\b/i, reason: "Deletes untracked files" },
+	{ re: /\bgit\s+rebase\b/i, reason: "Rewrites commit history" },
 ] as const;
 
 export function detectDangerousBashPattern(command: string): string | undefined {

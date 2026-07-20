@@ -324,6 +324,43 @@ describe("permissions config merge", () => {
 	});
 });
 
+describe("auto mode", () => {
+	it("is not the default mode", () => {
+		const policy = configModule.activePolicy({}, "default");
+		expect(policy.mode).toBe("workspace-write");
+	});
+
+	it("must be explicitly opted into via default.mode", () => {
+		const policy = configModule.activePolicy({ default: { mode: "auto" } }, "default");
+		expect(policy.mode).toBe("auto");
+		expect(policy.externalPath).toBe("ask");
+		expect(policy.rules.some((rule) => rule.tool === "bash" && rule.action === "ask")).toBe(true);
+	});
+
+	it("can be scoped to a single agent profile without changing the global default", () => {
+		const config = { agents: { reviewer: { mode: "auto" as const } } };
+		expect(configModule.activePolicy(config, "default").mode).toBe("workspace-write");
+		expect(configModule.activePolicy(config, "reviewer").mode).toBe("auto");
+	});
+
+	it("resolves classifier settings with defaults when unconfigured", () => {
+		const settings = configModule.getClassifierSettings({});
+		expect(settings.enabled).toBe(true);
+		expect(settings.provider).toBe("anthropic");
+		expect(settings.model).toBe("claude-haiku-4-5");
+		expect(settings.confidenceThreshold).toBe(0.9);
+	});
+
+	it("merges explicit classifier overrides over the defaults", () => {
+		const settings = configModule.getClassifierSettings({
+			classifier: { model: "claude-sonnet-5", confidenceThreshold: 0.5 },
+		});
+		expect(settings.model).toBe("claude-sonnet-5");
+		expect(settings.confidenceThreshold).toBe(0.5);
+		expect(settings.provider).toBe("anthropic");
+	});
+});
+
 describe("external path canonicalization", () => {
 	it("canonicalizes nested missing paths through a symlink ancestor", async () => {
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-test-"));

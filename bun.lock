@@ -95,6 +95,7 @@
         "web-tree-sitter": "^0.26.8",
       },
       "peerDependencies": {
+        "@earendil-works/pi-ai": "*",
         "@earendil-works/pi-coding-agent": "*",
         "@earendil-works/pi-tui": "*",
       },
