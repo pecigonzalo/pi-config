@@ -214,6 +214,23 @@ describe("typescript tool helpers", () => {
 		expect(result.body).toContain("return 1;");
 	});
 
+	it("skips a leading block comment before scanning for imports", () => {
+		const code = '/* eslint-disable */\nimport { readFile } from "node:fs/promises";\n\nawait readFile("x");';
+		const result = __test__.splitImportsAndBody(code);
+		expect(result.imports).toContain('import { readFile } from "node:fs/promises";');
+		expect(result.body).not.toContain("import");
+		expect(result.body).toContain('await readFile("x");');
+	});
+
+	it("skips a single-line block comment between imports", () => {
+		const code =
+			'import { readFile } from "node:fs/promises";\n/* keep sorted */\nimport { join } from "node:path";\n\nreturn 1;';
+		const result = __test__.splitImportsAndBody(code);
+		expect(result.imports).toContain("import { readFile }");
+		expect(result.imports).toContain("import { join }");
+		expect(result.body).not.toContain("import");
+	});
+
 	it("builds user module with imports at top level", () => {
 		const mod = __test__.buildUserModule(
 			'import { readFileSync } from "node:fs";\nconst x: string = "hello";\nreturn x;',

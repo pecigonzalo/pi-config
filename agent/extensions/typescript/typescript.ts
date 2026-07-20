@@ -1,6 +1,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { Message } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
@@ -130,6 +131,9 @@ type CodemodeDetails = {
 	exitCode: number | null;
 	ok: boolean;
 	result?: unknown;
+	// Full serializeForDisplay(result) string, computed once so buildContent and the
+	// (possibly repeatedly re-rendered) renderResult don't each re-stringify `result`.
+	resultText?: string;
 	error?: ProtocolResult extends infer R ? (R extends { ok: false; error: infer E } ? E : never) : never;
 	logs: string[];
 	logNotice?: string;
@@ -409,33 +413,42 @@ function formatLogLine(log: ProtocolLog): string {
 	return `${prefix}${parts.join(" ")}`.trim();
 }
 
+// Shared by parseProtocolOutput (tests / batch parsing) and handleProtocolLine (the
+// live streaming parser execute() drives) so the two never drift on how a log/result
+// protocol line is parsed.
+function parseLogOrResultLine(line: string, logState: LogCaptureState): ProtocolResult | undefined {
+	if (line.startsWith(LOG_PREFIX)) {
+		try {
+			const payload = JSON.parse(line.slice(LOG_PREFIX.length)) as ProtocolLog;
+			appendLogLine(logState, formatLogLine(payload));
+		} catch {
+			appendLogLine(logState, `[protocol] could not parse log payload: ${line.slice(LOG_PREFIX.length)}`);
+		}
+		return undefined;
+	}
+	if (line.startsWith(RESULT_PREFIX)) {
+		try {
+			return JSON.parse(line.slice(RESULT_PREFIX.length)) as ProtocolResult;
+		} catch (error) {
+			return {
+				ok: false,
+				error: {
+					phase: "protocol",
+					message: `Failed to parse runtime result: ${error instanceof Error ? error.message : String(error)}`,
+				},
+			};
+		}
+	}
+	return undefined;
+}
+
 function parseProtocolOutput(rawOutput: string): { logs: string[]; result?: ProtocolResult } {
 	const logState = createLogCaptureState();
 	let result: ProtocolResult | undefined;
 
 	for (const line of rawOutput.split(/\r?\n/)) {
-		if (line.startsWith(LOG_PREFIX)) {
-			try {
-				const payload = JSON.parse(line.slice(LOG_PREFIX.length)) as ProtocolLog;
-				appendLogLine(logState, formatLogLine(payload));
-			} catch {
-				appendLogLine(logState, `[protocol] could not parse log payload: ${line.slice(LOG_PREFIX.length)}`);
-			}
-			continue;
-		}
-		if (line.startsWith(RESULT_PREFIX)) {
-			try {
-				result = JSON.parse(line.slice(RESULT_PREFIX.length)) as ProtocolResult;
-			} catch (error) {
-				result = {
-					ok: false,
-					error: {
-						phase: "protocol",
-						message: `Failed to parse runtime result: ${error instanceof Error ? error.message : String(error)}`,
-					},
-				};
-			}
-		}
+		const parsed = parseLogOrResultLine(line, logState);
+		if (parsed !== undefined) result = parsed;
 	}
 
 	const logs = [...logState.lines];
@@ -626,11 +639,17 @@ function splitImportsAndBody(code: string): { imports: string; body: string } {
 	const lines = code.split("\n");
 	let lastImportEndLine = -1;
 	let inMultiLineImport = false;
+	let inBlockComment = false;
 
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
 		if (line === undefined) continue;
 		const trimmed = line.trim();
+
+		if (inBlockComment) {
+			if (trimmed.includes("*/")) inBlockComment = false;
+			continue;
+		}
 
 		if (inMultiLineImport) {
 			if (/}\s*from\s+['"]/.test(trimmed) || /from\s+['"].*['"]/.test(trimmed)) {
@@ -640,8 +659,12 @@ function splitImportsAndBody(code: string): { imports: string; body: string } {
 			continue;
 		}
 
-		// Skip blank lines and single-line comments (keep scanning for more imports)
+		// Skip blank lines and comments (keep scanning for more imports)
 		if (trimmed === "" || trimmed.startsWith("//")) continue;
+		if (trimmed.startsWith("/*")) {
+			if (!trimmed.includes("*/")) inBlockComment = true;
+			continue;
+		}
 
 		// Match import statements
 		if (/^import\b/.test(trimmed)) {
@@ -694,9 +717,17 @@ async function createRuntimeFiles(
 let codemodeSandboxRuntime: SandboxRuntimeAdapter | undefined;
 
 async function getCodemodeSandboxRuntime(): Promise<SandboxRuntimeAdapter> {
-	const mod = await import("../permissions/node_modules/@anthropic-ai/sandbox-runtime/dist/index.js");
+	let mod: { SandboxManager: SandboxManagerLike };
+	try {
+		mod = await import("@anthropic-ai/sandbox-runtime");
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(
+			`Failed to load @anthropic-ai/sandbox-runtime: ${message}. Ensure dependencies are installed for the typescript extension (bun install).`,
+		);
+	}
 	if (!codemodeSandboxRuntime || codemodeSandboxRuntime.manager !== mod.SandboxManager) {
-		codemodeSandboxRuntime = new SandboxRuntimeAdapter(mod.SandboxManager as SandboxManagerLike);
+		codemodeSandboxRuntime = new SandboxRuntimeAdapter(mod.SandboxManager);
 	}
 	return codemodeSandboxRuntime;
 }
@@ -897,7 +928,15 @@ function assertMcpAllowed(state: BridgeRuntimeState, target: string): void {
 	for (const policy of state.policies) {
 		const rule = matchRule(policy.rules, "mcp", { command: target });
 		if (rule?.action === "block") throw new Error(rule.reason || `MCP access blocked: ${target}`);
-		if (rule?.action === "ask") throw new Error(rule.reason || `MCP access requires approval: ${target}`);
+		if (rule?.action === "ask") {
+			// CodeMode runs non-interactively inside a sandboxed subprocess, so an "ask" rule
+			// cannot prompt the user the way it does for bash/tool permissions. Fail closed
+			// rather than silently treating it as an approved call.
+			throw new Error(
+				rule.reason ||
+					`MCP access requires approval, but CodeMode cannot prompt interactively: ${target}. Use an "allow" or "block" rule for this target instead of "ask".`,
+			);
+		}
 	}
 }
 
@@ -1020,7 +1059,7 @@ function formatCodePreview(code: string, expanded: boolean): string {
 
 function buildContent(details: CodemodeDetails): string {
 	if (details.ok) {
-		const resultText = truncate(serializeForDisplay(details.result), MAX_RESULT_PREVIEW);
+		const resultText = truncate(details.resultText ?? serializeForDisplay(details.result), MAX_RESULT_PREVIEW);
 		const parts = ["TypeScript completed successfully.", "", "Result:", resultText];
 		if (details.logs.length > 0 || details.logNotice) {
 			parts.push("", "Logs:", ...details.logs);
@@ -1117,7 +1156,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (details.ok) {
 				const resultPreview = truncate(
-					serializeForDisplay(details.result),
+					details.resultText ?? serializeForDisplay(details.result),
 					expanded ? MAX_RESULT_PREVIEW : 300,
 				);
 				text += `\n${theme.fg("muted", "result:")} ${theme.fg("toolOutput", resultPreview)}`;
@@ -1268,30 +1307,9 @@ export default function (pi: ExtensionAPI) {
 
 			const handleProtocolLine = (line: string) => {
 				if (!line) return;
-				if (line.startsWith(LOG_PREFIX)) {
-					try {
-						const payload = JSON.parse(line.slice(LOG_PREFIX.length)) as ProtocolLog;
-						appendLogLine(logState, formatLogLine(payload));
-					} catch {
-						appendLogLine(
-							logState,
-							`[protocol] could not parse log payload: ${line.slice(LOG_PREFIX.length)}`,
-						);
-					}
-					return;
-				}
-				if (line.startsWith(RESULT_PREFIX)) {
-					try {
-						protocolResult = JSON.parse(line.slice(RESULT_PREFIX.length)) as ProtocolResult;
-					} catch (error) {
-						protocolResult = {
-							ok: false,
-							error: {
-								phase: "protocol",
-								message: `Failed to parse runtime result: ${error instanceof Error ? error.message : String(error)}`,
-							},
-						};
-					}
+				if (line.startsWith(LOG_PREFIX) || line.startsWith(RESULT_PREFIX)) {
+					const parsed = parseLogOrResultLine(line, logState);
+					if (parsed !== undefined) protocolResult = parsed;
 					return;
 				}
 				if (line.startsWith(BRIDGE_REQUEST_PREFIX)) {
@@ -1333,14 +1351,23 @@ export default function (pi: ExtensionAPI) {
 								error: { message: error instanceof Error ? error.message : String(error) },
 							};
 						}
-						stdinWriter.write(`${BRIDGE_RESPONSE_PREFIX}${JSON.stringify(response)}\n`);
+						if (!stdinWriter || stdinWriter.writable === false) return;
+						try {
+							stdinWriter.write(`${BRIDGE_RESPONSE_PREFIX}${JSON.stringify(response)}\n`);
+						} catch {
+							// The sandboxed process exited before the response could be delivered; nothing to do.
+						}
 					})();
 					return;
 				}
 			};
 
+			// Decode incrementally so a multi-byte UTF-8 character split across two pipe reads
+			// isn't corrupted into replacement characters at the chunk boundary.
+			const stdoutDecoder = new StringDecoder("utf8");
+			const stderrDecoder = new StringDecoder("utf8");
 			const handleStdoutData = (chunk: Buffer) => {
-				const text = chunk.toString("utf8");
+				const text = stdoutDecoder.write(chunk);
 				appendRawOutput(rawOutputState, text);
 				stdoutBuffer += text;
 				const lines = stdoutBuffer.split(/\r?\n/);
@@ -1348,31 +1375,48 @@ export default function (pi: ExtensionAPI) {
 				for (const line of lines) handleProtocolLine(line);
 			};
 			const handleStderrData = (chunk: Buffer) => {
-				appendRawOutput(rawOutputState, chunk.toString("utf8"));
+				appendRawOutput(rawOutputState, stderrDecoder.write(chunk));
+			};
+			const flushDecoders = () => {
+				const trailingStdout = stdoutDecoder.end();
+				if (trailingStdout) {
+					appendRawOutput(rawOutputState, trailingStdout);
+					stdoutBuffer += trailingStdout;
+				}
+				const trailingStderr = stderrDecoder.end();
+				if (trailingStderr) appendRawOutput(rawOutputState, trailingStderr);
 			};
 
 			try {
-				const sandboxRuntime = await getCodemodeSandboxRuntime();
-				const result = await sandboxRuntime.runCommand(
-					{
-						config: resolvedPolicy.sandbox.config,
-						tmpDir: runtimeDir,
-						env: runtimeEnv,
-					},
-					{
-						command,
-						cwd: executionCwd,
-						timeout,
-						signal,
-						stdinMode: "pipe",
-						onSpawn: (child) => {
-							stdinWriter = child.stdin ?? undefined;
+				try {
+					const sandboxRuntime = await getCodemodeSandboxRuntime();
+					const result = await sandboxRuntime.runCommand(
+						{
+							config: resolvedPolicy.sandbox.config,
+							tmpDir: runtimeDir,
+							env: runtimeEnv,
 						},
-						onStdoutData: handleStdoutData,
-						onStderrData: handleStderrData,
-					},
-				);
-				exitCode = result.exitCode;
+						{
+							command,
+							cwd: executionCwd,
+							timeout,
+							signal,
+							stdinMode: "pipe",
+							onSpawn: (child) => {
+								stdinWriter = child.stdin ?? undefined;
+								// Bridge responses can arrive after the sandboxed process exits (e.g. a
+								// nested host.task.run() outlives the outer timeout); avoid an unhandled
+								// 'error' event on the now-destroyed stdin stream in that case.
+								stdinWriter?.on("error", () => {});
+							},
+							onStdoutData: handleStdoutData,
+							onStderrData: handleStderrData,
+						},
+					);
+					exitCode = result.exitCode;
+				} finally {
+					flushDecoders();
+				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				const rawOutput = finalizeRawOutput(rawOutputState);
@@ -1429,6 +1473,7 @@ export default function (pi: ExtensionAPI) {
 				exitCode,
 				ok: finalResult.ok,
 				result: finalResult.ok ? finalResult.result : undefined,
+				resultText: finalResult.ok ? serializeForDisplay(finalResult.result) : undefined,
 				error: finalResult.ok ? undefined : finalResult.error,
 				logs,
 				logNotice,
