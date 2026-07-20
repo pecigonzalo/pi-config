@@ -254,10 +254,31 @@ function resolveGitPathAliases(candidate: string, cwd: string): string[] {
 	return existingPathAliases(path.isAbsolute(candidate) ? candidate : path.resolve(cwd, candidate));
 }
 
+// git resolves --git-dir/--git-common-dir from these environment variables before it
+// looks at cwd, so a subprocess spawned here would otherwise resolve against whichever
+// repository the *parent* process belongs to (e.g. the real repo when this runs inside a
+// git hook) instead of the workspace `cwd` explicitly passed in.
+const GIT_REPOSITORY_ENV_KEYS = [
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_COMMON_DIR",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_PREFIX",
+] as const;
+
+function gitScopedEnv(): NodeJS.ProcessEnv {
+	const env = { ...process.env };
+	for (const key of GIT_REPOSITORY_ENV_KEYS) delete env[key];
+	return env;
+}
+
 function gitRevParse(cwd: string, arg: string): string | undefined {
 	try {
 		const value = execFileSync("git", ["rev-parse", arg], {
 			cwd,
+			env: gitScopedEnv(),
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
 		}).trim();
