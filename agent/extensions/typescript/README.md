@@ -35,10 +35,10 @@ The `code` value is a **function body**, not a full module. It is transpiled wit
 built-in TypeScript transpiler before execution, so:
 
 - **TypeScript syntax works** — type annotations, generics, `as` casts, `satisfies`, etc.
-- **Static `import` declarations are rewritten** to `await import()` automatically, so both styles work:
+- **Static `import` declarations are hoisted** above the generated function body automatically, so both styles work:
 
 ```ts
-// static import style (rewritten automatically)
+// static import style (hoisted automatically)
 import { readdir } from "node:fs/promises";
 const entries = await readdir(".");
 return entries;
