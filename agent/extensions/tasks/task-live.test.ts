@@ -1,33 +1,32 @@
 import { describe, expect, test } from "bun:test";
+import type { AgentSession, AgentSessionEventListener } from "@earendil-works/pi-coding-agent";
 import {
+	clearLiveTaskControllers,
 	createIdempotentControllerClose,
-	DEFAULT_LIVE_TASK_RPC_TIMEOUT_MS,
-	sendLiveTaskRpcCommand,
-	type LiveTaskController,
+	deleteLiveTaskController,
+	getLiveTaskController,
+	isLiveController,
+	listLiveTaskControllers,
+	readLiveTaskRuntimeInfo,
+	registerAgentSessionController,
+	setLiveTaskController,
 } from "./task-live.js";
 
-function createController(write: (data: string, callback: (error?: Error | null) => void) => void): LiveTaskController {
-	return {
-		key: "test",
-		toolCallId: "tool",
-		runId: "run",
-		step: 1,
-		childSessionId: "session",
-		childSessionPath: "session.jsonl",
-		task: "task",
-		agent: "agent",
-		transport: "rpc",
-		proc: { stdin: { destroyed: false, writable: true, write } } as unknown as LiveTaskController["proc"],
-		pendingResponses: new Map(),
-		status: "running",
-		startedAt: new Date().toISOString(),
+function createFakeSession(overrides: Partial<AgentSession> = {}): AgentSession {
+	let listener: AgentSessionEventListener | undefined;
+	const fake = {
+		messages: [],
 		isStreaming: false,
-		pendingSteeringCount: 0,
-		pendingFollowUpCount: 0,
-		lastMessageCount: 0,
-		syncCursor: 0,
-		close: async () => {},
+		subscribe: (l: AgentSessionEventListener) => {
+			listener = l;
+			return () => {
+				listener = undefined;
+			};
+		},
+		emit: (event: Parameters<AgentSessionEventListener>[0]) => listener?.(event),
+		...overrides,
 	};
+	return fake as unknown as AgentSession;
 }
 
 describe("controller close", () => {
@@ -51,60 +50,127 @@ describe("controller close", () => {
 	});
 });
 
-describe("sendLiveTaskRpcCommand", () => {
-	test("cleans the pending request after a response", async () => {
-		const controller = createController((_data, callback) => callback());
-		const promise = sendLiveTaskRpcCommand(controller, { type: "ping" });
-		const pending = [...controller.pendingResponses.values()][0];
-		pending?.resolve({ type: "response", success: true });
-		await expect(promise).resolves.toMatchObject({ success: true });
-		expect(controller.pendingResponses).toHaveLength(0);
+describe("registerAgentSessionController", () => {
+	test("registers a running controller and unregisters it on close", async () => {
+		clearLiveTaskControllers();
+		const session = createFakeSession();
+		const controller = registerAgentSessionController({
+			key: "run-1-step-1",
+			toolCallId: "tool-1",
+			runId: "run-1",
+			step: 1,
+			childSessionId: "child-1",
+			childSessionPath: "/tmp/child-1.jsonl",
+			task: "do the thing",
+			agent: "generic",
+			session,
+			close: async () => {},
+		});
+
+		expect(controller.status).toBe("running");
+		expect(getLiveTaskController("run-1-step-1")).toBe(controller);
+		expect(isLiveController(controller)).toBe(true);
+
+		await controller.close();
+		deleteLiveTaskController(controller.key);
+		expect(getLiveTaskController("run-1-step-1")).toBeUndefined();
 	});
 
-	test("rejects and cleans up on timeout", async () => {
-		const controller = createController((_data, callback) => callback());
-		const promise = sendLiveTaskRpcCommand(controller, { type: "ping" }, { timeout: 1 });
-		await expect(promise).rejects.toThrow("timed out");
-		expect(controller.pendingResponses).toHaveLength(0);
+	test("tracks pending steering/follow-up counts from queue_update events", () => {
+		clearLiveTaskControllers();
+		const session = createFakeSession() as AgentSession & { emit: (event: unknown) => void };
+		const controller = registerAgentSessionController({
+			key: "run-2-step-1",
+			toolCallId: "tool-2",
+			runId: "run-2",
+			step: 1,
+			childSessionId: "child-2",
+			childSessionPath: "/tmp/child-2.jsonl",
+			task: "do another thing",
+			agent: "generic",
+			session,
+			close: async () => {},
+		});
+
+		expect(controller.pendingSteeringCount).toBe(0);
+		session.emit({ type: "queue_update", steering: ["a", "b"], followUp: ["c"] });
+		expect(controller.pendingSteeringCount).toBe(2);
+		expect(controller.pendingFollowUpCount).toBe(1);
 	});
 
-	test("uses the bounded default timeout and cleans up omitted-timeout requests", async () => {
-		const originalSetTimeout = globalThis.setTimeout;
-		let timeoutCallback: (() => void) | undefined;
-		let timeoutMs: number | undefined;
-		globalThis.setTimeout = ((callback: () => void, delay?: number) => {
-			timeoutCallback = callback;
-			timeoutMs = delay;
-			return 0 as unknown as ReturnType<typeof setTimeout>;
-		}) as typeof setTimeout;
-		try {
-			const controller = createController((_data, callback) => callback());
-			const promise = sendLiveTaskRpcCommand(controller, { type: "ping" });
-
-			expect(timeoutMs).toBe(DEFAULT_LIVE_TASK_RPC_TIMEOUT_MS);
-			expect(controller.pendingResponses).toHaveLength(1);
-			timeoutCallback?.();
-
-			await expect(promise).rejects.toThrow("timed out");
-			expect(controller.pendingResponses).toHaveLength(0);
-		} finally {
-			globalThis.setTimeout = originalSetTimeout;
-		}
+	test("listLiveTaskControllers reflects the registry", () => {
+		clearLiveTaskControllers();
+		const controller = registerAgentSessionController({
+			key: "run-3-step-1",
+			toolCallId: "tool-3",
+			runId: "run-3",
+			step: 1,
+			childSessionId: "child-3",
+			childSessionPath: "/tmp/child-3.jsonl",
+			task: "list me",
+			agent: "generic",
+			session: createFakeSession(),
+			close: async () => {},
+		});
+		expect(listLiveTaskControllers()).toContain(controller);
+		clearLiveTaskControllers();
+		expect(listLiveTaskControllers()).toHaveLength(0);
 	});
+});
 
-	test("rejects and cleans up on abort", async () => {
-		const controller = createController((_data, callback) => callback());
-		const abortController = new AbortController();
-		const promise = sendLiveTaskRpcCommand(controller, { type: "ping" }, { signal: abortController.signal });
-		abortController.abort();
-		await expect(promise).rejects.toThrow("aborted");
-		expect(controller.pendingResponses).toHaveLength(0);
+describe("isLiveController", () => {
+	test("is false for undefined and for non-running statuses", () => {
+		expect(isLiveController(undefined)).toBe(false);
+		const controller = registerAgentSessionController({
+			key: "run-4-step-1",
+			toolCallId: "tool-4",
+			runId: "run-4",
+			step: 1,
+			childSessionId: "child-4",
+			childSessionPath: "/tmp/child-4.jsonl",
+			task: "finish",
+			agent: "generic",
+			session: createFakeSession(),
+			close: async () => {},
+		});
+		expect(isLiveController(controller)).toBe(true);
+		controller.status = "completed";
+		expect(isLiveController(controller)).toBe(false);
 	});
+});
 
-	test("rejects and cleans up on write failure", async () => {
-		const controller = createController((_data, callback) => callback(new Error("EPIPE")));
-		const promise = sendLiveTaskRpcCommand(controller, { type: "ping" });
-		await expect(promise).rejects.toThrow("EPIPE");
-		expect(controller.pendingResponses).toHaveLength(0);
+describe("readLiveTaskRuntimeInfo", () => {
+	test("reflects live session state and the final assistant message", () => {
+		const session = createFakeSession({
+			isStreaming: true,
+			messages: [
+				{ role: "user", content: [{ type: "text", text: "Task: do it" }] },
+				{ role: "assistant", content: [{ type: "text", text: "Working on it" }] },
+			],
+		} as Partial<AgentSession>);
+		setLiveTaskController({
+			key: "run-5-step-1",
+			toolCallId: "tool-5",
+			runId: "run-5",
+			step: 1,
+			childSessionId: "child-5",
+			childSessionPath: "/tmp/child-5.jsonl",
+			task: "do it",
+			agent: "generic",
+			session,
+			status: "running",
+			startedAt: new Date().toISOString(),
+			pendingSteeringCount: 1,
+			pendingFollowUpCount: 0,
+			close: async () => {},
+		});
+
+		const info = readLiveTaskRuntimeInfo(getLiveTaskController("run-5-step-1")!);
+		expect(info.status).toBe("running");
+		expect(info.isStreaming).toBe(true);
+		expect(info.pendingSteeringCount).toBe(1);
+		expect(info.messageCount).toBe(2);
+		expect(info.lastAssistantText).toBe("Working on it");
+		deleteLiveTaskController("run-5-step-1");
 	});
 });

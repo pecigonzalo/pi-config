@@ -111,7 +111,7 @@ If `persist=false`, step execution uses non-persisted sessions and cannot be reo
 
 For persisted steps, the parent session appends hidden custom metadata entries of type:
 
-- `tasks.child-session` (created + terminal status, child session identity, parent link, origin preview, optional terminal-backend metadata; current backend implementation: WezTerm)
+- `tasks.child-session` (created + terminal status, child session identity, parent link, origin preview)
 
 User-visible task results include compact child-session summaries (session id/status, and expanded path in detailed views).
 
@@ -122,10 +122,9 @@ Supported commands (`/task ...` is accepted as a singular alias for `/tasks ...`
 - `/tasks` or `/tasks list` (current session)
 - `/tasks parent`
 - `/tasks toggle`
-- `/tasks show <selector>`
+- `/tasks view <selector>`
 - `/tasks open <selector>`
 - `/tasks attach <selector>`
-- `/tasks view <selector>`
 - `/tasks origin <selector>`
 - `/tasks steer <selector> <message>`
 
@@ -133,25 +132,23 @@ Semantics:
 
 - `/tasks` commands operate on task runs reconstructed from metadata in the current parent session.
 - `parent`: from the current session, open its parent session via `parentSession` in the child session header.
-- `show`: inspect run/step metadata, origin preview, actions, and warnings.
+- `view`: inspect a task run -- metadata, origin preview, actions, warnings, and (when a controller is running) a recent transcript preview read straight from the live `AgentSession`'s message history. In the TUI this opens an interactive overlay with buttons for the other actions (open/attach/origin/steer); outside the TUI it falls back to a plain text notification with the same content. This is the one "inspect" verb -- there is no separate `show` command, since `view`'s non-TUI fallback already covers what a plain text dump would show.
 - `open`: open selected persisted child session inside the current Pi UI when auto-open is available.
-- `attach`: for completed tasks, open the persisted child session in a new terminal window using the configured terminal backend. For already-running externally hosted tasks, open/switch to the terminal workspace first and then focus the existing terminal target.
-- `view`: open an in-TUI overlay viewer for a task run. The viewer shows metadata plus a recent transcript preview and supports steering shortcuts for live RPC-backed tasks. When no live controller is available, the viewer becomes read-only.
+- `attach`: open a live view onto a running task step -- built from the same message/tool-call rendering pi's own interactive mode uses, subscribed directly to the worker's `AgentSession` (no subprocess, no wire protocol). Type a line and press Enter to steer the worker directly from the view; `Esc` detaches back to the parent -- the worker keeps running in the background either way. Only available while the step is actually running; a completed step has nothing live to attach to (use `open` to resume it as a normal session).
 - `origin`: reveal the recorded parent-session origin for the task. In the current parent session this navigates to the recorded source entry; otherwise it shows the source session path and origin preview.
-- `steer`: if the child task is currently running under a live RPC controller in this session, queue a steering message without opening the child session.
+- `steer`: if the task step is currently running, send it one message (`controller.session.steer(...)`) without opening the live view.
 - `toggle`: toggle a persistent below-editor task widget for the current session. When enabled, the widget stays visible even with no task runs and continues to update as runs change.
+
+`view`, `attach`, and `steer` deliberately never wait for the main session to be idle -- that would defeat their purpose, since a task step only exists to inspect or steer *while it's running*, and the main session stays busy (from Pi's perspective) for the whole duration of the delegating `task` tool call. Only `open`, `parent`, and `origin` wait for idle first, since those are structural session-replacement operations that genuinely need the current turn to settle.
 
 Interactive runtime behavior:
 
-- when the parent session has UI, persisted child sessions are launched under a live RPC controller so `/tasks steer ...` and richer inspection can talk to the running task process
+- every task step runs as a real, in-process `AgentSession` -- the same session type, and the same `prompt()`/`steer()`/`subscribe()` primitives, that a normal interactive `pi` session uses. There is no subprocess, no pty, and no RPC-over-pipes protocol; a live controller registry (`task-live.ts`) tracks which steps are currently running so `/tasks attach` and `/tasks steer` can reach them directly.
+- when the parent session has real UI, a running worker's own dialogs (select/confirm/input/editor) and status/widget updates are relayed straight to the parent's UI, prefixed with the worker's task label; dialogs from concurrently-running steps are serialized so only one shows at a time. Without a real parent UI, a worker's dialogs auto-resolve to their default (no relay).
 - `/tasks` in the TUI opens an interactive task browser; `Ctrl+Shift+T` opens the current-session task browser directly
 - `/tasks toggle` enables or hides the below-editor task widget for the current session
-- textual `/tasks list` output includes attach guidance and per-run `/tasks attach <selector>` hints for attachable runs so it is clear how to open a child session in a terminal window
+- textual `/tasks list` output includes attach guidance; per-run `/tasks attach <selector>` hints appear for runs with an actually-running step
 - the viewer overlay keeps the parent session active while inspecting child state. Shortcut hints in the overlay: `Ctrl+O` open, `Ctrl+A` attach, `Ctrl+G` origin, `Enter`/`Ctrl+S` steer when live control is available, `Esc` close
-- in non-interactive contexts, task execution falls back to the legacy JSON-stream capture mode and live steering is unavailable
-- `/tasks attach ...` uses a terminal-backend interface. Select it with `PI_TASKS_TERMINAL_BACKEND=auto|wezterm|disabled`. Today `wezterm` is implemented; the abstraction keeps room for alternatives such as tmux later.
-- with WezTerm, task attach uses a fixed domain plus a workspace per parent session. Completed tasks open with `wezterm start --domain <domain> --workspace <session-workspace> --new-tab -- ...`; running externally hosted tasks open/attach that workspace first and then focus the existing pane when possible. You can override the domain with `PI_TASKS_WEZTERM_DOMAIN` (default: `pi`).
-- `/tasks attach ...` avoids dual writers: completed tasks open in a new terminal window, but a running child can only be focused if it already has recorded external-terminal metadata; otherwise the command refuses and points you at `/tasks steer ...`
 
 Selector resolution order:
 
