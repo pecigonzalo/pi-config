@@ -9,7 +9,7 @@ import {
 } from "./job-store";
 
 function started(id: string, command = "sleep 5", startedAt = 0): SessionEntryLike {
-	return { customType: BACKGROUND_JOB_ENTRY_TYPE, data: { id, command, startedAt } };
+	return { type: "custom", customType: BACKGROUND_JOB_ENTRY_TYPE, data: { id, command, startedAt } };
 }
 
 function resolved(
@@ -17,7 +17,7 @@ function resolved(
 	status: "done" | "error" | "cancelled" | "unknown" = "done",
 	resolvedAt = 1,
 ): SessionEntryLike {
-	return { customType: BACKGROUND_JOB_RESOLVED_ENTRY_TYPE, data: { id, resolvedAt, status } };
+	return { type: "custom", customType: BACKGROUND_JOB_RESOLVED_ENTRY_TYPE, data: { id, resolvedAt, status } };
 }
 
 describe("reconcilePendingJobs", () => {
@@ -47,9 +47,20 @@ describe("reconcilePendingJobs", () => {
 
 	it("ignores unrelated custom entries and malformed data", () => {
 		const entries: SessionEntryLike[] = [
-			{ customType: "something-else", data: { id: "a" } },
-			{ customType: BACKGROUND_JOB_ENTRY_TYPE, data: { id: "a" } }, // missing command/startedAt
-			{ customType: BACKGROUND_JOB_ENTRY_TYPE, data: undefined },
+			{ type: "custom", customType: "something-else", data: { id: "a" } },
+			{ type: "custom", customType: BACKGROUND_JOB_ENTRY_TYPE, data: { id: "a" } }, // missing command/startedAt
+			{ type: "custom", customType: BACKGROUND_JOB_ENTRY_TYPE, data: undefined },
+		];
+		expect(reconcilePendingJobs(entries)).toEqual([]);
+	});
+
+	it("ignores non-custom session entries even if they happen to carry a matching customType field", () => {
+		const entries: SessionEntryLike[] = [
+			{
+				type: "message",
+				customType: BACKGROUND_JOB_ENTRY_TYPE,
+				data: { id: "a", command: "sleep 5", startedAt: 0 },
+			},
 		];
 		expect(reconcilePendingJobs(entries)).toEqual([]);
 	});

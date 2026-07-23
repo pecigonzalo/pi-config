@@ -1,4 +1,4 @@
-import { createBashToolDefinition, type CustomEntry, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
 	BACKGROUND_JOB_ENTRY_TYPE,
@@ -55,15 +55,21 @@ function jobSummary(job: JobRecord, now: number): JobSummary {
 		command: job.command,
 		status: job.status,
 		elapsedSeconds: Math.round(((job.resolvedAt ?? now) - job.startedAt) / 1000),
-		outputTail: formatOutputTail(job.latestOutput),
+		// latestOutput is already bounded (see onUpdate/finishJob below), so no re-truncation needed here.
+		outputTail: job.latestOutput,
 	};
 }
 
-interface StatusDetails {
-	found?: boolean;
-	job?: JobSummary;
-	jobs?: JobSummary[];
+type ContentOf<T> = { content: { type: "text"; text: string }[]; details: T };
+
+function notFound(id: string): ContentOf<{ found: false }> {
+	return {
+		content: [{ type: "text", text: `No background job found with id ${id}` }],
+		details: { found: false },
+	};
 }
+
+type StatusDetails = { found: false } | { found: true; job: JobSummary } | { jobs: JobSummary[] };
 
 interface CancelDetails {
 	found: boolean;
@@ -83,16 +89,17 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 	}
 
 	function finishJob(job: JobRecord, status: "done" | "error", output: string) {
-		if (job.status === "cancelled") return; // background_cancel already resolved this job
+		if (job.status !== "running") return; // already resolved (e.g. background_cancel got there first)
 		job.status = status;
 		job.resolvedAt = Date.now();
-		job.latestOutput = output;
-		persistResolved(job.id, status, formatOutputTail(output));
+		const tail = formatOutputTail(output);
+		job.latestOutput = tail;
+		persistResolved(job.id, status, tail);
 		const verb = status === "done" ? "finished" : "failed";
 		pi.sendMessage(
 			{
 				customType: "background-job",
-				content: `[background job ${verb}] ${job.command}\n\n${formatOutputTail(output)}`,
+				content: `[background job ${verb}] ${job.command}\n\n${tail}`,
 				display: true,
 				details: { id: job.id, status },
 			},
@@ -101,10 +108,7 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", (_event, ctx) => {
-		const customEntries = ctx.sessionManager
-			.getEntries()
-			.filter((entry): entry is CustomEntry => entry.type === "custom");
-		for (const job of reconcilePendingJobs(customEntries)) {
+		for (const job of reconcilePendingJobs(ctx.sessionManager.getEntries())) {
 			persistResolved(job.id, "unknown");
 		}
 	});
@@ -152,7 +156,7 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 					{ command: params.command, timeout: params.timeout },
 					controller.signal,
 					(partial) => {
-						job.latestOutput = textOf(partial);
+						job.latestOutput = formatOutputTail(textOf(partial));
 					},
 					ctx,
 				)
@@ -175,22 +179,15 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 		description: "List background_run jobs, or inspect one by id, without blocking.",
 		promptGuidelines: ["Use background_status to check on background_run jobs without blocking."],
 		parameters: StatusParams,
-		async execute(
-			_toolCallId,
-			params,
-		): Promise<{ content: { type: "text"; text: string }[]; details: StatusDetails }> {
+		async execute(_toolCallId, params): Promise<ContentOf<StatusDetails>> {
 			const now = Date.now();
 			if (params.id) {
 				const job = jobs.get(params.id);
-				if (!job) {
-					return {
-						content: [{ type: "text", text: `No background job found with id ${params.id}` }],
-						details: { found: false },
-					};
-				}
+				if (!job) return notFound(params.id);
+				const summary = jobSummary(job, now);
 				return {
-					content: [{ type: "text", text: JSON.stringify(jobSummary(job, now), null, 2) }],
-					details: { found: true, job: jobSummary(job, now) },
+					content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
+					details: { found: true, job: summary },
 				};
 			}
 			const list = [...jobs.values()].map((job) => jobSummary(job, now));
@@ -207,17 +204,9 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 		description: "Cancel a running background_run job by id.",
 		promptGuidelines: ["Use background_cancel to stop a background_run job that is no longer needed."],
 		parameters: CancelParams,
-		async execute(
-			_toolCallId,
-			params,
-		): Promise<{ content: { type: "text"; text: string }[]; details: CancelDetails }> {
+		async execute(_toolCallId, params): Promise<ContentOf<CancelDetails>> {
 			const job = jobs.get(params.id);
-			if (!job) {
-				return {
-					content: [{ type: "text", text: `No background job found with id ${params.id}` }],
-					details: { found: false },
-				};
-			}
+			if (!job) return notFound(params.id);
 			if (job.status !== "running") {
 				return {
 					content: [{ type: "text", text: `Background job ${params.id} is already ${job.status}.` }],

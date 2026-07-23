@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { truncateTail } from "@earendil-works/pi-coding-agent";
 
 export const BACKGROUND_JOB_ENTRY_TYPE = "background-job";
 export const BACKGROUND_JOB_RESOLVED_ENTRY_TYPE = "background-job-resolved";
@@ -15,32 +16,40 @@ export interface JobResolvedData {
 	id: string;
 	resolvedAt: number;
 	status: JobResolvedStatus;
-	exitCode?: number | null;
 	outputSummary?: string;
 }
 
+/**
+ * Minimal shape reconcilePendingJobs needs from a session entry. `type` is
+ * required (unlike `customType`/`data`) so this stays structurally distinct
+ * from an all-optional type — that lets callers pass the SDK's SessionEntry[]
+ * (which includes non-custom entries with no customType/data) directly.
+ */
 export interface SessionEntryLike {
+	type: string;
 	customType?: string;
 	data?: unknown;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object";
+}
+
 function isJobStartedData(value: unknown): value is JobStartedData {
 	return (
-		Boolean(value) &&
-		typeof value === "object" &&
-		typeof (value as JobStartedData).id === "string" &&
-		typeof (value as JobStartedData).command === "string" &&
-		typeof (value as JobStartedData).startedAt === "number"
+		isRecord(value) &&
+		typeof value.id === "string" &&
+		typeof value.command === "string" &&
+		typeof value.startedAt === "number"
 	);
 }
 
 function isJobResolvedData(value: unknown): value is JobResolvedData {
 	return (
-		Boolean(value) &&
-		typeof value === "object" &&
-		typeof (value as JobResolvedData).id === "string" &&
-		typeof (value as JobResolvedData).resolvedAt === "number" &&
-		typeof (value as JobResolvedData).status === "string"
+		isRecord(value) &&
+		typeof value.id === "string" &&
+		typeof value.resolvedAt === "number" &&
+		typeof value.status === "string"
 	);
 }
 
@@ -59,6 +68,7 @@ export function reconcilePendingJobs(entries: SessionEntryLike[]): JobStartedDat
 	const resolvedIds = new Set<string>();
 
 	for (const entry of entries) {
+		if (entry.type !== "custom") continue;
 		if (entry.customType === BACKGROUND_JOB_ENTRY_TYPE && isJobStartedData(entry.data)) {
 			started.set(entry.data.id, entry.data);
 		} else if (entry.customType === BACKGROUND_JOB_RESOLVED_ENTRY_TYPE && isJobResolvedData(entry.data)) {
@@ -70,8 +80,5 @@ export function reconcilePendingJobs(entries: SessionEntryLike[]): JobStartedDat
 }
 
 export function formatOutputTail(text: string, maxLines = 20, maxChars = 4_000): string {
-	const lines = text.split("\n");
-	let tail = lines.length > maxLines ? lines.slice(-maxLines).join("\n") : text;
-	if (tail.length > maxChars) tail = tail.slice(-maxChars);
-	return tail;
+	return truncateTail(text, { maxLines, maxBytes: maxChars }).content;
 }
