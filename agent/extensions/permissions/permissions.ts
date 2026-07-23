@@ -1476,7 +1476,11 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		let isApprovedBashSegment: ((candidate: string) => boolean) | undefined;
 		let parsedBash: ParsedBash | undefined;
 
-		if (toolName === "bash") {
+		if (toolName === "bash" || toolName === "background_run") {
+			// background_run (agent/extensions/background) executes shell commands
+			// via the same underlying mechanism as bash, just detached. Route it
+			// through the identical approval/sandbox-bypass/rule-matching path so a
+			// command isn't ungated just because it runs in the background.
 			return checkBashPermission(getCommandInput(input) ?? "", input, projectRoot, ctx);
 		} else if (sessionAllows.has(toolName)) {
 			return ALLOW_PERMISSION;
