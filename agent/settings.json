@@ -1,20 +1,20 @@
 {
-  "lastChangelogVersion": "0.80.6",
+  "lastChangelogVersion": "0.80.10",
   "theme": "dracula",
   "extensions": [
-    "-extensions/store/index.ts"
+    "-extensions/store/index.ts",
+    "-extensions/learning-review/index.ts",
+    "/Users/pecigonzalo/.pi/.claude/worktrees/pi-prompt-summarization-629fc8/agent/extensions/learning-review/index.disabled.ts"
   ],
-  "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.6-sol",
-  "defaultThinkingLevel": "low",
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-sonnet-5",
+  "defaultThinkingLevel": "medium",
   "compaction": {
     "enabled": true
   },
-  "skills": [
-    "~/.config/opencode/skills"
-  ],
   "hideThinkingBlock": false,
   "treeFilterMode": "no-tools",
   "collapseChangelog": true,
-  "quietStartup": false
+  "quietStartup": false,
+  "enableSkillCommands": false
 }
