@@ -19,7 +19,7 @@ import {
 	StreamMessageReader,
 	StreamMessageWriter,
 	type MessageConnection,
-} from "vscode-languageserver-protocol/node.js";
+} from "vscode-languageserver-protocol/node";
 import type {
 	ConfigurationParams,
 	Diagnostic,
@@ -309,6 +309,10 @@ function severityRank(value: LspDiagnosticSeverity): number {
 	}
 }
 
+function diagnosticMessageToText(message: Diagnostic["message"]): string {
+	return typeof message === "string" ? message : message.value;
+}
+
 function diagnosticToItem(file: string, diagnostic: Diagnostic): LspDiagnosticItem {
 	const code = diagnostic.code == null ? undefined : String(diagnostic.code);
 	return {
@@ -316,7 +320,7 @@ function diagnosticToItem(file: string, diagnostic: Diagnostic): LspDiagnosticIt
 		line: diagnostic.range.start.line + 1,
 		column: diagnostic.range.start.character + 1,
 		severity: severityName(diagnostic.severity),
-		message: diagnostic.message,
+		message: diagnosticMessageToText(diagnostic.message),
 		source: diagnostic.source,
 		code,
 	};

@@ -14,7 +14,8 @@
     "generate:footer-schema": "cd agent/extensions/footer && bun run generate:footer-schema"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@earendil-works/pi-ai": "0.82.0",
+    "@earendil-works/pi-coding-agent": "0.82.0",
     "@types/bun": "^1.3.14",
     "lefthook": "^2.1.6",
     "oxfmt": "0.59.0",

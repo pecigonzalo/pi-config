@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
-import type { MessageConnection } from "vscode-languageserver-protocol/node.js";
+import type { MessageConnection } from "vscode-languageserver-protocol/node";
 import { __test__ as serviceTest, DefaultLspManagerService } from "./service";
 
 type LifecycleClient = Parameters<typeof serviceTest.registerClientLifecycle>[0];
