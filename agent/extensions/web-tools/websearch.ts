@@ -409,6 +409,7 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 			'Use websearch with mode="exact" for exact identifiers, package names, quoted text, or error messages; use websearch with mode="semantic" for broader topic discovery.',
 		],
 		parameters: WebsearchParams,
+		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute(_toolCallId, params, signal) {
 			return executeWebsearch(params, { signal });
 		},
