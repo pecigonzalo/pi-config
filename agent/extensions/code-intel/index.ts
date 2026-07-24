@@ -25,7 +25,14 @@ import {
 	matchDefinition,
 	mergeDefinitions,
 } from "./src/extractors";
-import { buildDetails, formatAction, formatCallHint, textResult, truncateForTool } from "./src/helpers";
+import {
+	buildDetails,
+	formatAction,
+	formatCallHint,
+	normalizeCodeIntelParams,
+	textResult,
+	truncateForTool,
+} from "./src/helpers";
 import { hydrateLspDocumentSymbols, identifierAtPosition } from "./src/lsp";
 import { languageForPath } from "./src/source-files";
 import { hydrateTreeSitterDefinitions, parseTreeSitterTagsOutput } from "./src/tree-sitter";
@@ -85,6 +92,7 @@ export default function codeIntelExtension(pi: ExtensionAPI) {
 			return new Text(rendered, 0, 0);
 		},
 		async execute(_toolCallId, params: CodeIntelParams, signal, _onUpdate, ctx) {
+			params = normalizeCodeIntelParams(params);
 			let output: string;
 			switch (params.action) {
 				case "status":
@@ -169,6 +177,7 @@ export const __test = {
 	hydrateLspDocumentSymbols,
 	identifierAtPosition,
 	mergeDefinitions,
+	normalizeCodeIntelParams,
 	renderTextMatchFallback,
 	findIdentifierLineMatches,
 	getDefinitionEnd,

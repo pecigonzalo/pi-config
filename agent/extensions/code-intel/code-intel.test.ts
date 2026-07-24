@@ -35,6 +35,29 @@ function definition(overrides: Partial<Definition> & Pick<Definition, "name" | "
 	};
 }
 
+describe("code-intel parameter normalization", () => {
+	test("drops neutral filler fields from full-schema calls", () => {
+		expect(
+			__test.normalizeCodeIntelParams({
+				action: "repo_map",
+				root: "",
+				mapTokens: 0,
+				maxFiles: 0,
+				maxFileBytes: 0,
+				include: [],
+				exclude: [],
+				query: "",
+				path: "",
+				symbol: "",
+				line: 0,
+				column: 0,
+				limit: 0,
+				sliceMode: "any",
+			}),
+		).toEqual({ action: "repo_map" });
+	});
+});
+
 describe("code-intel Phase 1 extraction", () => {
 	test("extracts TypeScript declarations and methods", () => {
 		const defs = __test.extractDefinitions(

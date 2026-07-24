@@ -25,6 +25,20 @@ export function summarizeResult(params: Partial<CodeIntelParams>, text: string):
 	return counts ? `${prefix} (${counts})` : prefix;
 }
 
+export function normalizeCodeIntelParams(params: CodeIntelParams): CodeIntelParams {
+	const normalized: Partial<CodeIntelParams> = { action: params.action };
+	for (const [key, value] of Object.entries(params)) {
+		if (key === "action") continue;
+		if (value === undefined || value === null) continue;
+		if (typeof value === "string" && value === "") continue;
+		if (typeof value === "number" && value === 0) continue;
+		if (Array.isArray(value) && value.length === 0) continue;
+		if (key === "sliceMode" && value === "any") continue;
+		(normalized as Record<string, unknown>)[key] = value;
+	}
+	return normalized as CodeIntelParams;
+}
+
 export function buildDetails(params: Partial<CodeIntelParams>, text: string): CodeIntelDetails {
 	const lines = text.split("\n");
 	return {
