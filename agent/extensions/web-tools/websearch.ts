@@ -16,6 +16,7 @@ import {
 
 const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 10;
+const MAX_DOMAINS = 10;
 const DEFAULT_EXA_MCP_URL = "https://mcp.exa.ai/mcp";
 const EXA_MCP_TIMEOUT_SECONDS = clampTimeout(
 	process.env.WEBSEARCH_TIMEOUT_SECONDS ? Number(process.env.WEBSEARCH_TIMEOUT_SECONDS) : DEFAULT_TIMEOUT_SECONDS,
@@ -26,18 +27,14 @@ export const WebsearchParams = Type.Object(
 		query: Type.String({ description: "Search query for discovering relevant public web pages" }),
 		limit: Type.Optional(
 			Type.Number({
-				description: `Maximum number of results to return (1..${MAX_LIMIT}, default ${DEFAULT_LIMIT})`,
-				minimum: 1,
-				maximum: MAX_LIMIT,
-				multipleOf: 1,
+				description: `Maximum number of results to return, integer (1..${MAX_LIMIT}, default ${DEFAULT_LIMIT})`,
 			}),
 		),
 		domains: Type.Optional(
 			Type.Array(
 				Type.String({ description: "Restrict search to a domain or subdomain, e.g. docs.example.com" }),
 				{
-					description: "Optional allowlist of domains to search within",
-					maxItems: 10,
+					description: `Optional allowlist of domains to search within, up to ${MAX_DOMAINS}`,
 				},
 			),
 		),
@@ -330,7 +327,7 @@ export async function executeWebsearch(
 	const query = normalizeQuery(params.query);
 	const appliedLimit = normalizeLimit(params.limit);
 	const mode = normalizeMode(params.mode);
-	const domains = normalizeDomainFilters(params.domains);
+	const domains = normalizeDomainFilters(params.domains).slice(0, MAX_DOMAINS);
 	const warnings: string[] = [];
 
 	const { response, requestId, text, endpoint, bodyTruncated } = await callExaMcpSearch(

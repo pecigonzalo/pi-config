@@ -17,13 +17,18 @@ afterEach(() => {
 });
 
 describe("WebsearchParams", () => {
-	test("constrains limit schema to whole numbers in the supported range", () => {
-		const limit = (
-			WebsearchParams as { properties: { limit: { minimum?: number; maximum?: number; multipleOf?: number } } }
-		).properties.limit;
-		expect(limit.minimum).toBe(1);
-		expect(limit.maximum).toBe(10);
-		expect(limit.multipleOf).toBe(1);
+	test("documents the supported limit range without unsupported schema keywords", () => {
+		const limit = (WebsearchParams as { properties: { limit: { description?: string } } }).properties.limit;
+		expect(limit.description).toContain("1..10");
+		expect(limit).not.toHaveProperty("minimum");
+		expect(limit).not.toHaveProperty("maximum");
+		expect(limit).not.toHaveProperty("multipleOf");
+	});
+
+	test("documents the domains allowlist cap without unsupported schema keywords", () => {
+		const domains = (WebsearchParams as { properties: { domains: { description?: string } } }).properties.domains;
+		expect(domains.description).toContain("10");
+		expect(domains).not.toHaveProperty("maxItems");
 	});
 });
 

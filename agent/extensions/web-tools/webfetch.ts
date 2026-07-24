@@ -34,10 +34,7 @@ export const WebfetchParams = Type.Object(
 		),
 		timeout: Type.Optional(
 			Type.Number({
-				description: `Timeout in seconds (1..${MAX_TIMEOUT_SECONDS}, default ${DEFAULT_TIMEOUT_SECONDS})`,
-				minimum: 1,
-				maximum: MAX_TIMEOUT_SECONDS,
-				multipleOf: 1,
+				description: `Timeout in seconds, integer (1..${MAX_TIMEOUT_SECONDS}, default ${DEFAULT_TIMEOUT_SECONDS})`,
 			}),
 		),
 	},

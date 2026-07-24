@@ -2,13 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { executeWebfetch, WebfetchParams } from "./webfetch";
 
 describe("WebfetchParams", () => {
-	test("constrains timeout schema to whole seconds in the supported range", () => {
-		const timeout = (
-			WebfetchParams as { properties: { timeout: { minimum?: number; maximum?: number; multipleOf?: number } } }
-		).properties.timeout;
-		expect(timeout.minimum).toBe(1);
-		expect(timeout.maximum).toBe(120);
-		expect(timeout.multipleOf).toBe(1);
+	test("documents the supported timeout range without unsupported schema keywords", () => {
+		const timeout = (WebfetchParams as { properties: { timeout: { description?: string } } }).properties.timeout;
+		expect(timeout.description).toContain("1..120");
+		expect(timeout).not.toHaveProperty("minimum");
+		expect(timeout).not.toHaveProperty("maximum");
+		expect(timeout).not.toHaveProperty("multipleOf");
 	});
 });
 
