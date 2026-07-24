@@ -8,25 +8,29 @@ const StoreStatusSchema = StringEnum(["active", "archived", "deprecated"] as con
 	description: "Store item lifecycle status.",
 });
 
-const StoreReadParams = Type.Object({
-	id: Type.Optional(
-		Type.String({
-			description:
-				"Optional: Specific item ID to retrieve (READ mode). Returns full item including data field. Omit for LIST mode.",
-		}),
-	),
-	tags: Type.Optional(
-		Type.Array(Type.String(), {
-			description:
-				"Optional: Filter by tags in LIST mode (AND logic - must match ALL tags). Example: ['auth', 'critical']",
-		}),
-	),
-	includeArchived: Type.Optional(
-		Type.Boolean({
-			description: "Optional: Include archived items in LIST mode (defaults to false to hide archived items).",
-		}),
-	),
-});
+const StoreReadParams = Type.Object(
+	{
+		id: Type.Optional(
+			Type.String({
+				description:
+					"Optional: Specific item ID to retrieve (READ mode). Returns full item including data field. Omit for LIST mode.",
+			}),
+		),
+		tags: Type.Optional(
+			Type.Array(Type.String(), {
+				description:
+					"Optional: Filter by tags in LIST mode (AND logic - must match ALL tags). Example: ['auth', 'critical']",
+			}),
+		),
+		includeArchived: Type.Optional(
+			Type.Boolean({
+				description:
+					"Optional: Include archived items in LIST mode (defaults to false to hide archived items).",
+			}),
+		),
+	},
+	{ additionalProperties: false },
+);
 
 const StoreWriteParams = Type.Object({
 	summary: Type.String({ minLength: 1, description: "Required: Concise description of what is being stored" }),
@@ -58,9 +62,12 @@ const StorePatchParams = Type.Object({
 	data: Type.Optional(Type.Any({ description: "Optional: New data payload to replace existing data" })),
 });
 
-const StoreDeleteParams = Type.Object({
-	id: Type.String({ description: "Required: ID of the item to delete from the store" }),
-});
+const StoreDeleteParams = Type.Object(
+	{
+		id: Type.String({ description: "Required: ID of the item to delete from the store" }),
+	},
+	{ additionalProperties: false },
+);
 
 type Theme = {
 	fg(name: string, text: string): string;

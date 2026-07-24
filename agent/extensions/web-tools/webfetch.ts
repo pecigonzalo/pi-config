@@ -24,22 +24,25 @@ import {
 
 const MAX_FETCH_BYTES = 2 * 1024 * 1024; // 2MB raw response cap before normalization.
 
-export const WebfetchParams = Type.Object({
-	url: Type.String({ description: "HTTP(S) URL to fetch" }),
-	format: Type.Optional(
-		StringEnum(["markdown", "text", "html"] as const, {
-			description: "Response format (default: markdown for HTML, text otherwise)",
-		}),
-	),
-	timeout: Type.Optional(
-		Type.Number({
-			description: `Timeout in seconds (1..${MAX_TIMEOUT_SECONDS}, default ${DEFAULT_TIMEOUT_SECONDS})`,
-			minimum: 1,
-			maximum: MAX_TIMEOUT_SECONDS,
-			multipleOf: 1,
-		}),
-	),
-});
+export const WebfetchParams = Type.Object(
+	{
+		url: Type.String({ description: "HTTP(S) URL to fetch" }),
+		format: Type.Optional(
+			StringEnum(["markdown", "text", "html"] as const, {
+				description: "Response format (default: markdown for HTML, text otherwise)",
+			}),
+		),
+		timeout: Type.Optional(
+			Type.Number({
+				description: `Timeout in seconds (1..${MAX_TIMEOUT_SECONDS}, default ${DEFAULT_TIMEOUT_SECONDS})`,
+				minimum: 1,
+				maximum: MAX_TIMEOUT_SECONDS,
+				multipleOf: 1,
+			}),
+		),
+	},
+	{ additionalProperties: false },
+);
 
 export type WebfetchFormat = "markdown" | "text" | "html";
 

@@ -21,29 +21,35 @@ const EXA_MCP_TIMEOUT_SECONDS = clampTimeout(
 	process.env.WEBSEARCH_TIMEOUT_SECONDS ? Number(process.env.WEBSEARCH_TIMEOUT_SECONDS) : DEFAULT_TIMEOUT_SECONDS,
 );
 
-export const WebsearchParams = Type.Object({
-	query: Type.String({ description: "Search query for discovering relevant public web pages" }),
-	limit: Type.Optional(
-		Type.Number({
-			description: `Maximum number of results to return (1..${MAX_LIMIT}, default ${DEFAULT_LIMIT})`,
-			minimum: 1,
-			maximum: MAX_LIMIT,
-			multipleOf: 1,
-		}),
-	),
-	domains: Type.Optional(
-		Type.Array(Type.String({ description: "Restrict search to a domain or subdomain, e.g. docs.example.com" }), {
-			description: "Optional allowlist of domains to search within",
-			maxItems: 10,
-		}),
-	),
-	mode: Type.Optional(
-		StringEnum(["auto", "exact", "semantic"] as const, {
-			description:
-				'Search mode: "auto" (default), "exact" for identifiers/error text/package names, or "semantic" for conceptual/topic retrieval',
-		}),
-	),
-});
+export const WebsearchParams = Type.Object(
+	{
+		query: Type.String({ description: "Search query for discovering relevant public web pages" }),
+		limit: Type.Optional(
+			Type.Number({
+				description: `Maximum number of results to return (1..${MAX_LIMIT}, default ${DEFAULT_LIMIT})`,
+				minimum: 1,
+				maximum: MAX_LIMIT,
+				multipleOf: 1,
+			}),
+		),
+		domains: Type.Optional(
+			Type.Array(
+				Type.String({ description: "Restrict search to a domain or subdomain, e.g. docs.example.com" }),
+				{
+					description: "Optional allowlist of domains to search within",
+					maxItems: 10,
+				},
+			),
+		),
+		mode: Type.Optional(
+			StringEnum(["auto", "exact", "semantic"] as const, {
+				description:
+					'Search mode: "auto" (default), "exact" for identifiers/error text/package names, or "semantic" for conceptual/topic retrieval',
+			}),
+		),
+	},
+	{ additionalProperties: false },
+);
 
 export type WebsearchMode = "auto" | "exact" | "semantic";
 

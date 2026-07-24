@@ -6,11 +6,14 @@ import { Type } from "typebox";
 
 const MAX_SKILL_BYTES = 50 * 1024;
 
-const SkillParams = Type.Object({
-	name: Type.String({
-		description: "Discovered skill name to load, for example 'role-architect'",
-	}),
-});
+const SkillParams = Type.Object(
+	{
+		name: Type.String({
+			description: "Discovered skill name to load, for example 'role-architect'",
+		}),
+	},
+	{ additionalProperties: false },
+);
 
 interface LoadedSkillRecord {
 	name: string;

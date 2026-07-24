@@ -176,26 +176,31 @@ function describeAvailableCapabilityProfiles(): string {
 	}
 }
 
-const CodemodeParams = Type.Object({
-	code: Type.String({ description: "TypeScript code to execute inside the CodeMode runtime" }),
-	mode: Type.Optional(
-		StringEnum(["analysis", "orchestrator"] as const, {
-			description:
-				'CodeMode capability mode. "analysis" exposes message/artifact/MCP bridges. "orchestrator" additionally exposes task/todo bridges.',
-		}),
-	),
-	profile: Type.Optional(
-		Type.String({
-			description:
-				"Existing capability profile whose permissions profile further constrains the sandbox. It cannot grant access beyond the current session profile. Omit to inherit the current session permissions profile." +
-				describeAvailableCapabilityProfiles(),
-		}),
-	),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (1..120, default 30)" })),
-	cwd: Type.Optional(
-		Type.String({ description: "Optional working directory override, relative to current cwd unless absolute" }),
-	),
-});
+const CodemodeParams = Type.Object(
+	{
+		code: Type.String({ description: "TypeScript code to execute inside the CodeMode runtime" }),
+		mode: Type.Optional(
+			StringEnum(["analysis", "orchestrator"] as const, {
+				description:
+					'CodeMode capability mode. "analysis" exposes message/artifact/MCP bridges. "orchestrator" additionally exposes task/todo bridges.',
+			}),
+		),
+		profile: Type.Optional(
+			Type.String({
+				description:
+					"Existing capability profile whose permissions profile further constrains the sandbox. It cannot grant access beyond the current session profile. Omit to inherit the current session permissions profile." +
+					describeAvailableCapabilityProfiles(),
+			}),
+		),
+		timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (1..120, default 30)" })),
+		cwd: Type.Optional(
+			Type.String({
+				description: "Optional working directory override, relative to current cwd unless absolute",
+			}),
+		),
+	},
+	{ additionalProperties: false },
+);
 
 function detectAgentName(pi: ExtensionAPI): string {
 	if (process.env.PI_AGENT_NAME) return process.env.PI_AGENT_NAME;
