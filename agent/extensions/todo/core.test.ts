@@ -327,6 +327,68 @@ describe("todo output truncation", () => {
 });
 
 describe("todo regressions to fix", () => {
+	it("ignores neutral filler fields when callers send the full tool schema for list", () => {
+		const harness = createHarness();
+		harness.execute({ action: "add", title: "Visible item" });
+
+		const result = harness.execute({
+			action: "list",
+			id: 0,
+			title: "",
+			description: "",
+			tags: [],
+			priority: "med",
+			effort: "M",
+			parentId: 0,
+			blockerIds: [],
+			addBlockerIds: [],
+			removeBlockerIds: [],
+			clearParent: false,
+			toStatus: "todo",
+			view: "default",
+			includeArchived: false,
+			status: "todo",
+			tag: "",
+			archived: false,
+			limit: 0,
+			historyLimit: 0,
+		});
+
+		expect(result.details.error).toBeUndefined();
+		expect(result.content[0].text).toContain("Visible item");
+	});
+
+	it("ignores neutral filler fields when callers send the full tool schema for add", () => {
+		const harness = createHarness();
+
+		const result = harness.execute({
+			action: "add",
+			id: 0,
+			title: "Full shape add",
+			description: "",
+			tags: [],
+			priority: "med",
+			effort: "M",
+			parentId: 0,
+			blockerIds: [],
+			addBlockerIds: [],
+			removeBlockerIds: [],
+			clearParent: false,
+			toStatus: "todo",
+			view: "default",
+			includeArchived: false,
+			status: "todo",
+			tag: "",
+			archived: false,
+			limit: 0,
+			historyLimit: 0,
+		});
+
+		expect(result.details.error).toBeUndefined();
+		expect(harness.todo(1)?.title).toBe("Full shape add");
+		expect(harness.todo(1)?.parentId).toBeUndefined();
+	});
+
 	it("BUG: /todos tag filtering should match tags regardless of command casing", () => {
 		const harness = createHarness();
 		harness.execute({ action: "add", title: "Investigate filter", tags: ["Backend"] });

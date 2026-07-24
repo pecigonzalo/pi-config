@@ -184,6 +184,50 @@ export function resultText(result: TodoResult): string {
 	return text?.type === "text" ? text.text : "";
 }
 
+function isDefaultFillerParam(key: string, value: unknown): boolean {
+	if (value === undefined || value === null) return true;
+	switch (key) {
+		case "id":
+		case "parentId":
+		case "limit":
+		case "historyLimit":
+			return value === 0;
+		case "title":
+		case "description":
+		case "tag":
+			return value === "";
+		case "tags":
+		case "blockerIds":
+		case "addBlockerIds":
+		case "removeBlockerIds":
+			return Array.isArray(value) && value.length === 0;
+		case "clearParent":
+		case "includeArchived":
+		case "archived":
+			return value === false;
+		case "priority":
+			return value === "med";
+		case "effort":
+			return value === "M";
+		case "toStatus":
+		case "status":
+			return value === "todo";
+		case "view":
+			return value === "default";
+		default:
+			return false;
+	}
+}
+
+function normalizeTodoParams(params: TodoExecuteParams): TodoExecuteParams {
+	const normalized: Partial<TodoExecuteParams> = { action: params.action };
+	for (const [key, value] of Object.entries(params)) {
+		if (key === "action" || isDefaultFillerParam(key, value)) continue;
+		(normalized as Record<string, unknown>)[key] = value;
+	}
+	return normalized as TodoExecuteParams;
+}
+
 function validateActionParams(
 	state: TodoState,
 	action: TodoAction,
@@ -259,6 +303,7 @@ export function executeTodoAction(
 	state: TodoState,
 	params: TodoExecuteParams,
 ): { state: TodoState; result: TodoResult } {
+	params = normalizeTodoParams(params);
 	const nextState = cloneState(state);
 	const actionValidation = validateActionParams(nextState, params.action, params);
 	if (actionValidation.ok === false) {
