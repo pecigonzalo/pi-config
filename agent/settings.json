@@ -1,10 +1,9 @@
 {
-  "lastChangelogVersion": "0.80.10",
+  "lastChangelogVersion": "0.82.0",
   "theme": "dracula",
   "extensions": [
     "-extensions/store/index.ts",
-    "-extensions/learning-review/index.ts",
-    "/Users/pecigonzalo/.pi/.claude/worktrees/pi-prompt-summarization-629fc8/agent/extensions/learning-review/index.disabled.ts"
+    "-extensions/learning-review/index.ts"
   ],
   "defaultProvider": "anthropic",
   "defaultModel": "claude-sonnet-5",
