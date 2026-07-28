@@ -292,7 +292,6 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 			'Use webfetch with format="markdown" or format="text" for readable extraction, and use format="html" only when raw markup is required.',
 			"Use webfetch for one URL at a time; webfetch is read-only and does not perform search or recursive browsing.",
 		],
-		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		parameters: WebfetchParams,
 		async execute(_toolCallId, params, signal) {
 			return executeWebfetch(params, { signal });

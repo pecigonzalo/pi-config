@@ -1128,7 +1128,6 @@ export default function (pi: ExtensionAPI) {
 			"When using the typescript tool, return a compact result and use artifact writing for larger outputs.",
 		],
 		parameters: CodemodeParams,
-		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		renderCall(args, theme, context) {
 			const codeMode = (args.mode ?? "analysis") as CodemodeMode;
 			const code = typeof args.code === "string" ? args.code : "";

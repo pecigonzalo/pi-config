@@ -281,7 +281,6 @@ export default function storeExtension(pi: ExtensionAPI) {
 			"Use storeread without an id to discover available durable context before creating duplicate store items.",
 		],
 		parameters: StoreReadParams,
-		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const result = await storeRead(rootFor(ctx), params);
 			return { content: [{ type: "text", text: stringifyResult(result) }], details: result };
@@ -354,7 +353,6 @@ export default function storeExtension(pi: ExtensionAPI) {
 		promptSnippet: "Permanently delete a durable store item by id.",
 		promptGuidelines: ["Use storedelete sparingly; prefer archiving or deprecating with storepatch when possible."],
 		parameters: StoreDeleteParams,
-		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const result = await storeDelete(rootFor(ctx), params);
 			return { content: [{ type: "text", text: stringifyResult(result) }], details: result };
