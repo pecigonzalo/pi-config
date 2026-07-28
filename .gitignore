@@ -1,4 +1,5 @@
 ### Pi
+agent/models-store.json
 .pi/**/*
 agent/trust.json
 agent/permissions-approvals.json
