@@ -3095,8 +3095,43 @@ function manualParentSessionOpenInstruction(sessionPath: string): string {
 /** Delivers one attach-view message into the same running worker -- steer() while it's mid-turn,
  * prompt() while idle. Exactly the routing `/tasks steer` already uses (deliverToLiveSession),
  * just with the rejection surfaced back to the caller instead of floated. */
-function sendAttachMessage(controller: LiveTaskController, message: string): Promise<void> {
-	return controller.session.isStreaming ? controller.session.steer(message) : controller.session.prompt(message);
+/**
+ * Sends one attach-view message into the same running worker and, unlike a plain steer/prompt
+ * call, actually closes the loop: reuses resumeWorkerRun (the same completion-tracking path a
+ * resumeSessionId call from the delegating parent uses) so that if this message is what makes
+ * the worker call task_complete, the parent still finds out -- the worker's controlSignal is a
+ * single shared object, and detection lives on the parent-side event watcher regardless of who
+ * is "driving" the worker at the time, but only whoever awaits the resulting turn and calls
+ * finalizeWorkerRun actually delivers the pingback and disposes the controller. A raw
+ * steer()/prompt() call (what this used to do) skips all of that -- the worker would call
+ * task_complete, detection would still fire, but nothing would be listening for the result or
+ * closing the worker down.
+ */
+async function driveAttachMessage(
+	pi: Pick<ExtensionAPI, "sendMessage">,
+	ctx: { ui: ExtensionUIContext },
+	controller: LiveTaskController,
+	message: string,
+	overlay: TaskAttachOverlay,
+): Promise<void> {
+	if (controller.session.isStreaming) {
+		await controller.session.steer(message);
+		return;
+	}
+	const result = await resumeWorkerRun({
+		controller,
+		task: message,
+		signal: undefined,
+		parentCtx: { ui: ctx.ui, hasUI: true },
+	});
+	if (result.errorMessage) overlay.setError(result.errorMessage);
+	if (!shouldSuppressTaskPingback(result)) {
+		void deliverTaskPingback(pi, buildSingleStepPingbackText(result), {
+			mode: "single",
+			toolCallId: controller.toolCallId,
+			result,
+		});
+	}
 }
 
 async function attachToLiveTaskRun(
@@ -3104,6 +3139,7 @@ async function attachToLiveTaskRun(
 	run: TaskRunView,
 	step: TaskRunStepView,
 	controller: LiveTaskController,
+	pi: Pick<ExtensionAPI, "sendMessage">,
 ): Promise<{ ok: true; opened: true; level: "info"; message: string }> {
 	const initialMessages = controller.session.messages
 		.filter((message): message is Message => message.role === "assistant" || message.role === "toolResult")
@@ -3124,15 +3160,20 @@ async function attachToLiveTaskRun(
 			done: (value: undefined) => void,
 		) => {
 			let unsubscribe = () => {};
+			// Serializes sends -- resumeWorkerRun reassigns the controller's shared controlSignal
+			// callbacks while it awaits, so a second send overlapping the first would clobber that
+			// tracking instead of queuing behind it.
+			let sendQueue: Promise<void> = Promise.resolve();
 			const overlay = new TaskAttachOverlay(
 				theme,
 				overlayState,
 				keybindings as any,
 				() => tui.requestRender(),
 				(message) => {
-					sendAttachMessage(controller, message).catch((error) =>
-						overlay.setError(error instanceof Error ? error.message : String(error)),
-					);
+					sendQueue = sendQueue
+						.catch(() => {})
+						.then(() => driveAttachMessage(pi, ctx, controller, message, overlay))
+						.catch((error) => overlay.setError(error instanceof Error ? error.message : String(error)));
 				},
 				() => {
 					unsubscribe();
@@ -3173,6 +3214,7 @@ async function openTaskRunSession(
 	run: TaskRunView,
 	preferredStep?: TaskRunStepView,
 	onReplacement?: () => void,
+	pi?: Pick<ExtensionAPI, "sendMessage">,
 ): Promise<{
 	ok: boolean;
 	opened?: boolean;
@@ -3208,7 +3250,7 @@ async function openTaskRunSession(
 	// overlay, not a one-shot notification.
 	const liveController = getLiveTaskController(makeTaskRunStepKey(run.runId, targetStep.step));
 	if (isLiveController(liveController)) {
-		if (supportsInteractiveAttach(ctx)) return attachToLiveTaskRun(ctx, run, targetStep, liveController);
+		if (supportsInteractiveAttach(ctx) && pi) return attachToLiveTaskRun(ctx, run, targetStep, liveController, pi);
 		return {
 			ok: false,
 			level: "warning",
@@ -3398,7 +3440,8 @@ async function browseTaskRuns(
 	ctx: any,
 	scope: TasksScope,
 	runs: TaskRunView[],
-	onReplacement?: () => void,
+	onReplacement: (() => void) | undefined,
+	pi: Pick<ExtensionAPI, "sendMessage">,
 ): Promise<boolean> {
 	if (!ctx.hasUI) return false;
 	const runOptions = runs.map((run, index) => formatTaskRunSummary(run, index + 1, false));
@@ -3483,7 +3526,7 @@ async function browseTaskRuns(
 		}
 		targetStep = persistedSteps[stepIndex];
 	}
-	const openResult = await openTaskRunSession(ctx, selectedRun, targetStep, onReplacement);
+	const openResult = await openTaskRunSession(ctx, selectedRun, targetStep, onReplacement, pi);
 	if (!openResult.opened) {
 		if (openResult.message) ctx.ui.notify(openResult.message, openResult.level);
 		syncTaskUiChrome(ctx);
@@ -4168,7 +4211,7 @@ export default function (pi: ExtensionAPI) {
 				if (parsed.action === "list") {
 					if (
 						await withTaskWidgetTemporarilyHidden(ctx, (onReplacement) =>
-							browseTaskRuns(ctx, parsed.scope, runs, onReplacement),
+							browseTaskRuns(ctx, parsed.scope, runs, onReplacement, pi),
 						)
 					)
 						return;
@@ -4221,7 +4264,7 @@ export default function (pi: ExtensionAPI) {
 					!!openTargetStep &&
 					isLiveController(getLiveTaskController(makeTaskRunStepKey(run.runId, openTargetStep.step)));
 				if (!openTargetIsLive) await ctx.waitForIdle();
-				const openResult = await openTaskRunSession(ctx, run, selectedStep);
+				const openResult = await openTaskRunSession(ctx, run, selectedStep, undefined, pi);
 				if (!openResult.opened) {
 					if (openResult.message) ctx.ui.notify(openResult.message, openResult.level);
 					syncTaskUiChrome(ctx);
@@ -4257,7 +4300,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (
 				await withTaskWidgetTemporarilyHidden(ctx, (onReplacement) =>
-					browseTaskRuns(ctx, "current", runs, onReplacement),
+					browseTaskRuns(ctx, "current", runs, onReplacement, pi),
 				)
 			)
 				return;
@@ -5185,6 +5228,5 @@ export const __test__ = {
 	openTaskRunSession,
 	revealTaskRunOrigin,
 	showTaskRunView,
-	sendAttachMessage,
 	withTaskWidgetTemporarilyHidden,
 };

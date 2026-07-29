@@ -2844,6 +2844,22 @@ describe("open attaches to a live worker instead of refusing", () => {
 		live.clearLiveTaskControllers();
 	});
 
+	const fakePi = { sendMessage: async () => {} };
+	// Resolves confirm/cancel directly (bypassing this file's own matchesKey mock, which always
+	// returns false) so tests can drive the real TaskAttachOverlay's handleInput.
+	const fakeKeybindings = {
+		matches: (data: string, binding: string) => {
+			if (binding === "tui.select.cancel") return data === "\x1b";
+			if (binding === "tui.select.confirm") return data === "\r";
+			return false;
+		},
+		getKeys: () => [],
+	};
+
+	function type(overlay: any, text: string): void {
+		for (const char of text) overlay.handleInput(char);
+	}
+
 	it("attaches via ui.custom in the TUI instead of refusing", async () => {
 		const session = createAttachableFakeSession();
 		const run = makeRun("attach-run-1", "attach-child-1", "running");
@@ -2859,13 +2875,13 @@ describe("open attaches to a live worker instead of refusing", () => {
 					// factory() wires up the overlay + its subscription; the host would normally keep it
 					// mounted until the user presses Esc (which calls done()) -- resolving immediately here
 					// stands in for that.
-					factory({ requestRender: () => {} }, {}, { matches: () => false, getKeys: () => [] }, () => {});
+					factory({ requestRender: () => {} }, {}, fakeKeybindings, () => {});
 					return undefined;
 				},
 			},
 		};
 
-		const result = await __test__.openTaskRunSession(ctx, run);
+		const result = await __test__.openTaskRunSession(ctx, run, undefined, undefined, fakePi);
 		expect(customCalls).toBe(1);
 		expect(result.opened).toBe(true);
 	});
@@ -2876,38 +2892,79 @@ describe("open attaches to a live worker instead of refusing", () => {
 		await withAttachableLiveController(run, session);
 
 		const ctx: any = { mode: "rpc", ui: { notify: () => {} } };
-		const result = await __test__.openTaskRunSession(ctx, run);
+		const result = await __test__.openTaskRunSession(ctx, run, undefined, undefined, fakePi);
 		expect(result.opened).not.toBe(true);
 		expect(result.message).toContain("still running");
 		expect(result.message).toContain("Open in the TUI");
 	});
 
-	it("routes a sent message to steer while mid-turn, prompt while idle", async () => {
-		const sent: Array<{ method: string; message: string }> = [];
-		const midTurnSession = createAttachableFakeSession({
-			isStreaming: true,
-			steer: async (message: string) => {
-				sent.push({ method: "steer", message });
+	it("delivers a pingback to the parent when a message sent from attach makes the worker call task_complete", async () => {
+		const sentMessages: Array<{ message: any; options: any }> = [];
+		const pi = {
+			sendMessage: async (message: any, options: any) => {
+				sentMessages.push({ message, options });
 			},
-		});
-		const midTurnRun = makeRun("attach-run-3", "attach-child-3", "running");
-		const midTurnController = await withAttachableLiveController(midTurnRun, midTurnSession);
-		await __test__.sendAttachMessage(midTurnController, "hi");
-		expect(sent).toEqual([{ method: "steer", message: "hi" }]);
-
-		const idleSession = createAttachableFakeSession({
+		};
+		const session = createAttachableFakeSession({
 			isStreaming: false,
-			prompt: async (message: string) => {
-				sent.push({ method: "prompt", message });
+			prompt: async () => {
+				// Simulates the worker calling task_complete during this turn -- detected on the
+				// parent's own event watcher (task-rpc-worker.ts), independent of who drove the turn.
+				controller.controlSignal.onComplete("All done via attach.");
 			},
 		});
-		const idleRun = makeRun("attach-run-4", "attach-child-4", "running");
-		const idleController = await withAttachableLiveController(idleRun, idleSession);
-		await __test__.sendAttachMessage(idleController, "next");
-		expect(sent).toEqual([
-			{ method: "steer", message: "hi" },
-			{ method: "prompt", message: "next" },
-		]);
+		const run = makeRun("attach-run-3", "attach-child-3", "running");
+		const controller = await withAttachableLiveController(run, session);
+
+		const ctx: any = {
+			mode: "tui",
+			ui: {
+				notify: () => {},
+				custom: async (factory: any) => {
+					const overlay = factory({ requestRender: () => {} }, {}, fakeKeybindings, () => {});
+					type(overlay, "please finish up");
+					overlay.handleInput("\r");
+					// onSend fires driveAttachMessage() in the background (the real overlay stays
+					// mounted until Esc, giving it as long as it needs) -- flush the microtask queue
+					// so the send settles before this mock resolves.
+					await new Promise((resolve) => setTimeout(resolve, 0));
+					return undefined;
+				},
+			},
+		};
+
+		await __test__.openTaskRunSession(ctx, run, undefined, undefined, pi);
+
+		expect(sentMessages).toHaveLength(1);
+		expect(sentMessages[0]?.message.content[0].text).toContain("All done via attach.");
+		expect((await import("./task-live.js")).getLiveTaskController("attach-run-3:1")).toBeUndefined();
+	});
+
+	it("does not deliver a pingback for a raw mid-turn steer (no completion tracking possible)", async () => {
+		const sent: string[] = [];
+		const pi = { sendMessage: async () => sent.push("pingback") };
+		const session = createAttachableFakeSession({
+			isStreaming: true,
+			steer: async () => {},
+		});
+		const run = makeRun("attach-run-4", "attach-child-4", "running");
+		await withAttachableLiveController(run, session);
+
+		const ctx: any = {
+			mode: "tui",
+			ui: {
+				notify: () => {},
+				custom: async (factory: any) => {
+					const overlay = factory({ requestRender: () => {} }, {}, fakeKeybindings, () => {});
+					type(overlay, "hi");
+					overlay.handleInput("\r");
+					return undefined;
+				},
+			},
+		};
+
+		await __test__.openTaskRunSession(ctx, run, undefined, undefined, pi);
+		expect(sent).toEqual([]);
 	});
 });
 
