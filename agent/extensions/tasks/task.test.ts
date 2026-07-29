@@ -161,9 +161,10 @@ function createResources(overrides: Record<string, unknown> = {}) {
 }
 
 function createExtensionHarness() {
-	let tool: any;
+	const tools: Record<string, any> = {};
 	const eventHandlers: Record<string, (...args: any[]) => any> = {};
 	const commandHandlers: Record<string, any> = {};
+	const sentMessages: Array<{ message: any; options: any }> = [];
 	const pi = {
 		registerFlag: () => {},
 		on: (eventName: string, handler: (...args: any[]) => any) => {
@@ -174,7 +175,7 @@ function createExtensionHarness() {
 		},
 		registerShortcut: () => {},
 		registerTool: (definition: any) => {
-			tool = definition;
+			tools[definition.name] = definition;
 		},
 		getFlag: () => undefined,
 		getAllTools: () => [],
@@ -183,9 +184,12 @@ function createExtensionHarness() {
 		setActiveTools: () => {},
 		setModel: async () => true,
 		setThinkingLevel: () => {},
+		sendMessage: async (message: any, options: any) => {
+			sentMessages.push({ message, options });
+		},
 	};
 	taskExtension(pi as any);
-	return { tool, eventHandlers, commandHandlers, pi };
+	return { tool: tools.task, tools, eventHandlers, commandHandlers, pi, sentMessages };
 }
 
 function createTaskTool() {
@@ -288,6 +292,9 @@ describe("tasks extension UI chrome", () => {
 		let releaseClose: (() => void) | undefined;
 		live.setLiveTaskController({
 			key: "shutdown-test",
+			// Matches the shutting-down session's own id below -- only a controller for that
+			// exact session gets closed; an unrelated worker's controller would be left alone.
+			childSessionId: "shutdown",
 			close: async (error: Error = new Error("closed")) => {
 				rejectPending?.(error);
 				await new Promise<void>((resolve) => {
@@ -310,6 +317,31 @@ describe("tasks extension UI chrome", () => {
 		releaseClose?.();
 		await shutdown;
 		expect(live.listLiveTaskControllers()).toHaveLength(0);
+	});
+
+	it("leaves an unrelated session's live controller alone -- e.g. a delegating parent switching sessions must not kill a still-live worker", async () => {
+		const { eventHandlers } = createExtensionHarness();
+		const live = await import("./task-live.js");
+		let closeCalls = 0;
+		live.setLiveTaskController({
+			key: "unrelated-worker",
+			childSessionId: "worker-session-unrelated",
+			close: async () => {
+				closeCalls++;
+			},
+		} as any);
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			ui: { setWidget: () => {}, setStatus: () => {} },
+			sessionManager: { getSessionId: () => "some-other-session-shutting-down", getSessionFile: () => undefined },
+		};
+
+		await eventHandlers.session_shutdown?.({}, ctx);
+
+		expect(closeCalls).toBe(0);
+		expect(live.getLiveTaskController("unrelated-worker")).toBeDefined();
+		live.clearLiveTaskControllers();
 	});
 
 	it("toggles the task widget for the current session", async () => {
@@ -1892,29 +1924,37 @@ describe("main-session composition recovery", () => {
 });
 
 describe("tasks extension worker UI relay", () => {
+	function relayOnce(params: {
+		event: Record<string, unknown>;
+		controller: { agent: string; step: number; key: string };
+		parentUi?: any;
+		relayedKeys: { status: Set<string>; widget: Set<string> };
+	}): Promise<Record<string, unknown>> {
+		return new Promise((resolve) => {
+			__test__.relayTaskExtensionUiRequest({ ...params, respond: resolve });
+		});
+	}
+
 	it("relays dialog requests to the parent UI, prefixed with the worker's task label", async () => {
-		const selectCalls: Array<{ title: string; options: string[]; opts?: unknown }> = [];
+		const selectCalls: Array<{ title: string; options: string[] }> = [];
 		const parentUi: any = {
-			select: async (title: string, options: string[], opts?: unknown) => {
-				selectCalls.push({ title, options, opts });
+			select: async (title: string, options: string[]) => {
+				selectCalls.push({ title, options });
 				return "Allow once";
 			},
 		};
 		const relayedKeys = { status: new Set<string>(), widget: new Set<string>() };
-		const workerUi = __test__.createWorkerUiContext(
+		const response = await relayOnce({
+			event: { id: "req-1", method: "select", title: "Permission required", options: ["Allow once", "Block"] },
+			controller: { agent: "thinker", step: 1, key: "run-1:1" },
 			parentUi,
-			{ agent: "thinker", step: 1, key: "run-1:1" },
 			relayedKeys,
-		);
+		});
 
-		const opts = { timeout: 5000 };
-		const value = await workerUi.select("Permission required", ["Allow once", "Block"], opts);
-
-		expect(value).toBe("Allow once");
+		expect(response).toEqual({ type: "extension_ui_response", id: "req-1", value: "Allow once" });
 		expect(selectCalls).toHaveLength(1);
 		expect(selectCalls[0]?.title).toBe("Task thinker step 1 · Permission required");
 		expect(selectCalls[0]?.options).toEqual(["Allow once", "Block"]);
-		expect(selectCalls[0]?.opts).toBe(opts);
 	});
 
 	it("serializes dialog relays from concurrently-running child tasks", async () => {
@@ -1938,19 +1978,18 @@ describe("tasks extension worker UI relay", () => {
 			},
 		};
 		const relayedKeys = { status: new Set<string>(), widget: new Set<string>() };
-		const firstWorkerUi = __test__.createWorkerUiContext(
+		const firstConfirm = relayOnce({
+			event: { id: "req-1", method: "confirm", title: "Permission required" },
+			controller: { agent: "thinker", step: 1, key: "run-dialog:1" },
 			parentUi,
-			{ agent: "thinker", step: 1, key: "run-dialog:1" },
 			relayedKeys,
-		);
-		const secondWorkerUi = __test__.createWorkerUiContext(
+		});
+		const secondConfirm = relayOnce({
+			event: { id: "req-2", method: "confirm", title: "Permission required" },
+			controller: { agent: "thinker", step: 2, key: "run-dialog:2" },
 			parentUi,
-			{ agent: "thinker", step: 2, key: "run-dialog:2" },
 			relayedKeys,
-		);
-
-		const firstConfirm = firstWorkerUi.confirm("Permission required", "");
-		const secondConfirm = secondWorkerUi.confirm("Permission required", "");
+		});
 
 		await firstConfirmStartedPromise;
 		await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1962,22 +2001,16 @@ describe("tasks extension worker UI relay", () => {
 
 		expect(confirmCalls).toHaveLength(2);
 		expect(confirmCalls[1]).toContain("step 2");
-		expect(firstResult).toBe(true);
-		expect(secondResult).toBe(true);
+		expect(firstResult).toEqual({ type: "extension_ui_response", id: "req-1", confirmed: true });
+		expect(secondResult).toEqual({ type: "extension_ui_response", id: "req-2", confirmed: true });
 	});
 
-	it("falls back to a notification for non-TUI task viewing", async () => {
+	it("shows a task run's detail + transcript as a plain notification", async () => {
 		const notifications: Array<{ text: string; level?: string }> = [];
-		await __test__.openTaskViewerOverlay(
+		await __test__.showTaskRunView(
 			{
 				hasUI: true,
-				mode: "rpc",
-				ui: {
-					custom: async () => {
-						throw new Error("custom must not be called");
-					},
-					notify: (text: string, level?: string) => notifications.push({ text, level }),
-				},
+				ui: { notify: (text: string, level?: string) => notifications.push({ text, level }) },
 			},
 			"current",
 			{
@@ -1999,37 +2032,32 @@ describe("tasks extension worker UI relay", () => {
 		expect(notifications[0]?.text).toContain("No task steps available.");
 	});
 
-	it("uses the custom task viewer in TUI mode", async () => {
-		let customCalls = 0;
-		await __test__.openTaskViewerOverlay(
+	it("warns instead of notifying when there is no real UI", async () => {
+		const notifications: Array<{ text: string; level?: string }> = [];
+		await __test__.showTaskRunView(
 			{
-				hasUI: true,
-				mode: "tui",
-				ui: {
-					custom: async () => {
-						customCalls++;
-						return undefined;
-					},
-					notify: () => {},
-				},
+				hasUI: false,
+				ui: { notify: (text: string, level?: string) => notifications.push({ text, level }) },
 			},
 			"current",
 			{
-				runId: "run-tui",
+				runId: "run-no-ui",
 				mode: "single",
 				status: "succeeded",
 				stepCount: 0,
 				persistedStepCount: 0,
 				steps: [],
 				warnings: [],
-				internalRunKey: "run-tui",
+				internalRunKey: "run-no-ui",
 				toolCallId: "tool",
 				createdAt: "2026-01-01T00:00:00Z",
 				updatedAt: "2026-01-01T00:00:00Z",
 				latestSourceOrder: 1,
 			},
 		);
-		expect(customCalls).toBe(1);
+		expect(notifications).toHaveLength(1);
+		expect(notifications[0]?.level).toBe("warning");
+		expect(notifications[0]?.text).not.toContain("Run: run-no-ui");
 	});
 
 	it("namespaces status and widget updates from child tasks", () => {
@@ -2040,14 +2068,28 @@ describe("tasks extension worker UI relay", () => {
 			setWidget: (...args: any[]) => widgetCalls.push(args),
 		};
 		const relayedKeys = { status: new Set<string>(), widget: new Set<string>() };
-		const workerUi = __test__.createWorkerUiContext(
-			parentUi,
-			{ agent: "thinker", step: 2, key: "run-3:2" },
-			relayedKeys,
-		);
+		const controller = { agent: "thinker", step: 2, key: "run-3:2" };
 
-		workerUi.setStatus("permissions", "Waiting for approval");
-		workerUi.setWidget("approval", ["Choose an option", "Allow once", "Block"], { placement: "belowEditor" });
+		__test__.relayTaskExtensionUiRequest({
+			event: { id: "req-1", method: "setStatus", statusKey: "permissions", statusText: "Waiting for approval" },
+			controller,
+			parentUi,
+			relayedKeys,
+			respond: () => {},
+		});
+		__test__.relayTaskExtensionUiRequest({
+			event: {
+				id: "req-2",
+				method: "setWidget",
+				widgetKey: "approval",
+				widgetLines: ["Choose an option", "Allow once", "Block"],
+				widgetPlacement: "belowEditor",
+			},
+			controller,
+			parentUi,
+			relayedKeys,
+			respond: () => {},
+		});
 
 		expect(statusCalls).toHaveLength(1);
 		expect(statusCalls[0]?.[0]).toContain("tasks.run-3-2.status.permissions");
@@ -2069,13 +2111,19 @@ describe("tasks extension worker UI relay", () => {
 			},
 		};
 		const relayedKeys = { status: new Set<string>(), widget: new Set<string>() };
-		const workerUi = __test__.createWorkerUiContext(
-			parentUi,
-			{ agent: "implementer", step: 1, key: "run-notify:1" },
-			relayedKeys,
-		);
 
-		workerUi.notify("Bash sandbox active (mode=workspace-write)", "info");
+		__test__.relayTaskExtensionUiRequest({
+			event: {
+				id: "req-1",
+				method: "notify",
+				message: "Bash sandbox active (mode=workspace-write)",
+				notifyType: "info",
+			},
+			controller: { agent: "implementer", step: 1, key: "run-notify:1" },
+			parentUi,
+			relayedKeys,
+			respond: () => {},
+		});
 
 		expect(notifyCalls).toEqual([]);
 	});
@@ -2396,13 +2444,7 @@ describe("/tasks command parsing", () => {
 		expect(parsed.message).toBe("focus only on auth");
 	});
 
-	it("parses attach, origin, and view commands for the current scope", () => {
-		const attach = __test__.parseTasksCommand("attach task-1");
-		expect(attach.error).toBeUndefined();
-		expect(attach.scope).toBe("current");
-		expect(attach.action).toBe("attach");
-		expect(attach.selector).toBe("task-1");
-
+	it("parses origin and view commands for the current scope", () => {
 		const origin = __test__.parseTasksCommand("origin task-1");
 		expect(origin.error).toBeUndefined();
 		expect(origin.scope).toBe("current");
@@ -2456,9 +2498,10 @@ describe("task origin resolution", () => {
 });
 
 describe("/tasks list formatting", () => {
-	it("includes attach guidance in list output", () => {
+	it("includes open/steer guidance in list output", () => {
 		const output = __test__.formatTaskRunList("current", [makeRun("alpha-run", "alpha-child")]);
-		expect(output).toContain("/tasks attach <selector>");
+		expect(output).toContain("/tasks open <selector>");
+		expect(output).toContain("/tasks steer <selector> <message>");
 	});
 
 	it("uses the same run summary lines for the persistent task widget", () => {
@@ -2626,7 +2669,6 @@ test("tasks completions list all accepted subcommands", () => {
 		"list",
 		"view",
 		"open",
-		"attach",
 		"origin",
 		"steer",
 		"parent",
@@ -2711,6 +2753,7 @@ describe("live task controller access", () => {
 			task: "task",
 			agent: "agent",
 			session: createFakeSession(),
+			controlSignal: { onComplete: () => {}, onPing: () => {} },
 			close: async () => {},
 		});
 		controller.status = status;
@@ -2732,24 +2775,590 @@ describe("live task controller access", () => {
 		expect(__test__.resolveLiveTaskControllerForRun(finishedRun).controller).toBeUndefined();
 	});
 
-	it("describeTaskRunAccess offers attach and steer only while a controller is actually running", async () => {
+	it("describeTaskRunAccess offers steer only while a controller is actually running", async () => {
 		const runningRun = makeRun("running-run-2", "running-child-2", "running");
 		await withLiveController(runningRun, "running");
-		const runningAccess = __test__.describeTaskRunAccess(runningRun);
-		expect(runningAccess).toContain("attach");
-		expect(runningAccess).toContain("steer");
+		expect(__test__.describeTaskRunAccess(runningRun)).toContain("steer");
 
 		const finishedRun = makeRun("finished-run-2", "finished-child-2", "running");
 		await withLiveController(finishedRun, "completed");
-		const finishedAccess = __test__.describeTaskRunAccess(finishedRun);
-		expect(finishedAccess).not.toContain("attach");
-		expect(finishedAccess).not.toContain("steer");
+		expect(__test__.describeTaskRunAccess(finishedRun)).not.toContain("steer");
 	});
 
-	it("describeTaskRunAccess does not offer attach for a persisted step with no live controller", () => {
+	it("describeTaskRunAccess offers open regardless of whether the step is still live", async () => {
+		// "open" always does something valid: attach live (TUI-only) while the step is still
+		// running, or open the finished session file once it's done -- see openTaskRunSession.
 		const completedRun = makeRun("completed-run", "completed-child", "succeeded");
-		const access = __test__.describeTaskRunAccess(completedRun);
-		expect(access).toContain("open");
-		expect(access).not.toContain("attach");
+		expect(__test__.describeTaskRunAccess(completedRun)).toContain("open");
+
+		const runningRun = makeRun("running-run-3", "running-child-3", "running");
+		await withLiveController(runningRun, "running");
+		expect(__test__.describeTaskRunAccess(runningRun)).toContain("open");
+
+		const finishedRun = makeRun("finished-run-3", "finished-child-3", "running");
+		await withLiveController(finishedRun, "completed");
+		expect(__test__.describeTaskRunAccess(finishedRun)).toContain("open");
+	});
+});
+
+describe("open attaches to a live worker instead of refusing", () => {
+	function createAttachableFakeSession(overrides: Record<string, unknown> = {}): any {
+		const listeners = new Set<(event: unknown) => void>();
+		return {
+			messages: [],
+			isStreaming: false,
+			subscribe: (l: (event: unknown) => void) => {
+				listeners.add(l);
+				return () => listeners.delete(l);
+			},
+			emit: (event: unknown) => listeners.forEach((l) => l(event)),
+			steer: async () => {},
+			prompt: async () => {},
+			...overrides,
+		};
+	}
+
+	async function withAttachableLiveController(run: any, session: any) {
+		const live = await import("./task-live.js");
+		const runs = await import("./task-runs.js");
+		const key = runs.makeTaskRunStepKey(run.runId, run.steps[0].step);
+		const controller = live.registerAgentSessionController({
+			key,
+			toolCallId: run.toolCallId,
+			runId: run.runId,
+			step: run.steps[0].step,
+			childSessionId: run.steps[0].snapshot.childSessionId,
+			childSessionPath: run.steps[0].snapshot.childSessionPath,
+			task: "task",
+			agent: "agent",
+			session,
+			controlSignal: { onComplete: () => {}, onPing: () => {} },
+			close: async () => {},
+		});
+		controller.status = "running";
+		return controller;
+	}
+
+	afterEach(async () => {
+		const live = await import("./task-live.js");
+		live.clearLiveTaskControllers();
+	});
+
+	it("attaches via ui.custom in the TUI instead of refusing", async () => {
+		const session = createAttachableFakeSession();
+		const run = makeRun("attach-run-1", "attach-child-1", "running");
+		await withAttachableLiveController(run, session);
+
+		let customCalls = 0;
+		const ctx: any = {
+			mode: "tui",
+			ui: {
+				notify: () => {},
+				custom: async (factory: any) => {
+					customCalls++;
+					// factory() wires up the overlay + its subscription; the host would normally keep it
+					// mounted until the user presses Esc (which calls done()) -- resolving immediately here
+					// stands in for that.
+					factory({ requestRender: () => {} }, {}, { matches: () => false, getKeys: () => [] }, () => {});
+					return undefined;
+				},
+			},
+		};
+
+		const result = await __test__.openTaskRunSession(ctx, run);
+		expect(customCalls).toBe(1);
+		expect(result.opened).toBe(true);
+	});
+
+	it("falls back to a refusal message outside the TUI", async () => {
+		const session = createAttachableFakeSession();
+		const run = makeRun("attach-run-2", "attach-child-2", "running");
+		await withAttachableLiveController(run, session);
+
+		const ctx: any = { mode: "rpc", ui: { notify: () => {} } };
+		const result = await __test__.openTaskRunSession(ctx, run);
+		expect(result.opened).not.toBe(true);
+		expect(result.message).toContain("still running");
+		expect(result.message).toContain("Open in the TUI");
+	});
+
+	it("routes a sent message to steer while mid-turn, prompt while idle", async () => {
+		const sent: Array<{ method: string; message: string }> = [];
+		const midTurnSession = createAttachableFakeSession({
+			isStreaming: true,
+			steer: async (message: string) => {
+				sent.push({ method: "steer", message });
+			},
+		});
+		const midTurnRun = makeRun("attach-run-3", "attach-child-3", "running");
+		const midTurnController = await withAttachableLiveController(midTurnRun, midTurnSession);
+		await __test__.sendAttachMessage(midTurnController, "hi");
+		expect(sent).toEqual([{ method: "steer", message: "hi" }]);
+
+		const idleSession = createAttachableFakeSession({
+			isStreaming: false,
+			prompt: async (message: string) => {
+				sent.push({ method: "prompt", message });
+			},
+		});
+		const idleRun = makeRun("attach-run-4", "attach-child-4", "running");
+		const idleController = await withAttachableLiveController(idleRun, idleSession);
+		await __test__.sendAttachMessage(idleController, "next");
+		expect(sent).toEqual([
+			{ method: "steer", message: "hi" },
+			{ method: "prompt", message: "next" },
+		]);
+	});
+});
+
+describe("async task delegation pingback", () => {
+	function fakeSingleResult(overrides: Record<string, unknown> = {}): any {
+		return {
+			agent: "worker",
+			agentSource: "user",
+			task: "do the thing",
+			exitCode: 0,
+			messages: [],
+			stderr: "",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			sessionId: "worker-session-1",
+			...overrides,
+		};
+	}
+
+	function assistantTextMessage(text: string) {
+		return { role: "assistant", content: [{ type: "text", text }] };
+	}
+
+	describe("composeTaskResultBody", () => {
+		it("prefers the worker's own final message for a plain successful result", () => {
+			const result = fakeSingleResult({ messages: [assistantTextMessage("Found 3 callers of foo().")] });
+			expect(__test__.composeTaskResultBody(result)).toBe("Found 3 callers of foo().");
+		});
+
+		it("prefers the task_complete summary over the raw message text", () => {
+			const result = fakeSingleResult({
+				messages: [assistantTextMessage("some closing remark")],
+				completionSummary: "Found 3 callers of foo(), listed below.",
+			});
+			expect(__test__.composeTaskResultBody(result)).toBe("Found 3 callers of foo(), listed below.");
+		});
+
+		it("reports a failure with its stop reason", () => {
+			const result = fakeSingleResult({ exitCode: 1, stopReason: "error", errorMessage: "boom" });
+			expect(__test__.composeTaskResultBody(result)).toBe("Failed (error): boom");
+		});
+
+		it("reports an aborted step as a failure", () => {
+			const result = fakeSingleResult({ exitCode: 130, stopReason: "aborted", errorMessage: "Task was aborted" });
+			expect(__test__.composeTaskResultBody(result)).toContain("Failed (aborted)");
+		});
+
+		it("surfaces an ask_caller question with resume instructions, not as a failure", () => {
+			const result = fakeSingleResult({
+				awaitingReply: true,
+				pendingQuestion: "Should I also update the tests?",
+				sessionId: "worker-session-42",
+			});
+			const body = __test__.composeTaskResultBody(result);
+			expect(body).toContain("Needs input: Should I also update the tests?");
+			expect(body).toContain('resumeSessionId: "worker-session-42"');
+		});
+
+		it("surfaces a natural pause (no ask_caller, no task_complete) as resumable, not failed", () => {
+			const result = fakeSingleResult({ awaitingReply: true, sessionId: "worker-session-7" });
+			const body = __test__.composeTaskResultBody(result);
+			expect(body).toContain("Paused without calling task_complete");
+			expect(body).toContain('resumeSessionId: "worker-session-7"');
+		});
+	});
+
+	describe("isTaskStepError", () => {
+		it("is false for a normal successful result", () => {
+			expect(__test__.isTaskStepError(fakeSingleResult())).toBe(false);
+		});
+
+		it("is false for a paused/awaiting-reply result", () => {
+			expect(__test__.isTaskStepError(fakeSingleResult({ awaitingReply: true }))).toBe(false);
+		});
+
+		it("is true for a nonzero exit code, an error stopReason, or an aborted stopReason", () => {
+			expect(__test__.isTaskStepError(fakeSingleResult({ exitCode: 1 }))).toBe(true);
+			expect(__test__.isTaskStepError(fakeSingleResult({ stopReason: "error" }))).toBe(true);
+			expect(__test__.isTaskStepError(fakeSingleResult({ stopReason: "aborted" }))).toBe(true);
+		});
+	});
+
+	describe("shouldSuppressTaskPingback", () => {
+		it("suppresses a natural pause with no task_complete or ask_caller signal", () => {
+			expect(__test__.shouldSuppressTaskPingback(fakeSingleResult({ awaitingReply: true }))).toBe(true);
+		});
+
+		it("does not suppress an ask_caller pause", () => {
+			expect(
+				__test__.shouldSuppressTaskPingback(
+					fakeSingleResult({ awaitingReply: true, pendingQuestion: "Which color?" }),
+				),
+			).toBe(false);
+		});
+
+		it("does not suppress a completed or failed result", () => {
+			expect(__test__.shouldSuppressTaskPingback(fakeSingleResult({ completionSummary: "Done." }))).toBe(false);
+			expect(__test__.shouldSuppressTaskPingback(fakeSingleResult({ exitCode: 1 }))).toBe(false);
+		});
+	});
+
+	describe("buildSingleStepPingbackText", () => {
+		it("labels a single-mode result by agent only", () => {
+			const result = fakeSingleResult({ agent: "reviewer", completionSummary: "All good." });
+			expect(__test__.buildSingleStepPingbackText(result)).toBe("Task delegated to reviewer:\n\nAll good.");
+		});
+
+		it("labels a parallel-step result with its position among the other steps", () => {
+			const result = fakeSingleResult({ agent: "reviewer", completionSummary: "All good." });
+			expect(__test__.buildSingleStepPingbackText(result, { index: 1, total: 3 })).toBe(
+				"Task step 2/3 (delegated to reviewer):\n\nAll good.",
+			);
+		});
+	});
+
+	describe("deliverTaskPingback", () => {
+		it("steers the result into the delegating session, triggering a new turn if it's idle", async () => {
+			const sent: Array<{ message: any; options: any }> = [];
+			const piApi = { sendMessage: async (message: any, options: any) => sent.push({ message, options }) };
+
+			await __test__.deliverTaskPingback(piApi, "Task delegated to reviewer:\n\nAll good.", {
+				mode: "single",
+				toolCallId: "tc-1",
+			});
+
+			expect(sent).toHaveLength(1);
+			expect(sent[0]?.options).toEqual({ triggerTurn: true, deliverAs: "steer" });
+			expect(sent[0]?.message.customType).toBe("task-pingback");
+			expect(sent[0]?.message.display).toBe(true);
+			expect(sent[0]?.message.content).toEqual([
+				{ type: "text", text: "Task delegated to reviewer:\n\nAll good." },
+			]);
+			expect(sent[0]?.message.details).toEqual({ mode: "single", toolCallId: "tc-1" });
+		});
+
+		it("falls back to writing the result into the session file when the delegating session has gone stale", async () => {
+			const piApi = {
+				sendMessage: async () => {
+					throw new Error(
+						"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload().",
+					);
+				},
+			};
+			const appended: Array<{ customType: string; content: string; display: boolean; details: unknown }> = [];
+			const fallbackSessionManager = {
+				appendCustomMessageEntry: (customType: string, content: string, display: boolean, details: unknown) => {
+					appended.push({ customType, content, display, details });
+					return "entry-id";
+				},
+			};
+
+			await __test__.deliverTaskPingback(
+				piApi,
+				"Task delegated to reviewer:\n\nAll good.",
+				{ mode: "single", toolCallId: "tc-2" },
+				fallbackSessionManager,
+			);
+
+			expect(appended).toHaveLength(1);
+			expect(appended[0]?.customType).toBe("task-pingback");
+			expect(appended[0]?.content).toBe("Task delegated to reviewer:\n\nAll good.");
+			expect(appended[0]?.display).toBe(true);
+			expect(appended[0]?.details).toEqual({ mode: "single", toolCallId: "tc-2" });
+		});
+
+		it("does not fall back when delivery succeeds", async () => {
+			const piApi = { sendMessage: async () => {} };
+			let fallbackCalled = false;
+			const fallbackSessionManager = {
+				appendCustomMessageEntry: () => {
+					fallbackCalled = true;
+					return "entry-id";
+				},
+			};
+
+			await __test__.deliverTaskPingback(piApi, "All good.", { mode: "single" }, fallbackSessionManager);
+
+			expect(fallbackCalled).toBe(false);
+		});
+
+		it("tolerates a fallback session manager with no appendCustomMessageEntry method", async () => {
+			const piApi = {
+				sendMessage: async () => {
+					throw new Error("stale");
+				},
+			};
+
+			await expect(
+				__test__.deliverTaskPingback(piApi, "All good.", { mode: "single" }, { getSessionId: () => "x" }),
+			).resolves.toBeUndefined();
+		});
+	});
+});
+
+describe("resumeSessionId", () => {
+	function createResumableFakeSession(overrides: Record<string, unknown> = {}): any {
+		let listener: ((event: unknown) => void) | undefined;
+		return {
+			isStreaming: false,
+			subscribe: (l: (event: unknown) => void) => {
+				listener = l;
+				return () => {
+					listener = undefined;
+				};
+			},
+			emit: (event: unknown) => listener?.(event),
+			abort: async () => {},
+			prompt: async () => {},
+			steer: async () => {},
+			...overrides,
+		};
+	}
+
+	async function registerFakeController(
+		key: string,
+		overrides: Record<string, unknown> = {},
+	): Promise<{ live: typeof import("./task-live.js"); controller: any; session: any }> {
+		const live = await import("./task-live.js");
+		const session = createResumableFakeSession(overrides.session as Record<string, unknown>);
+		const controller = live.registerAgentSessionController({
+			key,
+			toolCallId: "tool-resume",
+			runId: "run-resume",
+			step: 1,
+			childSessionId: (overrides.childSessionId as string) ?? "worker-session-resume",
+			childSessionPath: "/tmp/worker-session-resume.jsonl",
+			task: "original task",
+			agent: "reviewer",
+			session,
+			controlSignal: { onComplete: () => {}, onPing: () => {} },
+			interactive: (overrides.interactive as boolean) ?? true,
+			close: async () => {},
+		});
+		return { live, controller, session };
+	}
+
+	afterEach(async () => {
+		const live = await import("./task-live.js");
+		live.clearLiveTaskControllers();
+	});
+
+	describe("findLiveWorkerBySessionId", () => {
+		it("finds a running controller by its childSessionId", async () => {
+			const { controller } = await registerFakeController("run-a:1", { childSessionId: "session-a" });
+			expect(__test__.findLiveWorkerBySessionId("session-a")).toBe(controller);
+		});
+
+		it("returns undefined for an unknown session id", async () => {
+			await registerFakeController("run-b:1", { childSessionId: "session-b" });
+			expect(__test__.findLiveWorkerBySessionId("no-such-session")).toBeUndefined();
+		});
+
+		it("returns undefined once the controller is no longer running", async () => {
+			const { controller } = await registerFakeController("run-c:1", { childSessionId: "session-c" });
+			controller.status = "completed";
+			expect(__test__.findLiveWorkerBySessionId("session-c")).toBeUndefined();
+		});
+	});
+
+	describe("resumeWorkerRun", () => {
+		it("prompts an idle worker, folds a task_complete summary in, and disposes the controller", async () => {
+			const { live, controller } = await registerFakeController("run-d:1", {
+				childSessionId: "session-d",
+				session: {
+					isStreaming: false,
+					prompt: async () => {
+						controller.controlSignal.onComplete("Updated the tests too.");
+					},
+				},
+			});
+
+			const result = await __test__.resumeWorkerRun({
+				controller,
+				task: "Please also update the tests.",
+				signal: undefined,
+				parentCtx: { hasUI: false },
+			});
+
+			expect(result.completionSummary).toBe("Updated the tests too.");
+			expect(result.awaitingReply).toBeUndefined();
+			expect(controller.status).toBe("completed");
+			expect(live.getLiveTaskController("run-d:1")).toBeUndefined();
+		});
+
+		it("prompts an idle worker and keeps it alive on an ask_caller ping instead of disposing it", async () => {
+			const { live, controller } = await registerFakeController("run-e:1", {
+				childSessionId: "session-e",
+				session: {
+					isStreaming: false,
+					prompt: async () => {
+						controller.controlSignal.onPing("Should I use tabs or spaces?");
+					},
+				},
+			});
+
+			const result = await __test__.resumeWorkerRun({
+				controller,
+				task: "Go ahead.",
+				signal: undefined,
+				parentCtx: { hasUI: false },
+			});
+
+			expect(result.awaitingReply).toBe(true);
+			expect(result.pendingQuestion).toBe("Should I use tabs or spaces?");
+			expect(controller.status).toBe("running");
+			expect(live.getLiveTaskController("run-e:1")).toBe(controller);
+		});
+
+		it("steers into a still-streaming worker instead of starting a second wait", async () => {
+			let steeredWith: string | undefined;
+			let promptCalled = false;
+			const { controller } = await registerFakeController("run-f:1", {
+				childSessionId: "session-f",
+				session: {
+					isStreaming: true,
+					steer: async (text: string) => {
+						steeredWith = text;
+					},
+					prompt: async () => {
+						promptCalled = true;
+					},
+				},
+			});
+
+			const result = await __test__.resumeWorkerRun({
+				controller,
+				task: "Also check the edge cases.",
+				signal: undefined,
+				parentCtx: { hasUI: false },
+			});
+
+			expect(steeredWith).toBe("Also check the edge cases.");
+			expect(promptCalled).toBe(false);
+			expect(result.awaitingReply).toBe(true);
+			expect(controller.status).toBe("running");
+		});
+	});
+
+	describe("finalizeWorkerRun", () => {
+		it("disposes the controller for a completed non-interactive result", async () => {
+			const { live, controller } = await registerFakeController("run-g:1", {
+				childSessionId: "session-g",
+				interactive: false,
+			});
+			const currentResult: any = { exitCode: 0, messages: [] };
+
+			await __test__.finalizeWorkerRun({
+				controller,
+				currentResult,
+				aborted: false,
+				interactive: false,
+				controlOutcome: undefined,
+				parentCtx: { hasUI: false },
+				relayedKeys: { status: new Set(), widget: new Set() },
+			});
+
+			expect(controller.status).toBe("completed");
+			expect(currentResult.awaitingReply).toBeUndefined();
+			expect(live.getLiveTaskController("run-g:1")).toBeUndefined();
+		});
+
+		it("keeps an interactive worker's controller alive when it pauses without task_complete", async () => {
+			const { live, controller } = await registerFakeController("run-h:1", {
+				childSessionId: "session-h",
+				interactive: true,
+			});
+			const currentResult: any = { exitCode: 0, messages: [] };
+
+			await __test__.finalizeWorkerRun({
+				controller,
+				currentResult,
+				aborted: false,
+				interactive: true,
+				controlOutcome: undefined,
+				parentCtx: { hasUI: false },
+				relayedKeys: { status: new Set(), widget: new Set() },
+			});
+
+			expect(controller.status).toBe("running");
+			expect(currentResult.awaitingReply).toBe(true);
+			expect(live.getLiveTaskController("run-h:1")).toBe(controller);
+		});
+
+		it("still disposes an interactive worker's controller once it calls task_complete", async () => {
+			const { live, controller } = await registerFakeController("run-i:1", {
+				childSessionId: "session-i",
+				interactive: true,
+			});
+			const currentResult: any = { exitCode: 0, messages: [] };
+
+			await __test__.finalizeWorkerRun({
+				controller,
+				currentResult,
+				aborted: false,
+				interactive: true,
+				controlOutcome: { type: "completed", summary: "Done." },
+				parentCtx: { hasUI: false },
+				relayedKeys: { status: new Set(), widget: new Set() },
+			});
+
+			expect(controller.status).toBe("completed");
+			expect(currentResult.completionSummary).toBe("Done.");
+			expect(live.getLiveTaskController("run-i:1")).toBeUndefined();
+		});
+
+		it("always disposes on abort, even for an interactive worker", async () => {
+			const { live, controller } = await registerFakeController("run-j:1", {
+				childSessionId: "session-j",
+				interactive: true,
+			});
+			const currentResult: any = { exitCode: 0, messages: [] };
+
+			await __test__.finalizeWorkerRun({
+				controller,
+				currentResult,
+				aborted: true,
+				interactive: true,
+				controlOutcome: undefined,
+				parentCtx: { hasUI: false },
+				relayedKeys: { status: new Set(), widget: new Set() },
+			});
+
+			expect(controller.status).toBe("aborted");
+			expect(currentResult.stopReason).toBe("aborted");
+			expect(live.getLiveTaskController("run-j:1")).toBeUndefined();
+		});
+	});
+});
+
+describe("task_complete/ask_caller (static acknowledgments; detection happens on the parent's RPC event watcher)", () => {
+	// Under the subprocess+RPC model, these tools run inside the worker's own child process,
+	// which has no access to the delegating parent's liveTaskControllers registry (different
+	// process, different memory) -- so their execute() bodies are just acknowledgments. The real
+	// completion/ping detection happens on the parent side, via the RpcWorkerHandle's own
+	// tool_execution_start event watcher (see task-rpc-worker.test.ts).
+	it("task_complete acknowledges without touching any controller registry", async () => {
+		const { tools } = createExtensionHarness();
+		const result = await tools.task_complete.execute("tc-1", { summary: "All done." }, undefined, undefined, {
+			sessionManager: { getSessionId: () => "any-session" },
+		});
+
+		expect(result.isError).toBeUndefined();
+		expect(result.content[0].text).toContain("Reported completion to the caller.");
+	});
+
+	it("ask_caller acknowledges without touching any controller registry", async () => {
+		const { tools } = createExtensionHarness();
+		const result = await tools.ask_caller.execute("ac-1", { message: "Which color?" }, undefined, undefined, {
+			sessionManager: { getSessionId: () => "any-session" },
+		});
+
+		expect(result.isError).toBeUndefined();
+		expect(result.content[0].text).toContain("Sent your question to the caller.");
 	});
 });

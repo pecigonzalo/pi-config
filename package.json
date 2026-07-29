@@ -4,7 +4,7 @@
   ],
   "scripts": {
     "lefthook:install": "lefthook install",
-    "test": "bun test --only-failures",
+    "test": "bun test --isolate --only-failures",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint $(find agent -type f -name '*.ts')",
     "lint:fix": "oxlint --fix $(find agent -type f -name '*.ts')",

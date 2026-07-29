@@ -4,7 +4,7 @@
  * Runs each delegated task step as a real, in-process AgentSession -- the same session type,
  * the same prompt()/steer()/subscribe() primitives, that a normal interactive pi session uses.
  * No subprocess, no pty, no RPC-over-pipes protocol: a live controller registry (task-live.ts)
- * tracks running steps so /tasks attach and /tasks steer can reach them directly in-process.
+ * tracks running steps so /tasks steer can reach them directly in-process.
  *
  * Supports a compact mode + steps API:
  *   - Single: { steps: [{ agent: "name", task: "..." }] }
@@ -69,7 +69,13 @@ import {
 	shouldDisplayTaskInlineNotice,
 	truncateOutput,
 } from "./task-display.js";
-import { createWorkerAgentSession, getSubagentDepth, setSubagentDepth } from "./task-agent-session.js";
+import {
+	ASK_CALLER_TOOL_NAME,
+	createWorkerAgentSession,
+	TASK_COMPLETE_TOOL_NAME,
+	type WorkerControlSignal,
+} from "./task-agent-session.js";
+import { checkSubagentDepth, type RpcWorkerEvent } from "./task-rpc-worker.js";
 import {
 	extractMessagePreviewText,
 	formatTimestampCompact,
@@ -91,8 +97,8 @@ import {
 	type TaskRunView,
 } from "./task-runs.js";
 import {
-	clearLiveTaskControllers,
 	deleteLiveTaskController,
+	deliverToLiveSession,
 	getLiveTaskController,
 	isLiveController,
 	listLiveTaskControllers,
@@ -101,14 +107,8 @@ import {
 	type LiveTaskController,
 	type LiveTaskRuntimeInfo,
 } from "./task-live.js";
-import { attachToLiveTaskController } from "./task-live-view.js";
 import { validateTaskSessionReference } from "./task-session-validation.js";
-import {
-	TaskViewerOverlay,
-	type TaskTranscriptPreview,
-	type TaskViewerOverlayResult,
-	type TaskViewerOverlayState,
-} from "./task-viewer.js";
+import { TaskAttachOverlay, type TaskAttachOverlayState } from "./task-attach-view.js";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -126,7 +126,6 @@ const TASKS_COMMAND_USAGE = [
 	"/tasks parent",
 	"/tasks view <selector>",
 	"/tasks open <selector>",
-	"/tasks attach <selector>",
 	"/tasks origin <selector>",
 	"/tasks steer <selector> <message>",
 ].join(" | ");
@@ -223,28 +222,6 @@ function pushBoundedMessage(messages: Message[], message: Message): boolean {
 	return true;
 }
 
-// Recursion depth guard. Depth is tracked per session id (see task-agent-session.ts) rather
-// than via an env var: in-process workers share process.env with the parent, so a global env
-// var can't distinguish one session's depth from another's the way it could when each worker
-// was a separate OS process.
-const DEFAULT_MAX_SUBAGENT_DEPTH = 2;
-
-function checkSubagentDepth(sessionId: string | undefined): {
-	blocked: boolean;
-	depth: number;
-	maxDepth: number;
-} {
-	const depth = getSubagentDepth(sessionId);
-	const maxDepth = Number.isFinite(Number(process.env.PI_SUBAGENT_MAX_DEPTH))
-		? Number(process.env.PI_SUBAGENT_MAX_DEPTH)
-		: DEFAULT_MAX_SUBAGENT_DEPTH;
-	return {
-		blocked: depth >= maxDepth,
-		depth,
-		maxDepth,
-	};
-}
-
 interface TaskStepConfig {
 	agent?: string;
 	profile?: string;
@@ -255,6 +232,8 @@ interface TaskStepConfig {
 	skills?: string[];
 	prompt?: string;
 	context?: ContextMode;
+	interactive?: boolean;
+	resumeSessionId?: string;
 }
 
 interface TaskToolParams {
@@ -287,6 +266,17 @@ interface SingleResult {
 	sessionFile?: string;
 	childSession?: ChildSessionSnapshot;
 	uiNotices?: TaskInlineNotice[];
+	/** The worker's own session id, always set once its session exists -- unlike `childSession`,
+	 * which is only populated for persisted steps. Lets a pingback point back at a live or
+	 * resumable worker (via `resumeSessionId`) regardless of persistence. */
+	sessionId?: string;
+	/** Set when the worker called `task_complete`; the authoritative final answer, if present. */
+	completionSummary?: string;
+	/** Set when the worker called `ask_caller`; what it needs from the caller. */
+	pendingQuestion?: string;
+	/** True when an interactive worker's session is being kept alive (not disposed) because it
+	 * hasn't called `task_complete` yet -- resumable via `resumeSessionId` or `/tasks open`. */
+	awaitingReply?: boolean;
 }
 
 function boundParentResult(result: SingleResult): SingleResult {
@@ -355,75 +345,112 @@ function getTaskWidgetRelayKey(controller: Pick<LiveTaskController, "key">, widg
 	return `tasks.${sanitizeTaskUiKeySegment(controller.key, "task")}.widget.${sanitizeTaskUiKeySegment(widgetKey, "widget")}`;
 }
 
-/**
- * Builds the ExtensionUIContext a delegated worker's own AgentSession is bound to (via
- * session.bindExtensions({ uiContext, mode })). A worker has no real terminal of its own, so
- * dialogs (select/confirm/input/editor) and ambient status/widget updates are relayed straight
- * to the parent's real ui, prefixed with the worker's task label -- the direct in-process
- * equivalent of what the old RPC transport did over a JSON wire protocol. Dialogs from
- * concurrently-running steps are serialized through enqueueTaskDialogRelay so only one shows on
- * the real terminal at a time. Anything that requires the worker's own TUI (working
- * indicator, footer/header, custom components, editor) is a no-op, matching what RPC mode
- * itself does for the same reason ("requires TUI access").
- */
-function createWorkerUiContext(
-	parentUi: ExtensionUIContext,
-	controller: Pick<LiveTaskController, "agent" | "step" | "key">,
-	relayedKeys: { status: Set<string>; widget: Set<string> },
-): ExtensionUIContext {
-	const title = (t?: string) => formatTaskExtensionUiTitle(controller, t);
-	const prefix = getTaskUiPrefix(controller);
-	const noop = () => {};
+function asString(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
+}
 
-	return {
-		select: (t, options, opts) => enqueueTaskDialogRelay(() => parentUi.select(title(t), options, opts)),
-		confirm: (t, message, opts) => enqueueTaskDialogRelay(() => parentUi.confirm(title(t), message, opts)),
-		input: (t, placeholder, opts) => enqueueTaskDialogRelay(() => parentUi.input(title(t), placeholder, opts)),
-		editor: (t, prefill) => enqueueTaskDialogRelay(() => parentUi.editor(title(t), prefill)),
-		// Notifications are folded into the task result as an inline notice by the caller
-		// instead (see addTaskInlineNotice), matching the old RPC transport's behavior.
-		notify: noop,
-		onTerminalInput: () => noop,
-		setStatus: (key, text) => {
-			const relayKey = getTaskStatusRelayKey(controller, key);
+function asStringArray(value: unknown): string[] {
+	return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+/**
+ * Relays one `extension_ui_request` event from a delegated worker's RPC child process to the
+ * parent's real UI, prefixed with the worker's task label -- a worker has no terminal of its
+ * own, so its dialogs (select/confirm/input/editor) and ambient status/widget updates need
+ * somewhere to go. Dialogs from concurrently-running steps are serialized through
+ * enqueueTaskDialogRelay so only one shows on the real terminal at a time. Without a real
+ * parent UI (or for methods a worker's own TUI would normally handle, like setTitle), this
+ * simply never responds -- the worker's own extension host auto-resolves the dialog to its
+ * default after a timeout, exactly like RPC mode does when nothing is attached.
+ */
+function relayTaskExtensionUiRequest(params: {
+	event: RpcWorkerEvent;
+	controller: Pick<LiveTaskController, "agent" | "step" | "key">;
+	parentUi: ExtensionUIContext | undefined;
+	relayedKeys: { status: Set<string>; widget: Set<string> };
+	respond: (response: Record<string, unknown>) => void;
+}): void {
+	const { event, controller, parentUi, relayedKeys, respond } = params;
+	const id = event.id;
+	const method = asString(event.method);
+	if (typeof id !== "string" || !method) return;
+	const title = formatTaskExtensionUiTitle(controller, asString(event.title));
+	const prefix = getTaskUiPrefix(controller);
+	const cancelled = () => respond({ type: "extension_ui_response", id, cancelled: true });
+
+	switch (method) {
+		case "select": {
+			if (!parentUi) return void cancelled();
+			void enqueueTaskDialogRelay(async () => {
+				const value = await parentUi.select(title, asStringArray(event.options));
+				respond(
+					value !== undefined
+						? { type: "extension_ui_response", id, value }
+						: { type: "extension_ui_response", id, cancelled: true },
+				);
+			});
+			return;
+		}
+		case "confirm": {
+			if (!parentUi) return void respond({ type: "extension_ui_response", id, confirmed: false });
+			void enqueueTaskDialogRelay(async () => {
+				const confirmed = await parentUi.confirm(title, asString(event.message) ?? "");
+				respond({ type: "extension_ui_response", id, confirmed });
+			});
+			return;
+		}
+		case "input": {
+			if (!parentUi) return void cancelled();
+			void enqueueTaskDialogRelay(async () => {
+				const value = await parentUi.input(title, asString(event.placeholder));
+				respond(
+					value !== undefined
+						? { type: "extension_ui_response", id, value }
+						: { type: "extension_ui_response", id, cancelled: true },
+				);
+			});
+			return;
+		}
+		case "editor": {
+			if (!parentUi) return void cancelled();
+			void enqueueTaskDialogRelay(async () => {
+				const value = await parentUi.editor(title, asString(event.prefill));
+				respond(
+					value !== undefined
+						? { type: "extension_ui_response", id, value }
+						: { type: "extension_ui_response", id, cancelled: true },
+				);
+			});
+			return;
+		}
+		case "setStatus": {
+			if (!parentUi) return;
+			const relayKey = getTaskStatusRelayKey(controller, asString(event.statusKey));
 			relayedKeys.status.add(relayKey);
-			parentUi.setStatus(relayKey, text ? `${prefix} ${text}` : undefined);
-		},
-		setWorkingMessage: noop,
-		setWorkingVisible: noop,
-		setWorkingIndicator: noop,
-		setHiddenThinkingLabel: noop,
-		setWidget: (key, content, options) => {
-			if (content !== undefined && !Array.isArray(content)) return; // component factories unsupported for workers
-			const relayKey = getTaskWidgetRelayKey(controller, key);
+			const statusText = asString(event.statusText);
+			parentUi.setStatus(relayKey, statusText ? `${prefix} ${statusText}` : undefined);
+			return;
+		}
+		case "setWidget": {
+			if (!parentUi) return;
+			const relayKey = getTaskWidgetRelayKey(controller, asString(event.widgetKey));
 			relayedKeys.widget.add(relayKey);
+			const widgetLines = asStringArray(event.widgetLines);
 			parentUi.setWidget(
 				relayKey,
-				content && content.length > 0
-					? content.map((line, index) => (index === 0 ? `${prefix} ${line}` : line))
+				widgetLines.length > 0
+					? widgetLines.map((line, index) => (index === 0 ? `${prefix} ${line}` : line))
 					: undefined,
-				options,
+				event.widgetPlacement === "belowEditor" ? { placement: "belowEditor" } : undefined,
 			);
-		},
-		setFooter: noop,
-		setHeader: noop,
-		setTitle: noop,
-		custom: () => Promise.reject(new Error("Custom UI components are not supported for delegated task workers.")),
-		pasteToEditor: noop,
-		setEditorText: noop,
-		getEditorText: () => "",
-		addAutocompleteProvider: noop,
-		setEditorComponent: noop,
-		getEditorComponent: () => undefined,
-		get theme() {
-			return parentUi.theme;
-		},
-		getAllThemes: () => parentUi.getAllThemes(),
-		getTheme: (name) => parentUi.getTheme(name),
-		setTheme: () => ({ success: false, error: "Delegated task workers cannot change the parent theme." }),
-		getToolsExpanded: () => parentUi.getToolsExpanded(),
-		setToolsExpanded: noop,
-	};
+			return;
+		}
+		// Notifications, title, and editor-text pushes have no meaningful destination on the
+		// parent's real UI (which isn't the worker's own terminal) -- never responding lets the
+		// worker's own extension host fall through to its default resolution.
+		default:
+			return;
+	}
 }
 
 /** Clears any status/widget entries a worker relayed to the parent's real ui via createWorkerUiContext, so nothing lingers after the step finishes. */
@@ -551,6 +578,8 @@ interface ResolvedWorkerConfig {
 	inheritProjectContext: boolean;
 	inheritSkills: boolean;
 	allowDelegation: boolean;
+	/** Whether this worker stays alive after its first turn instead of auto-finishing; only ends when it calls `task_complete`. */
+	interactive: boolean;
 	systemPrompt: string;
 	systemPromptMode: "append" | "replace";
 	displayAgentName: string;
@@ -942,6 +971,7 @@ function resolveWorkerConfig(
 	const inheritProjectContext = agent?.inheritProjectContext ?? profile?.inheritProjectContext ?? false;
 	const inheritSkills = agent?.inheritSkills ?? profile?.inheritSkills ?? false;
 	const allowDelegation = agent?.allowDelegation ?? profile?.allowDelegation ?? false;
+	const interactive = step.interactive ?? agent?.interactive ?? profile?.interactive ?? false;
 
 	if ((options.requireBehavior ?? true) && !agent && !prompt.trim()) {
 		return { error: formatGenericWorkerBehaviorError(resources) };
@@ -965,6 +995,7 @@ function resolveWorkerConfig(
 			inheritProjectContext,
 			inheritSkills,
 			allowDelegation,
+			interactive,
 			systemPrompt: prompt,
 			systemPromptMode,
 			displayAgentName,
@@ -1833,8 +1864,8 @@ function accumulateAssistantMessageIntoResult(result: SingleResult, message: Mes
  * the same session type, the same prompt()/steer()/subscribe() primitives, that a normal
  * interactive pi session uses. No subprocess, no pty, no RPC-over-pipes protocol: this is the
  * single execution path for every task step (single/parallel/chain, persisted or ephemeral).
- * While the step runs, a LiveTaskController is registered (task-live.ts) so /tasks attach and
- * /tasks steer can reach the same session directly -- and because it's the same session, the
+ * While the step runs, a LiveTaskController is registered (task-live.ts) so /tasks steer and
+ * resumeSessionId can reach the same session directly -- and because it's the same session, the
  * result that flows back to the parent when this function returns is the real, final
  * transcript, not a side channel.
  */
@@ -1848,9 +1879,7 @@ async function runSingleAgentViaAgentSession(
 	initialChildSession: ChildSessionSnapshot | undefined,
 	toolCallId: string,
 	runId: string,
-	parentDepth: number,
 	parentCtx: Pick<ExtensionContext, "ui" | "hasUI" | "modelRegistry">,
-	agentDir: string,
 ): Promise<SingleResult> {
 	const worker = preparedStep.worker;
 	const agent = worker.agent;
@@ -1895,9 +1924,26 @@ async function runSingleAgentViaAgentSession(
 		return baseResult({ exitCode: 1, stderr: error instanceof Error ? error.message : String(error) });
 	}
 
+	// Tracks the worker's own task_complete/ask_caller tool calls -- "completed" is sticky (a
+	// later ask_caller in the same turn can't un-finish an already-finished worker), and a
+	// natural turn-end with neither call is treated the same as an explicit ask_caller for
+	// interactive workers (see the keepAlive check below), so it stays undefined here.
+	let controlOutcome: { type: "completed"; summary: string } | { type: "ping"; message: string } | undefined;
+	const controlSignal: WorkerControlSignal = {
+		onComplete: (summary) => {
+			controlOutcome = { type: "completed", summary };
+		},
+		onPing: (message) => {
+			if (controlOutcome?.type !== "completed") controlOutcome = { type: "ping", message };
+		},
+	};
+
+	const controllerKey = makeTaskRunStepKey(runId, step ?? 0);
+	const controllerIdentity = { key: controllerKey, agent: worker.displayAgentName, step: step ?? 0 };
+	const relayedKeys = { status: new Set<string>(), widget: new Set<string>() };
+
 	const { session, error: sessionError } = await createWorkerAgentSession({
 		cwd: preparedStep.launchCwd,
-		agentDir,
 		modelRegistry: parentCtx.modelRegistry,
 		systemPrompt: composedSystemPrompt,
 		systemPromptMode: worker.systemPromptMode,
@@ -1913,13 +1959,23 @@ async function runSingleAgentViaAgentSession(
 		sessionFile: preparedStep.session.sessionFile,
 		agentName: worker.agent?.name,
 		profileName: worker.profile?.permissionsProfile ?? worker.profile?.name,
+		controlSignal,
+		onUiRequest: parentCtx.hasUI
+			? (event, respond) =>
+					relayTaskExtensionUiRequest({
+						event,
+						controller: controllerIdentity,
+						parentUi: parentCtx.ui,
+						relayedKeys,
+						respond,
+					})
+			: undefined,
 	});
 	if (sessionError || !session) {
 		return baseResult({ exitCode: 1, stderr: sessionError ?? "Failed to create worker session." });
 	}
-	setSubagentDepth(session.sessionManager.getSessionId(), parentDepth + 1);
 
-	const currentResult = baseResult();
+	const currentResult = baseResult({ sessionId: session.sessionManager.getSessionId() });
 	const emitUpdate = () => {
 		if (!onUpdate) return;
 		onUpdate({
@@ -1928,21 +1984,13 @@ async function runSingleAgentViaAgentSession(
 		});
 	};
 
-	const controllerKey = makeTaskRunStepKey(runId, step ?? 0);
-	const controllerIdentity = { key: controllerKey, agent: worker.displayAgentName, step: step ?? 0 };
-	const relayedKeys = { status: new Set<string>(), widget: new Set<string>() };
-
-	await session.bindExtensions({
-		mode: parentCtx.hasUI ? "rpc" : "print",
-		uiContext: parentCtx.hasUI ? createWorkerUiContext(parentCtx.ui, controllerIdentity, relayedKeys) : undefined,
-		onError: (err) => {
-			addTaskInlineNotice(currentResult, `Extension error (${err.extensionPath}): ${err.error}`, "warning");
-		},
-	});
-
 	const unsubscribeMessages = session.subscribe((event) => {
+		if (event.type === "extension_error") {
+			addTaskInlineNotice(currentResult, `Extension error (${event.extensionPath}): ${event.error}`, "warning");
+			return;
+		}
 		if (event.type !== "message_end") return;
-		const message = event.message;
+		const message = event.message as Message;
 		if (message.role !== "assistant" && message.role !== "toolResult") return;
 		if (!pushBoundedMessage(currentResult.messages, message)) {
 			currentResult.errorMessage ??= "Child message output exceeded the parent memory limit.";
@@ -1962,6 +2010,8 @@ async function runSingleAgentViaAgentSession(
 		task,
 		agent: worker.displayAgentName,
 		session,
+		controlSignal,
+		interactive: worker.interactive,
 		close: async () => {
 			session.dispose();
 		},
@@ -1989,11 +2039,59 @@ async function runSingleAgentViaAgentSession(
 	} finally {
 		if (signal) signal.removeEventListener("abort", onAbort);
 		unsubscribeMessages();
+	}
+
+	await finalizeWorkerRun({
+		controller,
+		currentResult,
+		aborted,
+		interactive: worker.interactive,
+		controlOutcome,
+		parentCtx,
+		relayedKeys,
+	});
+	return currentResult;
+}
+
+type ControlOutcome = { type: "completed"; summary: string } | { type: "ping"; message: string } | undefined;
+
+/**
+ * Shared tail for both a fresh worker run and a resumeSessionId continuation: folds the
+ * task_complete/ask_caller outcome into the result, then either disposes the controller
+ * (finished, or aborted) or leaves it registered and the session alive (interactive worker that
+ * paused without calling task_complete) -- so a later resumeSessionId can find and continue it.
+ */
+async function finalizeWorkerRun(params: {
+	controller: LiveTaskController;
+	currentResult: SingleResult;
+	aborted: boolean;
+	interactive: boolean;
+	controlOutcome: ControlOutcome;
+	parentCtx: Pick<ExtensionContext, "ui" | "hasUI">;
+	relayedKeys: { status: Set<string>; widget: Set<string> };
+}): Promise<void> {
+	const { controller, currentResult, aborted, interactive, controlOutcome, parentCtx, relayedKeys } = params;
+
+	if (controlOutcome?.type === "completed") {
+		currentResult.completionSummary = controlOutcome.summary;
+		currentResult.stopReason ??= "completed";
+	} else if (controlOutcome?.type === "ping") {
+		currentResult.pendingQuestion = controlOutcome.message;
+	}
+
+	// An interactive worker only truly finishes via task_complete -- a natural turn-end or an
+	// ask_caller ping just pauses it, so its session stays alive and its controller stays
+	// registered (resumable via resumeSessionId or /tasks open) instead of being disposed.
+	const keepAlive = !aborted && interactive && currentResult.exitCode === 0 && controlOutcome?.type !== "completed";
+	if (keepAlive) {
+		currentResult.awaitingReply = true;
+		currentResult.stopReason ??= "waiting";
+	} else {
 		controller.status = aborted ? "aborted" : currentResult.exitCode === 0 ? "completed" : "failed";
 		controller.finishedAt = new Date().toISOString();
 		clearRelayedTaskUi(parentCtx.hasUI ? parentCtx.ui : undefined, relayedKeys);
 		await controller.close();
-		deleteLiveTaskController(controllerKey);
+		deleteLiveTaskController(controller.key);
 	}
 
 	if (aborted) {
@@ -2001,7 +2099,104 @@ async function runSingleAgentViaAgentSession(
 		if (!currentResult.errorMessage) currentResult.errorMessage = "Task was aborted";
 		if (currentResult.exitCode === 0) currentResult.exitCode = 130;
 	}
+}
+
+/**
+ * Continues a worker that's still live -- either idle (kept alive after ask_caller or a natural
+ * pause) or mid-turn (someone else is already awaiting it). Idle: rebinds the controller's
+ * control signal to a fresh tracker, prompts it with the new task text, and finalizes exactly
+ * like a fresh run once that turn settles. Mid-turn: just steers the text in and returns --
+ * whoever is already awaiting that turn will deliver its own pingback, so starting a second
+ * wait here would just race it.
+ */
+async function resumeWorkerRun(params: {
+	controller: LiveTaskController;
+	task: string;
+	signal: AbortSignal | undefined;
+	parentCtx: Pick<ExtensionContext, "ui" | "hasUI">;
+}): Promise<SingleResult> {
+	const { controller, task, signal, parentCtx } = params;
+	const session = controller.session;
+
+	const currentResult: SingleResult = {
+		agent: controller.agent,
+		agentSource: "unknown",
+		task,
+		exitCode: 0,
+		messages: [],
+		stderr: "",
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		sessionId: controller.childSessionId,
+		uiNotices: [],
+	};
+
+	if (session.isStreaming) {
+		await session.steer(task);
+		currentResult.awaitingReply = true;
+		currentResult.pendingQuestion = "Delivered while the worker's current turn was still running.";
+		return currentResult;
+	}
+
+	let controlOutcome: ControlOutcome;
+	controller.controlSignal.onComplete = (summary) => {
+		controlOutcome = { type: "completed", summary };
+	};
+	controller.controlSignal.onPing = (message) => {
+		if (controlOutcome?.type !== "completed") controlOutcome = { type: "ping", message };
+	};
+
+	const unsubscribeMessages = session.subscribe((event) => {
+		if (event.type !== "message_end") return;
+		const message = event.message as Message;
+		if (message.role !== "assistant" && message.role !== "toolResult") return;
+		if (!pushBoundedMessage(currentResult.messages, message)) {
+			currentResult.errorMessage ??= "Child message output exceeded the parent memory limit.";
+		}
+		accumulateAssistantMessageIntoResult(currentResult, message);
+	});
+
+	let aborted = false;
+	const onAbort = () => {
+		aborted = true;
+		controller.status = "aborted";
+		void session.abort();
+	};
+	if (signal) {
+		if (signal.aborted) onAbort();
+		else signal.addEventListener("abort", onAbort, { once: true });
+	}
+
+	try {
+		await session.prompt(task);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		currentResult.exitCode = aborted ? 130 : 1;
+		currentResult.stderr = message;
+		currentResult.errorMessage ??= aborted ? "Task was aborted" : message;
+		if (aborted) currentResult.stopReason = "aborted";
+	} finally {
+		if (signal) signal.removeEventListener("abort", onAbort);
+		unsubscribeMessages();
+	}
+
+	await finalizeWorkerRun({
+		controller,
+		currentResult,
+		aborted,
+		interactive: controller.interactive,
+		controlOutcome,
+		parentCtx,
+		relayedKeys: { status: new Set(), widget: new Set() },
+	});
 	return currentResult;
+}
+
+/** Finds a still-live worker to continue via resumeSessionId -- childSessionId is the session id
+ * surfaced on any earlier SingleResult/pingback, regardless of whether that step was persisted. */
+function findLiveWorkerBySessionId(sessionId: string): LiveTaskController | undefined {
+	return listLiveTaskControllers().find(
+		(controller) => controller.childSessionId === sessionId && isLiveController(controller),
+	);
 }
 
 function appendTaskChildSessionMetadata(
@@ -2037,9 +2232,7 @@ async function runTaskStepWithMetadata(options: {
 	};
 	origin?: TaskOriginSnapshot;
 	refreshUi?: () => Promise<void> | void;
-	parentDepth: number;
 	parentCtx: Pick<ExtensionContext, "ui" | "hasUI" | "modelRegistry">;
-	agentDir: string;
 	runAgent?: typeof runSingleAgentViaAgentSession;
 }): Promise<SingleResult> {
 	const {
@@ -2055,9 +2248,7 @@ async function runTaskStepWithMetadata(options: {
 		sessionManager,
 		origin,
 		refreshUi,
-		parentDepth,
 		parentCtx,
-		agentDir,
 		runAgent = runSingleAgentViaAgentSession,
 	} = options;
 	const metadataRunId = runId ?? `${toolCallId}-run`;
@@ -2192,9 +2383,7 @@ async function runTaskStepWithMetadata(options: {
 			createdSnapshot,
 			toolCallId,
 			metadataRunId,
-			parentDepth,
 			parentCtx,
-			agentDir,
 		);
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error);
@@ -2265,6 +2454,104 @@ async function runTaskStepWithMetadata(options: {
 	return boundParentResult(result);
 }
 
+const TASK_PINGBACK_CUSTOM_TYPE = "task-pingback";
+
+/** Whether a step result should be reported as a failure rather than a normal outcome. */
+function isTaskStepError(result: SingleResult): boolean {
+	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+}
+
+/**
+ * Composes the outcome text for a single worker's result, in priority order: aborted/failed,
+ * paused-and-resumable (interactive, kept alive), explicit task_complete summary, then whatever
+ * the worker's last message said. Shared by every pingback -- single, per-parallel-step, and
+ * chain -- so a worker's result reads the same regardless of which mode delegated it.
+ */
+function composeTaskResultBody(result: SingleResult): string {
+	if (isTaskStepError(result)) {
+		const errorMsg = truncateOutput(
+			result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)",
+		);
+		return `Failed (${result.stopReason || "error"}): ${errorMsg}`;
+	}
+	if (result.awaitingReply) {
+		const resumeHint = `Respond by calling \`task\` again with resumeSessionId: "${result.sessionId}" and your reply as \`task\`.`;
+		return result.pendingQuestion
+			? `Needs input: ${result.pendingQuestion}\n\n${resumeHint}`
+			: `Paused without calling task_complete.\n\n${resumeHint}`;
+	}
+	if (result.completionSummary) return result.completionSummary;
+	return truncateOutput(getFinalOutput(result.messages)) || "(no output)";
+}
+
+/**
+ * An interactive worker that paused naturally -- no task_complete, no ask_caller -- hasn't
+ * actually asked for anything. Pinging back here just invites the delegator to nudge it forward
+ * with a fresh resumeSessionId call; if the worker doesn't reliably comply, that nudge-pause
+ * cycle repeats with no real progress. Stay silent for this case -- task_complete and ask_caller
+ * are the only signals that warrant telling the delegator something happened.
+ */
+function shouldSuppressTaskPingback(result: SingleResult): boolean {
+	return Boolean(result.awaitingReply) && !result.pendingQuestion;
+}
+
+/**
+ * Delivers a background task result to the delegating session -- steers it in if a turn is
+ * already running, otherwise starts a new turn, so the result surfaces whether or not the
+ * caller is busy with something else when the worker finishes.
+ *
+ * `piApi.sendMessage` throws if the delegating session has since been replaced or disposed
+ * (ExtensionRuntime.assertActive() -- see agent-session.js's dispose()): switching that session
+ * away for *any* reason, including using `/tasks open` to inspect the very worker this pingback
+ * is about, tears it down as the first step. There is no way to "wake up" a session that no
+ * longer exists, so on failure this falls back to writing the result straight into the
+ * delegating session's own file via its SessionManager (a plain file writer, unaffected by
+ * extension-runtime staleness) -- lost-forever is worse than "only visible next time that
+ * session is reopened."
+ */
+async function deliverTaskPingback(
+	piApi: Pick<ExtensionAPI, "sendMessage">,
+	text: string,
+	details: Record<string, unknown>,
+	// `unknown` rather than a narrow structural type: the real caller-side type
+	// (ReadonlySessionManager) doesn't declare appendCustomMessageEntry at all, so a narrow
+	// optional-only type here would trip TypeScript's "no overlapping properties" weak-type
+	// check at every call site. The cast below is the same escape hatch this file already uses
+	// for appendCustomEntry (see appendTaskChildSessionMetadata) -- the SDK's real SessionManager
+	// has always had this method, just not exposed on ExtensionContext's narrower type.
+	fallbackSessionManager?: unknown,
+): Promise<void> {
+	const message = {
+		customType: TASK_PINGBACK_CUSTOM_TYPE,
+		content: [{ type: "text" as const, text }],
+		display: true,
+		details,
+	};
+	try {
+		await piApi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" });
+	} catch {
+		(
+			fallbackSessionManager as
+				| {
+						appendCustomMessageEntry?: (
+							customType: string,
+							content: string,
+							display: boolean,
+							details?: unknown,
+						) => string;
+				  }
+				| undefined
+		)?.appendCustomMessageEntry?.(message.customType, text, message.display, message.details);
+	}
+}
+
+function buildSingleStepPingbackText(result: SingleResult, context?: { index: number; total: number }): string {
+	const header = context
+		? `Task step ${context.index + 1}/${context.total} (delegated to ${result.agent})`
+		: `Task delegated to ${result.agent}`;
+	return `${header}:\n\n${composeTaskResultBody(result)}`;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return Boolean(value) && typeof value === "object";
 }
@@ -2280,8 +2567,8 @@ function collectLiveTaskControllerStepKeys(currentSessionFile?: string): Set<str
 	return keys;
 }
 
-// Finds the running AgentSession-backed controller for a run/step, used by both /tasks attach
-// (open a live view) and /tasks steer (send one message without opening the view).
+// Finds the running AgentSession-backed controller for a run/step, used by /tasks steer to send
+// one message directly to it.
 function resolveLiveTaskControllerForRun(
 	run: TaskRunView,
 	step?: TaskRunStepView,
@@ -2314,11 +2601,10 @@ function describeTaskRunAccess(run: TaskRunView, selectedStep?: TaskRunStepView)
 	const labels: string[] = [];
 	const targetStep = selectTaskRunStepForOpen(run, selectedStep);
 	const liveControllerResolution = resolveLiveTaskControllerForRun(run, selectedStep);
+	// "open" always does something valid: attaches live (in the TUI) while the step is still
+	// running, or opens the finished session file once it's done -- see openTaskRunSession.
 	if (targetStep?.snapshot.persist) labels.push("open");
-	if (liveControllerResolution.controller) {
-		labels.push("attach");
-		labels.push("steer");
-	}
+	if (liveControllerResolution.controller) labels.push("steer");
 	if (resolveTaskRunOriginSnapshot(run, selectedStep)) labels.push("origin");
 	return labels;
 }
@@ -2333,7 +2619,6 @@ interface TaskRunSummaryData {
 	stepLabel: string;
 	updatedAt: string;
 	access: string[];
-	attachHint?: string;
 	sourceFileName?: string;
 	originPreview?: string;
 	warningCount: number;
@@ -2345,7 +2630,6 @@ function getTaskRunSummaryData(run: TaskRunView, index: number, includeSource: b
 		Boolean(getLiveTaskController(makeTaskRunStepKey(run.runId, step.step))),
 	);
 	const access = describeTaskRunAccess(run);
-	const attachHint = access.includes("attach") ? `/tasks attach ${index}` : undefined;
 	return {
 		index,
 		status: run.status,
@@ -2356,7 +2640,6 @@ function getTaskRunSummaryData(run: TaskRunView, index: number, includeSource: b
 		stepLabel,
 		updatedAt: formatTimestampCompact(run.updatedAt),
 		access,
-		attachHint,
 		sourceFileName: includeSource && run.sourceSessionFile ? path.basename(run.sourceSessionFile) : undefined,
 		originPreview: resolveTaskRunOriginSnapshot(run)?.originPreview,
 		warningCount: run.warnings.length,
@@ -2367,7 +2650,6 @@ function formatTaskRunSummary(run: TaskRunView, index: number, includeSource: bo
 	const data = getTaskRunSummaryData(run, index, includeSource);
 	let text = `${data.index}. ${data.status}${data.hasLiveController ? "/live" : ""} ${data.runId} · ${data.mode} · ${data.stepCount} ${data.stepLabel} · ${data.updatedAt}`;
 	if (data.access.length > 0) text += ` · ${data.access.join(",")}`;
-	if (data.attachHint) text += ` · ${data.attachHint}`;
 	if (data.sourceFileName) text += ` · ${data.sourceFileName}`;
 	if (data.originPreview) text += ` · ${data.originPreview}`;
 	if (data.warningCount > 0) text += ` · warnings:${data.warningCount}`;
@@ -2384,7 +2666,7 @@ function formatTaskRunList(scope: TasksScope, runs: TaskRunView[]): string {
 	}
 	const header = themeIndependentTaskBrowserHeading(runs.length);
 	const guidance =
-		"Attach to a running task's live view with /tasks attach <selector>, or steer it with /tasks steer <selector> <message>.";
+		"Open a task's session with /tasks open <selector>, or steer it with /tasks steer <selector> <message>.";
 	return [header, guidance, ...runs.map((run, index) => formatTaskRunSummary(run, index + 1, false))].join("\n");
 }
 
@@ -2424,23 +2706,20 @@ async function formatTaskRunDetails(
 		if (typeof liveInfo.messageCount === "number") lines.push(`Live messages: ${liveInfo.messageCount}`);
 		if (liveInfo.lastAssistantText)
 			lines.push(`Live assistant: ${createTaskPreview(liveInfo.lastAssistantText, 160)}`);
-		lines.push(`Attach: /tasks attach ${selectedStep ? selectedStep.snapshot.childSessionId : run.runId}`);
 		lines.push(`Steer: /tasks steer ${selectedStep ? selectedStep.snapshot.childSessionId : run.runId} <message>`);
 		lines.push("");
 		lines.push("Steps:");
 	} else if (selectedStep?.status === "running") {
-		lines.push("Live controller: unavailable (not attached)");
+		lines.push("Live controller: unavailable");
 		lines.push("Steps:");
 	} else {
 		lines.push("Steps:");
 	}
 	if (selectedStep?.snapshot.persist) {
 		lines.push(`Open: /tasks open ${selectedStep.snapshot.childSessionId}`);
-		lines.push(`Attach: /tasks attach ${selectedStep.snapshot.childSessionId}`);
 		lines.push(`View: /tasks view ${selectedStep.snapshot.childSessionId}`);
 	} else if (!selectedStep && run.persistedStepCount > 0) {
 		lines.push(`Open: /tasks open ${run.runId}`);
-		lines.push(`Attach: /tasks attach ${run.runId}`);
 		lines.push(`View: /tasks view ${run.runId}`);
 	}
 	if (originTarget) {
@@ -2510,6 +2789,13 @@ function readSessionEntriesFromFile(sessionPath: string): SessionEntry[] {
 		.map((line) => line.trim())
 		.filter(Boolean)
 		.map((line) => JSON.parse(line) as SessionEntry);
+}
+
+interface TaskTranscriptPreview {
+	lines: string[];
+	sourceLabel: string;
+	truncated: boolean;
+	error?: string;
 }
 
 async function readTaskTranscriptPreview(
@@ -2688,7 +2974,6 @@ function buildTaskWidgetLines(
 			fg("dim", data.updatedAt),
 		];
 		if (data.access.length > 0) parts.push(fg("muted", `· ${data.access.join(",")}`));
-		if (data.attachHint) parts.push(fg("dim", `· ${data.attachHint}`));
 		if (data.originPreview) parts.push(fg("dim", `· ${createTaskPreview(data.originPreview, 80)}`));
 		if (data.warningCount > 0) parts.push(fg("warning", `· warnings:${data.warningCount}`));
 		lines.push(parts.join(" "));
@@ -2796,56 +3081,91 @@ function manualParentSessionOpenInstruction(sessionPath: string): string {
 	].join("\n");
 }
 
-const taskAttachInFlight = new Map<
-	string,
-	Promise<{
-		ok: boolean;
-		level: "info" | "warning" | "error";
-		message: string;
-	}>
->();
-
-async function attachTaskRunInTerminalInternal(
-	ctx: Pick<ExtensionContext, "ui" | "hasUI">,
-	run: TaskRunView,
-	preferredStep?: TaskRunStepView,
-): Promise<{
-	ok: boolean;
-	level: "info" | "warning" | "error";
-	message: string;
-}> {
-	const targetStep = selectTaskRunStepForOpen(run, preferredStep);
-	const controllerKey = makeTaskRunStepKey(run.runId, targetStep?.step ?? preferredStep?.step ?? 0);
-	const liveController = getLiveTaskController(controllerKey);
-
-	if (!isLiveController(liveController)) {
-		return {
-			ok: false,
-			level: "warning",
-			message: targetStep?.snapshot.persist
-				? `Run ${run.runId} step ${targetStep.step} is not currently running. Use /tasks open ${targetStep.snapshot.childSessionId} to resume it as a normal session.`
-				: `Run ${run.runId} has no running step to attach to.`,
-		};
-	}
-	return attachToLiveTaskController(ctx, liveController);
+/**
+ * Attaches the current terminal to a still-running worker instead of opening a second session
+ * object pointed at its session file (which the worker's own RPC child is still writing to --
+ * two independent writers on one file is a real corruption risk, not just a UX gap). "Open" and
+ * "attach" are the same command; which one happens is decided by whether the target step is
+ * still live, not by a separate verb. Mirrors the multi-subscriber model used by pi's own
+ * `packages/server` (multiple in-process listeners on one worker's event stream) -- this view's
+ * subscription coexists with the driver's own subscription that accumulates the eventual
+ * SingleResult, and never touches the worker process or its session file itself; sending a
+ * message goes through the exact same steer()/prompt() path `/tasks steer` already uses.
+ */
+/** Delivers one attach-view message into the same running worker -- steer() while it's mid-turn,
+ * prompt() while idle. Exactly the routing `/tasks steer` already uses (deliverToLiveSession),
+ * just with the rejection surfaced back to the caller instead of floated. */
+function sendAttachMessage(controller: LiveTaskController, message: string): Promise<void> {
+	return controller.session.isStreaming ? controller.session.steer(message) : controller.session.prompt(message);
 }
 
-async function attachTaskRunInTerminal(
-	ctx: Parameters<typeof attachTaskRunInTerminalInternal>[0],
+async function attachToLiveTaskRun(
+	ctx: { ui: ExtensionUIContext },
 	run: TaskRunView,
-	preferredStep?: TaskRunStepView,
-): ReturnType<typeof attachTaskRunInTerminalInternal> {
-	const targetStep = selectTaskRunStepForOpen(run, preferredStep);
-	const key = makeTaskRunStepKey(run.runId, targetStep?.step ?? preferredStep?.step ?? 0);
-	const existing = taskAttachInFlight.get(key);
-	if (existing) return await existing;
-	const pending = attachTaskRunInTerminalInternal(ctx, run, preferredStep);
-	taskAttachInFlight.set(key, pending);
-	try {
-		return await pending;
-	} finally {
-		taskAttachInFlight.delete(key);
-	}
+	step: TaskRunStepView,
+	controller: LiveTaskController,
+): Promise<{ ok: true; opened: true; level: "info"; message: string }> {
+	const initialMessages = controller.session.messages
+		.filter((message): message is Message => message.role === "assistant" || message.role === "toolResult")
+		.slice(-20);
+	const overlayState: TaskAttachOverlayState = {
+		runId: run.runId,
+		agent: controller.agent,
+		step: step.step,
+		initialMessages,
+		initialStreaming: controller.session.isStreaming,
+	};
+
+	await ctx.ui.custom<undefined>(
+		(
+			tui: { requestRender: () => void },
+			theme: unknown,
+			keybindings: unknown,
+			done: (value: undefined) => void,
+		) => {
+			let unsubscribe = () => {};
+			const overlay = new TaskAttachOverlay(
+				theme,
+				overlayState,
+				keybindings as any,
+				() => tui.requestRender(),
+				(message) => {
+					sendAttachMessage(controller, message).catch((error) =>
+						overlay.setError(error instanceof Error ? error.message : String(error)),
+					);
+				},
+				() => {
+					unsubscribe();
+					done(undefined);
+				},
+			);
+			unsubscribe = controller.session.subscribe((event) => {
+				if (event.type === "agent_start") overlay.setStreaming(true);
+				else if (event.type === "agent_settled") overlay.setStreaming(false);
+				else if (event.type === "tool_execution_start" && event.toolName === TASK_COMPLETE_TOOL_NAME) {
+					overlay.appendNotice("(task_complete called -- worker is finishing)");
+				} else if (event.type === "message_end") {
+					const message = event.message as Message;
+					if (message.role === "assistant" || message.role === "toolResult")
+						overlay.appendMessages([message]);
+				}
+			});
+			return overlay;
+		},
+		{ overlay: true, overlayOptions: { anchor: "right-center", width: "55%", maxHeight: "85%", margin: 1 } },
+	);
+
+	return { ok: true, opened: true, level: "info", message: `Detached from run ${run.runId} step ${step.step}.` };
+}
+
+function supportsInteractiveAttach(ctx: unknown): ctx is { mode?: string; ui: ExtensionUIContext } {
+	return (
+		isRecord(ctx) &&
+		ctx.mode === "tui" &&
+		isRecord(ctx.ui) &&
+		typeof ctx.ui.custom === "function" &&
+		typeof ctx.ui.notify === "function"
+	);
 }
 
 async function openTaskRunSession(
@@ -2880,6 +3200,19 @@ async function openTaskRunSession(
 			ok: false,
 			level: "error",
 			message: `Run ${run.runId} step ${targetStep.step} has missing child session path metadata (stale metadata).`,
+		};
+	}
+	// A running step's own RPC child process is still writing to this session file -- opening a
+	// second session object against it would give the file two independent writers. Attach to the
+	// same running process instead (below); this requires a real TUI, since it's an interactive
+	// overlay, not a one-shot notification.
+	const liveController = getLiveTaskController(makeTaskRunStepKey(run.runId, targetStep.step));
+	if (isLiveController(liveController)) {
+		if (supportsInteractiveAttach(ctx)) return attachToLiveTaskRun(ctx, run, targetStep, liveController);
+		return {
+			ok: false,
+			level: "warning",
+			message: `Run ${run.runId} step ${targetStep.step} is still running. Open in the TUI to attach to it live, or use "/tasks steer"/resumeSessionId to send it input -- it can be opened once it finishes.`,
 		};
 	}
 	const sessionValidation = validateTaskSessionReference(childSessionPath, targetStep.snapshot.childSessionId);
@@ -2928,7 +3261,7 @@ async function sendTaskSteeringMessage(
 		};
 	}
 	try {
-		await controllerResolution.controller.session.steer(message);
+		deliverToLiveSession(controllerResolution.controller.session, message);
 		return {
 			ok: true,
 			level: "info",
@@ -2943,102 +3276,32 @@ async function sendTaskSteeringMessage(
 	}
 }
 
-async function buildTaskViewerOverlayState(
-	scope: TasksScope,
-	run: TaskRunView,
-	preferredStep?: TaskRunStepView,
-): Promise<{ overlayState: TaskViewerOverlayState; step?: TaskRunStepView }> {
-	const inspectStep = selectTaskRunStepForInspect(run, preferredStep);
-	const detailText = await formatTaskRunDetails(scope, run, inspectStep);
-	const transcript = await readTaskTranscriptPreview(run, inspectStep);
-	const access = describeTaskRunAccess(run, inspectStep);
-	return {
-		overlayState: {
-			runId: run.runId,
-			runStatus: run.status,
-			runMode: run.mode,
-			detailText,
-			transcript,
-			canOpen: access.includes("open"),
-			canAttach: access.includes("attach"),
-			canOrigin: access.includes("origin"),
-			canSteer: access.includes("steer"),
-			attachActionLabel: "Attach",
-		},
-		step: inspectStep,
-	};
-}
-
-async function openTaskViewerOverlay(
+/**
+ * `/tasks view` -- always a plain notification (no interactive overlay): metadata, origin
+ * preview, available actions, warnings, and (when a controller is running) a recent transcript
+ * preview read straight from the live worker process's message history. `open`/`origin`/`steer`
+ * remain separate commands for actually acting on a run; view is read-only.
+ */
+async function showTaskRunView(
 	ctx: {
 		hasUI?: boolean;
-		mode?: string;
-		ui: {
-			custom: <T>(factory: any, options?: any) => Promise<T | undefined>;
-			notify(text: string, level?: "info" | "warning" | "error"): void;
-		};
+		ui: { notify(text: string, level?: "info" | "warning" | "error"): void };
 	},
 	scope: TasksScope,
 	run: TaskRunView,
 	preferredStep?: TaskRunStepView,
 ): Promise<void> {
 	if (!ctx.hasUI) {
-		ctx.ui.notify("Task viewer overlay is only available with UI.", "warning");
+		ctx.ui.notify("Task view is only available with UI.", "warning");
 		return;
 	}
-	const state = await buildTaskViewerOverlayState(scope, run, preferredStep);
-	if (ctx.mode !== "tui") {
-		const transcript = state.overlayState.transcript;
-		ctx.ui.notify(
-			`${state.overlayState.detailText}${transcript.lines.length > 0 ? `\n\nTranscript:\n${transcript.lines.join("\n")}` : ""}`,
-			"info",
-		);
-		return;
-	}
-	// Deliberately does not wait for the main session to be idle: like /tasks attach and
-	// /tasks steer, this needs to work *while* a task step is actively running -- that's the
-	// whole point of being able to inspect it live. Waiting here would silently hang until the
-	// outer task tool call returns, which looks indistinguishable from the command doing nothing.
-	const result = await ctx.ui.custom<TaskViewerOverlayResult | undefined>(
-		(
-			_tui: unknown,
-			theme: unknown,
-			keybindings: unknown,
-			done: (value: TaskViewerOverlayResult | undefined) => void,
-		) => new TaskViewerOverlay(theme, state.overlayState, keybindings as any, done),
-		{
-			overlay: true,
-			overlayOptions: {
-				anchor: "right-center",
-				width: "55%",
-				maxHeight: "85%",
-				margin: 1,
-			},
-		},
+	const inspectStep = selectTaskRunStepForInspect(run, preferredStep);
+	const detailText = await formatTaskRunDetails(scope, run, inspectStep);
+	const transcript = await readTaskTranscriptPreview(run, inspectStep);
+	ctx.ui.notify(
+		`${detailText}${transcript.lines.length > 0 ? `\n\nTranscript:\n${transcript.lines.join("\n")}` : ""}`,
+		"info",
 	);
-	if (!result || result.action === "close") return;
-	if (result.action === "open") {
-		const openResult = await openTaskRunSession(ctx, run, state.step);
-		if (!openResult.opened && openResult.message) ctx.ui.notify(openResult.message, openResult.level);
-		return;
-	}
-	if (result.action === "attach") {
-		const attachResult = await attachTaskRunInTerminal(ctx as any, run, state.step);
-		ctx.ui.notify(attachResult.message, attachResult.level);
-		syncTaskUiChrome(ctx as any);
-		return;
-	}
-	if (result.action === "origin") {
-		const originResult = await revealTaskRunOrigin(ctx as any, run, state.step);
-		ctx.ui.notify(originResult.message, originResult.level);
-		syncTaskUiChrome(ctx as any);
-		return;
-	}
-	if (result.action === "steer" && result.message) {
-		const steerResult = await sendTaskSteeringMessage(run, state.step, result.message);
-		ctx.ui.notify(steerResult.message, steerResult.level);
-		syncTaskUiChrome(ctx as any);
-	}
 }
 
 async function revealTaskRunOrigin(
@@ -3154,40 +3417,17 @@ async function browseTaskRuns(
 	const hasOrigin = Boolean(
 		getTaskOriginNavigationTarget(selectedRun) || resolveTaskRunOriginSnapshot(selectedRun)?.originPreview,
 	);
-	const attachActionLabel = "Attach";
 	const actionOptions = [
-		"View overlay",
+		"View details",
 		...(hasPersistedSteps ? ["Open session"] : []),
-		...(hasLiveController ? [attachActionLabel, "Steer running task"] : []),
+		...(hasLiveController ? ["Steer running task"] : []),
 		...(hasOrigin ? ["Reveal origin"] : []),
 		"Cancel",
 	];
 	const action = await ctx.ui.select(`Run ${selectedRun.runId}`, actionOptions);
 	if (!action || action === "Cancel") return true;
-	if (action === "View overlay") {
-		await openTaskViewerOverlay(ctx, scope, selectedRun);
-		return true;
-	}
-	if (action === attachActionLabel) {
-		const persistedSteps = selectedRun.steps.filter((candidate) => candidate.snapshot.persist);
-		let targetStep = selectTaskRunStepForOpen(selectedRun);
-		if (persistedSteps.length > 1) {
-			const stepOptions = persistedSteps.map(
-				(candidate) =>
-					`step ${candidate.step} · ${candidate.status} · ${candidate.snapshot.childSessionId.slice(0, 8)} · ${candidate.snapshot.taskPreview || candidate.snapshot.childSessionName || "persisted"}`,
-			);
-			const selectedStepLabel = await ctx.ui.select(`Attach run ${selectedRun.runId}`, stepOptions);
-			if (!selectedStepLabel) return true;
-			const stepIndex = stepOptions.indexOf(selectedStepLabel);
-			if (stepIndex < 0) {
-				ctx.ui.notify("Selected task step could not be resolved.", "error");
-				return true;
-			}
-			targetStep = persistedSteps[stepIndex];
-		}
-		const attachResult = await attachTaskRunInTerminal(ctx, selectedRun, targetStep);
-		ctx.ui.notify(attachResult.message, attachResult.level);
-		syncTaskUiChrome(ctx);
+	if (action === "View details") {
+		await showTaskRunView(ctx, scope, selectedRun);
 		return true;
 	}
 	if (action === "Reveal origin") {
@@ -3512,6 +3752,18 @@ const TaskStep = Type.Object({
 		}),
 	),
 	context: Type.Optional(ContextModeSchema),
+	interactive: Type.Optional(
+		Type.Boolean({
+			description:
+				"Keep the worker alive after its first turn instead of auto-finishing; it only ends when it calls `task_complete`. Overrides the agent's own `interactive` default.",
+		}),
+	),
+	resumeSessionId: Type.Optional(
+		Type.String({
+			description:
+				"Continue a specific previously-delegated worker instead of starting a new one -- use the child session id from an earlier result or ping. `task` is delivered to that same running/idle worker; all other fields are ignored.",
+		}),
+	),
 });
 
 const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
@@ -3537,7 +3789,6 @@ export const TASKS_COMPLETIONS = [
 	{ value: "list", label: "list: list current task runs" },
 	{ value: "view", label: "view: view details, transcript, and actions for a task run" },
 	{ value: "open", label: "open: open a task run session" },
-	{ value: "attach", label: "attach: attach to a running task's live view" },
 	{ value: "origin", label: "origin: reveal the origin of a task run" },
 	{ value: "steer", label: "steer: send a steering message to a task run" },
 	{ value: "parent", label: "parent: open the parent session" },
@@ -3682,10 +3933,19 @@ export default function (pi: ExtensionAPI) {
 		taskProjectTrustState = undefined;
 		setTaskWidgetEnabled(ctx, false);
 		clearTaskUiChrome(ctx);
-		await Promise.all(
-			listLiveTaskControllers().map((controller) => controller.close(new Error("Task session shut down"))),
+		// Only close controllers for the session that is *itself* shutting down (e.g. a human
+		// opened a worker's session and then navigated away from it) -- never every controller
+		// process-wide. This fires on every session switch (/tasks open, /resume, fork, new
+		// session), not just process exit, and an interactive worker is meant to outlive its
+		// delegating parent's own session lifecycle: the parent switching sessions for any
+		// reason (including opening the worker's own session to inspect it) must not tear down
+		// unrelated live workers just because *a* session happened to shut down somewhere.
+		const shuttingDownSessionId = ctx.sessionManager.getSessionId();
+		const ownControllers = listLiveTaskControllers().filter(
+			(controller) => controller.childSessionId === shuttingDownSessionId,
 		);
-		clearLiveTaskControllers();
+		await Promise.all(ownControllers.map((controller) => controller.close(new Error("Task session shut down"))));
+		for (const controller of ownControllers) deleteLiveTaskController(controller.key);
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -3806,7 +4066,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			try {
 				const parsed = parseTasksCommand(args);
-				if (parsed.action === "open" || parsed.action === "parent" || parsed.action === "origin") {
+				if (parsed.action === "parent" || parsed.action === "origin") {
 					await ctx.waitForIdle();
 				}
 				if (parsed.error) {
@@ -3931,13 +4191,7 @@ export default function (pi: ExtensionAPI) {
 				const { run, step } = resolved.resolution;
 				const selectedStep = step as TaskRunStepView | undefined;
 				if (parsed.action === "view") {
-					await openTaskViewerOverlay(ctx, parsed.scope, run, selectedStep);
-					return;
-				}
-				if (parsed.action === "attach") {
-					const attachResult = await attachTaskRunInTerminal(ctx, run, selectedStep);
-					ctx.ui.notify(attachResult.message, attachResult.level);
-					syncTaskUiChrome(ctx);
+					await showTaskRunView(ctx, parsed.scope, run, selectedStep);
 					return;
 				}
 				if (parsed.action === "origin") {
@@ -3958,6 +4212,15 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
+				// Only wait for idle when actually opening a finished session (a structural
+				// session-replacement operation) -- attaching to a still-running step must work
+				// *while* the outer task tool call is in progress, exactly like view/steer; waiting
+				// here would silently hang until that call returns.
+				const openTargetStep = selectTaskRunStepForOpen(run, selectedStep);
+				const openTargetIsLive =
+					!!openTargetStep &&
+					isLiveController(getLiveTaskController(makeTaskRunStepKey(run.runId, openTargetStep.step)));
+				if (!openTargetIsLive) await ctx.waitForIdle();
 				const openResult = await openTaskRunSession(ctx, run, selectedStep);
 				if (!openResult.opened) {
 					if (openResult.message) ctx.ui.notify(openResult.message, openResult.level);
@@ -4006,19 +4269,23 @@ export default function (pi: ExtensionAPI) {
 		name: "task",
 		label: "Task",
 		description:
-			"Delegate to agents. Use mode=parallel for independent steps, chain for {previous}; persist is config-only.",
+			"Delegate to agents in the background. Use mode=parallel for independent steps, chain for {previous}; persist is config-only. " +
+			"Returns an acknowledgment immediately; the real result is delivered later as a new message when the worker finishes.",
 		promptSnippet:
-			"Delegate substantial focused work to specialized agents; each step needs `agent` or behavioral `prompt`.",
+			"Delegate substantial focused work to specialized agents; each step needs `agent` or behavioral `prompt`. Runs in the background -- do not wait or poll for the result.",
 		promptGuidelines: [
 			"Use `task` for substantial focused delegation; skip it for trivial work.",
 			"Every `task` step must define worker behavior: set `agent` (for example `reviewer`, `thinker`, or `implementer`) or provide a behavioral `prompt`; do not send bare `{ task: ... }` steps.",
 			'Use `mode: "parallel"` for independent steps and `mode: "chain"` only when later steps need `{previous}`.',
+			"`task` always runs in the background: this call returns only an acknowledgment, and the actual result arrives later as a separate message once the worker finishes. Do not poll, check status in a loop, or block waiting for it -- continue with other work and react when that message arrives.",
+			"Never report, summarize, or assume a delegated result before its message actually arrives. If you haven't received it yet, the work is not done -- do not fabricate what the worker probably found or say it succeeded.",
+			'In `mode: "parallel"`, expect one such message per step as each one finishes, not a single combined summary at the end.',
+			"If a result says the worker needs input (it called `ask_caller`, or an interactive worker paused without finishing), reply by calling `task` again with that result's `resumeSessionId` and your reply as `task` -- do not start a fresh delegation for the same work.",
 		],
 		parameters: SubagentParams,
 		prepareArguments: prepareTaskToolArguments,
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			const agentDir = getAgentDir();
 			const normalizedParams = normalizeTaskToolParams(params as unknown);
 			const agentScope: AgentScope = normalizedParams.agentScope ?? "user";
 			const projectTrusted = isTaskProjectTrusted(ctx);
@@ -4055,7 +4322,7 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			// Recursion depth guard
-			const depthCheck = checkSubagentDepth(ctx.sessionManager.getSessionId());
+			const depthCheck = checkSubagentDepth();
 			if (depthCheck.blocked) {
 				throwTaskError(
 					`Task depth limit reached (depth ${depthCheck.depth}, max ${depthCheck.maxDepth}). Nested task delegation is blocked to prevent runaway recursion.`,
@@ -4089,6 +4356,57 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (mode === "single" && stepsToRun.length !== 1) {
 				return invalidParameters("Invalid parameters. Single mode requires exactly one step.");
+			}
+
+			const resumeStep = stepsToRun.find((step) => step.resumeSessionId);
+			if (resumeStep) {
+				if (mode !== "single" || stepsToRun.length !== 1) {
+					return invalidParameters(
+						'Invalid parameters. `resumeSessionId` is only supported with a single step in mode: "single".',
+					);
+				}
+				const target = findLiveWorkerBySessionId(resumeStep.resumeSessionId!);
+				if (!target) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `No live worker session found for resumeSessionId "${resumeStep.resumeSessionId}" -- it may have already finished or been closed.`,
+							},
+						],
+						details: makeDetails("single")([]),
+					};
+				}
+
+				const workerPromise = resumeWorkerRun({
+					controller: target,
+					task: resumeStep.task,
+					signal,
+					parentCtx: ctx,
+				});
+				void workerPromise.then((result) => {
+					if (shouldSuppressTaskPingback(result)) return;
+					void deliverTaskPingback(
+						pi,
+						buildSingleStepPingbackText(result),
+						{
+							mode: "single",
+							toolCallId,
+							result,
+						},
+						ctx.sessionManager,
+					);
+				});
+
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Resumed ${target.agent}'s session in the background. You'll be notified when it finishes${target.interactive ? " or needs input" : ""}.`,
+						},
+					],
+					details: makeDetails("single")([]),
+				};
 			}
 
 			const taskOrigin = resolveTaskOriginForBranch(
@@ -4140,62 +4458,98 @@ export default function (pi: ExtensionAPI) {
 			childMetadataRunId = sessionRunId ?? `${toolCallId}-run`;
 
 			if (mode === "chain") {
-				const results: SingleResult[] = [];
-				let previousOutput = "";
+				const runChain = async (): Promise<SingleResult[]> => {
+					const results: SingleResult[] = [];
+					let previousOutput = "";
 
-				for (let i = 0; i < preparedSteps.length; i++) {
-					const preparedStep = preparedSteps[i];
-					if (!preparedStep) continue;
-					const taskWithContext = preparedStep.rawStep.task.replace(/\{previous\}/g, previousOutput);
+					for (let i = 0; i < preparedSteps.length; i++) {
+						const preparedStep = preparedSteps[i];
+						if (!preparedStep) continue;
+						const taskWithContext = preparedStep.rawStep.task.replace(/\{previous\}/g, previousOutput);
 
-					const chainUpdate: OnUpdateCallback | undefined = onUpdate
-						? (partial) => {
-								const currentResult = partial.details?.results[0];
-								if (currentResult) {
-									const allResults = [...results, currentResult];
-									onUpdate({
-										content: partial.content,
-										details: makeDetails("chain")(allResults),
-									});
+						const chainUpdate: OnUpdateCallback | undefined = onUpdate
+							? (partial) => {
+									const currentResult = partial.details?.results[0];
+									if (currentResult) {
+										const allResults = [...results, currentResult];
+										onUpdate({
+											content: partial.content,
+											details: makeDetails("chain")(allResults),
+										});
+									}
 								}
-							}
-						: undefined;
+							: undefined;
 
-					const result = await runTaskStepWithMetadata({
-						preparedStep,
-						task: taskWithContext,
-						mode: "chain",
-						step: preparedStep.step,
-						toolCallId: toolCallId,
-						runId: childMetadataRunId,
-						signal,
-						onUpdate: chainUpdate,
-						makeDetails: makeDetails("chain"),
-						sessionManager: ctx.sessionManager,
-						origin: taskOrigin,
-						refreshUi: () => syncTaskUiChrome(ctx),
-						parentDepth: depthCheck.depth,
-						parentCtx: ctx,
-						agentDir,
-					});
-					results.push(result);
+						const result = await runTaskStepWithMetadata({
+							preparedStep,
+							task: taskWithContext,
+							mode: "chain",
+							step: preparedStep.step,
+							toolCallId: toolCallId,
+							runId: childMetadataRunId,
+							signal,
+							onUpdate: chainUpdate,
+							makeDetails: makeDetails("chain"),
+							sessionManager: ctx.sessionManager,
+							origin: taskOrigin,
+							refreshUi: () => syncTaskUiChrome(ctx),
+							parentCtx: ctx,
+						});
+						results.push(result);
 
-					const isError =
-						result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
-					if (isError) {
-						const errorMsg = previewTaskError(
-							result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)",
-						);
-						throwTaskError(
-							`Chain stopped at step ${preparedStep.step} (${preparedStep.rawStep.agent ?? preparedStep.rawStep.profile ?? "generic"}): ${errorMsg}\n\n${formatChainResults(results)}`,
-							makeDetails("chain")(results),
-						);
+						if (isTaskStepError(result)) {
+							const errorMsg = previewTaskError(
+								result.errorMessage ||
+									result.stderr ||
+									getFinalOutput(result.messages) ||
+									"(no output)",
+							);
+							throwTaskError(
+								`Chain stopped at step ${preparedStep.step} (${preparedStep.rawStep.agent ?? preparedStep.rawStep.profile ?? "generic"}): ${errorMsg}\n\n${formatChainResults(results)}`,
+								makeDetails("chain")(results),
+							);
+						}
+						previousOutput = truncateOutput(getFinalOutput(result.messages));
 					}
-					previousOutput = truncateOutput(getFinalOutput(result.messages));
-				}
+					return results;
+				};
+
+				// Chain steps run sequentially in the background -- {previous} needs each step's
+				// real output, so this can't fan out like parallel mode -- with a single pingback
+				// once the whole chain settles (or stops early on a failing step).
+				void runChain()
+					.then((results) => {
+						void deliverTaskPingback(
+							pi,
+							`Task chain (${results.length} step${results.length === 1 ? "" : "s"}) finished:\n\n${formatChainResults(results)}`,
+							{ mode: "chain", toolCallId, sessionRunId, results },
+							ctx.sessionManager,
+						);
+					})
+					.catch((error: unknown) => {
+						const message = error instanceof Error ? error.message : String(error);
+						const details = (error as { details?: TaskDetails } | undefined)?.details;
+						void deliverTaskPingback(
+							pi,
+							`Task chain stopped:\n\n${message}`,
+							{
+								mode: "chain",
+								toolCallId,
+								sessionRunId,
+								results: details?.results ?? [],
+							},
+							ctx.sessionManager,
+						);
+					});
+
 				return {
-					content: [{ type: "text", text: formatChainResults(results) }],
-					details: makeDetails("chain")(results),
+					content: [
+						{
+							type: "text",
+							text: `Started a ${preparedSteps.length}-step chain in the background. You'll be notified with the final result.`,
+						},
+					],
+					details: makeDetails("chain")([]),
 				};
 			}
 
@@ -4248,7 +4602,27 @@ export default function (pi: ExtensionAPI) {
 					}
 				};
 
-				const results = await mapWithConcurrencyLimit<PreparedTaskStep, SingleResult>(
+				const totalSteps = preparedSteps.length;
+				const pingbackStep = (result: SingleResult, index: number) => {
+					if (shouldSuppressTaskPingback(result)) return;
+					void deliverTaskPingback(
+						pi,
+						buildSingleStepPingbackText(result, { index, total: totalSteps }),
+						{
+							mode: "parallel",
+							toolCallId,
+							sessionRunId,
+							step: index,
+							result,
+						},
+						ctx.sessionManager,
+					);
+				};
+
+				// Each step gets its own pingback the moment it finishes -- the caller already
+				// knows how many are running, so an aggregated summary at the end would just delay
+				// news it could act on sooner.
+				void mapWithConcurrencyLimit<PreparedTaskStep, SingleResult>(
 					preparedSteps,
 					MAX_CONCURRENCY,
 					async (preparedStep, index) => {
@@ -4270,12 +4644,11 @@ export default function (pi: ExtensionAPI) {
 							sessionManager: ctx.sessionManager,
 							origin: taskOrigin,
 							refreshUi: () => syncTaskUiChrome(ctx),
-							parentDepth: depthCheck.depth,
 							parentCtx: ctx,
-							agentDir,
 						});
 						allResults[index] = result;
 						emitParallelUpdate();
+						pingbackStep(result, index);
 						return result;
 					},
 					{
@@ -4294,6 +4667,7 @@ export default function (pi: ExtensionAPI) {
 							};
 							allResults[index] = cancelled;
 							emitParallelUpdate();
+							pingbackStep(cancelled, index);
 							return cancelled;
 						},
 					},
@@ -4303,16 +4677,16 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: formatParallelResults(results),
+							text: `Delegated ${totalSteps} task${totalSteps === 1 ? "" : "s"} in parallel in the background. You'll get a ping as each one finishes.`,
 						},
 					],
-					details: makeDetails("parallel")(results),
+					details: makeDetails("parallel")([...allResults]),
 				};
 			}
 
 			if (mode === "single") {
 				const preparedStep = preparedSteps[0]!;
-				const result = await runTaskStepWithMetadata({
+				const workerPromise = runTaskStepWithMetadata({
 					preparedStep,
 					task: preparedStep.rawStep.task,
 					mode: "single",
@@ -4325,29 +4699,31 @@ export default function (pi: ExtensionAPI) {
 					sessionManager: ctx.sessionManager,
 					origin: taskOrigin,
 					refreshUi: () => syncTaskUiChrome(ctx),
-					parentDepth: depthCheck.depth,
 					parentCtx: ctx,
-					agentDir,
 				});
-				const isError =
-					result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
-				if (isError) {
-					const errorMsg = previewTaskError(
-						result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)",
+				void workerPromise.then((result) => {
+					if (shouldSuppressTaskPingback(result)) return;
+					void deliverTaskPingback(
+						pi,
+						buildSingleStepPingbackText(result),
+						{
+							mode: "single",
+							toolCallId,
+							sessionRunId,
+							result,
+						},
+						ctx.sessionManager,
 					);
-					throwTaskError(
-						`Agent ${result.stopReason || "failed"}: ${errorMsg}`,
-						makeDetails("single")([result]),
-					);
-				}
+				});
+
 				return {
 					content: [
 						{
 							type: "text",
-							text: truncateOutput(getFinalOutput(result.messages)) || "(no output)",
+							text: `Delegated to ${preparedStep.worker.displayAgentName} in the background. You'll be notified when it finishes${preparedStep.worker.interactive ? " or needs input" : ""}.`,
 						},
 					],
-					details: makeDetails("single")([result]),
+					details: makeDetails("single")([]),
 				};
 			}
 
@@ -4697,6 +5073,55 @@ export default function (pi: ExtensionAPI) {
 			return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
 		},
 	});
+
+	// Registered globally -- like `task` itself -- so every worker (a separate `pi --mode rpc`
+	// process running this same extension) has them available regardless of its own tools/
+	// excludeTools configuration. Their execute() bodies are static acknowledgments: the worker
+	// process has no access to the delegating parent's liveTaskControllers registry (different
+	// process, different memory), so completion/ping detection happens on the PARENT side
+	// instead -- the RpcWorkerHandle's own event-stream watcher sees these calls via
+	// tool_execution_start events (see task-rpc-worker.ts) and sets the controlOutcome that
+	// finalizeWorkerRun consumes, well before (and independent of) these execute() bodies
+	// finishing.
+	pi.registerTool({
+		name: TASK_COMPLETE_TOOL_NAME,
+		label: "Task Complete",
+		description:
+			"Call this when you have finished the delegated task and are ready to report back. " +
+			"Write `summary` as your actual answer to whoever delegated this to you, not a status update " +
+			'(e.g. "Found 3 callers of foo(), listed below" rather than "Done searching"). ' +
+			"Calling this ends your session -- the caller is notified automatically; you do not need to say anything else.",
+		parameters: Type.Object({
+			summary: Type.String({ description: "Your final answer, to be delivered to the caller as the result." }),
+		}),
+		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
+			return {
+				content: [{ type: "text", text: "Reported completion to the caller. Ending session." }],
+				details: {},
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: ASK_CALLER_TOOL_NAME,
+		label: "Ask Caller",
+		description:
+			"Call this when you're stuck, need clarification, or need the caller to do something before you can " +
+			"make progress -- not for routine tool-permission prompts. `message` is delivered to the caller " +
+			"immediately. Your session stays alive and waits; the caller answers by delegating a follow-up back " +
+			"to this same session (they are given your session reference for that). Call this once and then " +
+			"actually stop -- do not call it again to check whether an answer has arrived, and do not guess an " +
+			"answer yourself and keep going.",
+		parameters: Type.Object({
+			message: Type.String({ description: "What you need from the caller." }),
+		}),
+		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
+			return {
+				content: [{ type: "text", text: "Sent your question to the caller. Waiting for a response." }],
+				details: {},
+			};
+		},
+	});
 }
 
 export const __test__ = {
@@ -4727,7 +5152,7 @@ export const __test__ = {
 	getPersistedMainAgentState,
 	parseTasksCommand,
 	preflightTaskRun,
-	createWorkerUiContext,
+	relayTaskExtensionUiRequest,
 	resolveModelFromEffort,
 	formatTaskDelegationGuidance,
 	resolveParentSessionForCurrentSession,
@@ -4745,13 +5170,21 @@ export const __test__ = {
 	pushBoundedMessage,
 	runSingleAgentViaAgentSession,
 	runTaskStepWithMetadata,
-	attachTaskRunInTerminal,
+	isTaskStepError,
+	composeTaskResultBody,
+	shouldSuppressTaskPingback,
+	buildSingleStepPingbackText,
+	deliverTaskPingback,
+	finalizeWorkerRun,
+	resumeWorkerRun,
+	findLiveWorkerBySessionId,
 	resolveLiveTaskControllerForRun,
 	describeTaskRunAccess,
 	// Narrow seams for deterministic replacement-safety tests.
 	tryOpenTaskSession,
 	openTaskRunSession,
 	revealTaskRunOrigin,
-	openTaskViewerOverlay,
+	showTaskRunView,
+	sendAttachMessage,
 	withTaskWidgetTemporarilyHidden,
 };

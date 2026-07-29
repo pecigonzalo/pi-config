@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentSession, AgentSessionEventListener } from "@earendil-works/pi-coding-agent";
+import type { RpcWorkerEvent, RpcWorkerHandle, RpcWorkerListener } from "./task-rpc-worker.js";
 import {
 	clearLiveTaskControllers,
 	createIdempotentControllerClose,
 	deleteLiveTaskController,
+	deliverToLiveSession,
 	getLiveTaskController,
 	isLiveController,
 	listLiveTaskControllers,
@@ -12,21 +13,28 @@ import {
 	setLiveTaskController,
 } from "./task-live.js";
 
-function createFakeSession(overrides: Partial<AgentSession> = {}): AgentSession {
-	let listener: AgentSessionEventListener | undefined;
+const noopControlSignal = { onComplete: () => {}, onPing: () => {} };
+
+function createFakeSession(overrides: Partial<RpcWorkerHandle> = {}): RpcWorkerHandle {
+	let listener: RpcWorkerListener | undefined;
 	const fake = {
+		sessionManager: { getSessionId: () => "worker-session", getSessionFile: () => undefined },
 		messages: [],
 		isStreaming: false,
-		subscribe: (l: AgentSessionEventListener) => {
+		subscribe: (l: RpcWorkerListener) => {
 			listener = l;
 			return () => {
 				listener = undefined;
 			};
 		},
-		emit: (event: Parameters<AgentSessionEventListener>[0]) => listener?.(event),
+		prompt: async () => {},
+		steer: async () => {},
+		abort: async () => {},
+		dispose: () => {},
+		emit: (event: RpcWorkerEvent) => listener?.(event),
 		...overrides,
 	};
-	return fake as unknown as AgentSession;
+	return fake as unknown as RpcWorkerHandle;
 }
 
 describe("controller close", () => {
@@ -64,6 +72,7 @@ describe("registerAgentSessionController", () => {
 			task: "do the thing",
 			agent: "generic",
 			session,
+			controlSignal: noopControlSignal,
 			close: async () => {},
 		});
 
@@ -78,7 +87,7 @@ describe("registerAgentSessionController", () => {
 
 	test("tracks pending steering/follow-up counts from queue_update events", () => {
 		clearLiveTaskControllers();
-		const session = createFakeSession() as AgentSession & { emit: (event: unknown) => void };
+		const session = createFakeSession() as RpcWorkerHandle & { emit: (event: RpcWorkerEvent) => void };
 		const controller = registerAgentSessionController({
 			key: "run-2-step-1",
 			toolCallId: "tool-2",
@@ -89,6 +98,7 @@ describe("registerAgentSessionController", () => {
 			task: "do another thing",
 			agent: "generic",
 			session,
+			controlSignal: noopControlSignal,
 			close: async () => {},
 		});
 
@@ -110,6 +120,7 @@ describe("registerAgentSessionController", () => {
 			task: "list me",
 			agent: "generic",
 			session: createFakeSession(),
+			controlSignal: noopControlSignal,
 			close: async () => {},
 		});
 		expect(listLiveTaskControllers()).toContain(controller);
@@ -131,6 +142,7 @@ describe("isLiveController", () => {
 			task: "finish",
 			agent: "generic",
 			session: createFakeSession(),
+			controlSignal: noopControlSignal,
 			close: async () => {},
 		});
 		expect(isLiveController(controller)).toBe(true);
@@ -147,7 +159,7 @@ describe("readLiveTaskRuntimeInfo", () => {
 				{ role: "user", content: [{ type: "text", text: "Task: do it" }] },
 				{ role: "assistant", content: [{ type: "text", text: "Working on it" }] },
 			],
-		} as Partial<AgentSession>);
+		} as Partial<RpcWorkerHandle>);
 		setLiveTaskController({
 			key: "run-5-step-1",
 			toolCallId: "tool-5",
@@ -162,6 +174,8 @@ describe("readLiveTaskRuntimeInfo", () => {
 			startedAt: new Date().toISOString(),
 			pendingSteeringCount: 1,
 			pendingFollowUpCount: 0,
+			controlSignal: noopControlSignal,
+			interactive: false,
 			close: async () => {},
 		});
 
@@ -172,5 +186,45 @@ describe("readLiveTaskRuntimeInfo", () => {
 		expect(info.messageCount).toBe(2);
 		expect(info.lastAssistantText).toBe("Working on it");
 		deleteLiveTaskController("run-5-step-1");
+	});
+});
+
+describe("deliverToLiveSession", () => {
+	test("prompts an idle session instead of just queueing a steer that nothing would drain", () => {
+		let promptedWith: string | undefined;
+		let steeredWith: string | undefined;
+		const session = {
+			isStreaming: false,
+			prompt: (text: string) => {
+				promptedWith = text;
+			},
+			steer: (text: string) => {
+				steeredWith = text;
+			},
+		} as unknown as RpcWorkerHandle;
+
+		deliverToLiveSession(session, "hello");
+
+		expect(promptedWith).toBe("hello");
+		expect(steeredWith).toBeUndefined();
+	});
+
+	test("steers a mid-turn session instead of starting a second run", () => {
+		let promptedWith: string | undefined;
+		let steeredWith: string | undefined;
+		const session = {
+			isStreaming: true,
+			prompt: (text: string) => {
+				promptedWith = text;
+			},
+			steer: (text: string) => {
+				steeredWith = text;
+			},
+		} as unknown as RpcWorkerHandle;
+
+		deliverToLiveSession(session, "hello");
+
+		expect(steeredWith).toBe("hello");
+		expect(promptedWith).toBeUndefined();
 	});
 });

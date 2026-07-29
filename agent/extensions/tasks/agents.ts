@@ -46,6 +46,8 @@ export interface AgentConfig {
 	inheritProjectContext?: boolean;
 	inheritSkills?: boolean;
 	allowDelegation?: boolean;
+	/** Default for whether workers delegated to this agent stay alive until they call `task_complete`, instead of auto-finishing after their first turn. */
+	interactive?: boolean;
 	systemPrompt: string;
 	source: ConfigSource;
 	filePath: string;
@@ -63,6 +65,7 @@ export interface ProfileConfig {
 	inheritProjectContext?: boolean;
 	inheritSkills?: boolean;
 	allowDelegation?: boolean;
+	interactive?: boolean;
 	permissionsProfile?: string;
 	systemPromptMode: SystemPromptMode;
 	systemPrompt: string;
@@ -325,6 +328,7 @@ function parseAgentConfig(
 		inheritSkills:
 			frontmatter.inheritSkills === undefined ? undefined : parseBoolean(frontmatter.inheritSkills, false),
 		allowDelegation: parseOptionalBoolean(frontmatter.allowDelegation ?? frontmatter.allow_delegation),
+		interactive: parseOptionalBoolean(frontmatter.interactive),
 		systemPrompt: body,
 		source,
 		filePath,
@@ -359,6 +363,7 @@ function parseProfileConfig(
 		inheritSkills:
 			frontmatter.inheritSkills === undefined ? undefined : parseBoolean(frontmatter.inheritSkills, false),
 		allowDelegation: parseOptionalBoolean(frontmatter.allowDelegation ?? frontmatter.allow_delegation),
+		interactive: parseOptionalBoolean(frontmatter.interactive),
 		permissionsProfile: parseString(
 			frontmatter.permissionsProfile ?? frontmatter.permissions ?? frontmatter.permissionProfile,
 		),

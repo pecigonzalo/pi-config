@@ -66,13 +66,17 @@ Runtime calls use a compact `mode + steps` shape:
       "agent": "optional-agent",
       "profile": "optional-profile",
       "effort": "balanced",
-      "context": "fresh | fork"
+      "context": "fresh | fork",
+      "interactive": false,
+      "resumeSessionId": "optional-live-worker-session-id"
     }
   ]
 }
 ```
 
-`mode` defaults to `single` for one step. Set `mode` explicitly for multiple steps.
+`mode` defaults to `single` for one step. Set `mode` explicitly for multiple steps. Every call
+runs in the background and reports its result later -- see [section 4](#4-background-delegation-interactive-workers-and-resume).
+`interactive` and `resumeSessionId` are also covered there.
 
 Each effort resolves to a concrete model and may also set `thinkingLevel`.
 
@@ -81,14 +85,67 @@ Use `agent: "reviewer"` for reviews, `agent: "thinker"` for planning, and `agent
 
 `persist` is config-driven (agent/profile/tasks defaults) and is **not** a supported runtime override.
 
-## 4) `fresh` vs `fork`
+## 4) Background delegation, interactive workers, and resume
+
+Every `task` call runs in the background: the tool call itself returns an acknowledgment
+immediately, and the real result is delivered later as a new message steered into the
+delegating session (`pi.sendMessage(..., { triggerTurn: true, deliverAs: "steer" })`) --
+interrupting whatever the delegating agent is doing if it's still streaming, or starting a new
+turn if it's idle.
+
+Delivery differs by mode:
+
+- **single**: one pingback once the worker finishes.
+- **parallel**: one pingback *per step*, as each one individually finishes -- not a single
+  aggregated summary. The delegating agent already knows how many steps are running.
+- **chain**: steps run sequentially in the background (each needs the previous step's real
+  output for `{previous}`), with a single pingback once the whole chain settles or stops early
+  on a failing step.
+
+### Interactive workers
+
+Set `interactive: true` on a step, an agent's frontmatter, or a profile to keep a worker's
+session alive after its first turn instead of auto-finishing. An interactive worker only truly
+finishes when it calls the `task_complete` tool. If it calls `ask_caller` instead, its session
+stays alive and pauses, and the pingback tells the delegating agent to reply with
+`resumeSessionId` (below) instead of starting a fresh delegation.
+
+If its turn just ends without calling either, **no pingback is sent at all** -- the session
+stays alive (`awaitingReply: true` internally) but silently, with nothing reported back. A
+natural pause hasn't actually asked the delegating agent for anything, so pinging back there
+would just invite it to nudge the worker forward with a fresh `resumeSessionId` call; if the
+worker doesn't reliably comply, that nudge-pause cycle repeats with no real progress. This
+mirrors how `pi-interactive-subagents` handles the same case: only an explicit `subagent_done`/
+`caller_ping` call writes its exit sidecar and wakes the parent -- a natural pause just updates
+an internal "waiting" status with no proactive notification. Precedence for the `interactive`
+default: step > agent > profile > `false`.
+
+Every worker (interactive or not) gets two tools it doesn't need to ask for:
+
+- `task_complete(summary)`: reports the final answer and ends the session.
+- `ask_caller(message)`: asks the caller something and pauses, without ending the session.
+
+These are always reachable regardless of a step's own `tools`/`excludeTools` configuration,
+including an explicit empty tools allowlist.
+
+### Resuming a paused worker
+
+To continue a worker that's still live (interactive and paused, or one that called
+`ask_caller`), set `resumeSessionId` on a single-mode step to that worker's session id (from an
+earlier result or pingback) and `task` to the reply. All other step fields are ignored. If the
+worker is idle, this prompts it and finalizes exactly like a fresh run once that turn settles;
+if it's still mid-turn (rare -- something else is already awaiting it), the reply is just
+steered in, and whoever is already waiting delivers the eventual pingback.
+`resumeSessionId` is only supported with `mode: "single"`.
+
+## 5) `fresh` vs `fork`
 
 - `fresh`: create a new child session file with a fresh session header.
 - `fork`: create a persisted child session forked from the parent session snapshot.
 
 `fork` requires a valid parent session and effective `persist=true`.
 
-## 5) Persisted child sessions per step
+## 6) Persisted child sessions per step
 
 When effective `persist=true`, each step gets its own child session file under Pi's **normal** session hierarchy (`~/.pi/agent/sessions`). Child transcript files are no longer stored under the extension's `task-runs/.../steps/...` directory layout.
 
@@ -107,7 +164,7 @@ Persisted child sessions are seeded with:
 
 If `persist=false`, step execution uses non-persisted sessions and cannot be reopened later.
 
-## 6) Metadata model and visibility
+## 7) Metadata model and visibility
 
 For persisted steps, the parent session appends hidden custom metadata entries of type:
 
@@ -115,7 +172,7 @@ For persisted steps, the parent session appends hidden custom metadata entries o
 
 User-visible task results include compact child-session summaries (session id/status, and expanded path in detailed views).
 
-## 7) `/tasks` command surface
+## 8) `/tasks` command surface
 
 Supported commands (`/task ...` is accepted as a singular alias for `/tasks ...`):
 
@@ -124,7 +181,6 @@ Supported commands (`/task ...` is accepted as a singular alias for `/tasks ...`
 - `/tasks toggle`
 - `/tasks view <selector>`
 - `/tasks open <selector>`
-- `/tasks attach <selector>`
 - `/tasks origin <selector>`
 - `/tasks steer <selector> <message>`
 
@@ -132,23 +188,23 @@ Semantics:
 
 - `/tasks` commands operate on task runs reconstructed from metadata in the current parent session.
 - `parent`: from the current session, open its parent session via `parentSession` in the child session header.
-- `view`: inspect a task run -- metadata, origin preview, actions, warnings, and (when a controller is running) a recent transcript preview read straight from the live `AgentSession`'s message history. In the TUI this opens an interactive overlay with buttons for the other actions (open/attach/origin/steer); outside the TUI it falls back to a plain text notification with the same content. This is the one "inspect" verb -- there is no separate `show` command, since `view`'s non-TUI fallback already covers what a plain text dump would show.
-- `open`: open selected persisted child session inside the current Pi UI when auto-open is available.
-- `attach`: open a live view onto a running task step -- built from the same message/tool-call rendering pi's own interactive mode uses, subscribed directly to the worker's `AgentSession` (no subprocess, no wire protocol). Type a line and press Enter to steer the worker directly from the view; `Esc` detaches back to the parent -- the worker keeps running in the background either way. Only available while the step is actually running; a completed step has nothing live to attach to (use `open` to resume it as a normal session).
+- `view`: inspect a task run -- metadata, origin preview, available actions, warnings, and (when a controller is running) a recent transcript preview read straight from the live worker process's message history. Always a plain read-only notification, in the TUI or otherwise; use `open`/`origin`/`steer` to actually act on a run.
+- `open`: "open" and "attach" are the same command, not two separate verbs -- which one happens depends on whether the step's worker process has exited. Finished: opens the persisted child session inside the current Pi UI, same as before. Still running: attaches the current terminal to the live worker instead (TUI only) -- an interactive view with a live-updating transcript where typed messages are delivered straight into the same running process (steer while mid-turn, prompt while idle, exactly like `steer` below), never a second session object and never a write to the worker's own session file (which its own RPC child process is still writing to -- two independent writers on one file would risk corrupting it). Esc detaches without affecting the worker. Outside the TUI, running steps fall back to a message pointing at `steer`/`resumeSessionId` instead, since attaching needs a real terminal to render into.
 - `origin`: reveal the recorded parent-session origin for the task. In the current parent session this navigates to the recorded source entry; otherwise it shows the source session path and origin preview.
-- `steer`: if the task step is currently running, send it one message (`controller.session.steer(...)`) without opening the live view.
+- `steer`: if the task step is currently live, deliver it one message without opening a session -- `deliverToLiveSession` (`task-live.ts`) calls `steer()` while the worker is mid-turn (queued for after its current tool calls settle), or `prompt()` while it's idle. This matters because an interactive worker can be "live" (its controller still registered) while genuinely idle -- paused on `ask_caller` or a natural turn-end. `steer()` alone is a pure queue push with no run trigger, so delivering into a paused worker that way would just sit there unprocessed; `prompt()` is what actually starts the next turn.
 - `toggle`: toggle a persistent below-editor task widget for the current session. When enabled, the widget stays visible even with no task runs and continues to update as runs change.
 
-`view`, `attach`, and `steer` deliberately never wait for the main session to be idle -- that would defeat their purpose, since a task step only exists to inspect or steer *while it's running*, and the main session stays busy (from Pi's perspective) for the whole duration of the delegating `task` tool call. Only `open`, `parent`, and `origin` wait for idle first, since those are structural session-replacement operations that genuinely need the current turn to settle.
+`view` and `steer` deliberately never wait for the main session to be idle -- that would defeat their purpose, since a task step only exists to inspect or steer *while it's running*, and the main session stays busy (from Pi's perspective) for the whole duration of the delegating `task` tool call. `parent` and `origin` always wait for idle first, since they're structural session-replacement operations that genuinely need the current turn to settle. `open` only waits when the target step has actually finished (the same structural-replacement case); attaching to a still-running step skips the wait for the same reason `view`/`steer` do.
 
 Interactive runtime behavior:
 
-- every task step runs as a real, in-process `AgentSession` -- the same session type, and the same `prompt()`/`steer()`/`subscribe()` primitives, that a normal interactive `pi` session uses. There is no subprocess, no pty, and no RPC-over-pipes protocol; a live controller registry (`task-live.ts`) tracks which steps are currently running so `/tasks attach` and `/tasks steer` can reach them directly.
-- when the parent session has real UI, a running worker's own dialogs (select/confirm/input/editor) and status/widget updates are relayed straight to the parent's UI, prefixed with the worker's task label; dialogs from concurrently-running steps are serialized so only one shows at a time. Without a real parent UI, a worker's dialogs auto-resolve to their default (no relay).
-- `/tasks` in the TUI opens an interactive task browser; `Ctrl+Shift+T` opens the current-session task browser directly
+- every task step runs as a separate `pi --mode rpc` child process (`task-rpc-worker.ts`), not in-process -- the delegating parent talks to it over stdin/stdout JSON-lines, translating a worker's config into the same CLI flags the old subprocess model used (`--model`, `--tools`/`--no-tools`/`--exclude-tools`, `--system-prompt`/`--append-system-prompt`, `--no-context-files`, `--no-skills`/`--skill`, `--approve`/`--no-approve`, `--session`/`--no-session`). This exists specifically so a human inspecting a live worker never disposes the delegating parent's own session: pi's session-replacement machinery (`/tasks open`, `/resume`, fork, new session) always tears down whatever session is "current" in a terminal before replacing it, and a human inspects a worker from the same terminal as the delegating parent -- with each worker in its own OS process, opening or steering one never touches the parent's session object, so the parent stays fully live and responsive throughout. A live controller registry (`task-live.ts`) tracks which steps currently have a running child process so `/tasks steer` and `resumeSessionId` can reach them directly.
+- `task_complete`/`ask_caller` are registered globally (like `task` itself, since every worker process loads the same "tasks" extension), but their own `execute()` bodies are just static acknowledgments -- a worker's child process has no access to the delegating parent's live controller registry (different process, different memory). Completion/ping detection instead happens on the *parent* side: the worker's `RpcWorkerHandle` watches every event the child emits and reacts to `tool_execution_start` events named `task_complete`/`ask_caller`, well before (and independent of) the tool's own `execute()` finishing.
+- a session shutting down only closes *its own* live controller, if it has one -- never every controller process-wide. `session_shutdown` fires on every session switch (`/tasks open`, `/resume`, fork, new session), not just process exit, and an interactive worker is meant to outlive its delegating parent's own session lifecycle.
+- a pingback survives the delegating session itself going away in the meantime (unrelated to the worker's own process staying up -- the parent's session can still legitimately go away for its own reasons, e.g. process exit or `/resume` to something else). `deliverTaskPingback` falls back to writing the result straight into the delegating session's own file via `SessionManager.appendCustomMessageEntry` (a plain file writer, unaffected by extension-runtime staleness) when live delivery fails, so the result is visible next time that session is reopened or resumed instead of being silently lost.
+- when the parent session has real UI, a running worker's own dialogs (select/confirm/input/editor) and status/widget updates are relayed straight to the parent's UI, prefixed with the worker's task label, via the child's `extension_ui_request` events; dialogs from concurrently-running steps are serialized so only one shows at a time. Without a real parent UI, nothing is relayed and the worker's own extension host auto-resolves its dialogs to their default after a timeout.
+- `/tasks` in the TUI opens an interactive task browser (a plain select menu: pick a run, then an action); `Ctrl+Shift+T` opens the current-session task browser directly
 - `/tasks toggle` enables or hides the below-editor task widget for the current session
-- textual `/tasks list` output includes attach guidance; per-run `/tasks attach <selector>` hints appear for runs with an actually-running step
-- the viewer overlay keeps the parent session active while inspecting child state. Shortcut hints in the overlay: `Ctrl+O` open, `Ctrl+A` attach, `Ctrl+G` origin, `Enter`/`Ctrl+S` steer when live control is available, `Esc` close
 
 Selector resolution order:
 

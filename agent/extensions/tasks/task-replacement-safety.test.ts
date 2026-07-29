@@ -148,28 +148,21 @@ describe("task session replacement safety", () => {
 		expect(calls).toEqual(["wait", "navigate"]);
 	});
 
-	it("shows the task overlay without waiting for the main session to be idle", async () => {
+	it("shows the task view without waiting for the main session to be idle", async () => {
 		// Unlike switchSession/navigateTree (structural session-replacement operations that
-		// genuinely need the main turn to settle first), showing the overlay is read-only and
-		// must work while a task step is actively running -- that's the whole point of being
-		// able to inspect a live task. Waiting here would silently hang until the outer task
-		// tool call returns. The risky action *within* the overlay (opening a persisted session)
-		// still waits for idle on its own, independently, inside tryOpenTaskSession.
+		// genuinely need the main turn to settle first), showing the view is read-only and must
+		// work while a task step is actively running -- that's the whole point of being able to
+		// inspect a live task. Waiting here would silently hang until the outer task tool call
+		// returns. Actually acting on a run (e.g. opening a persisted session) still waits for
+		// idle on its own, independently, inside tryOpenTaskSession.
 		const calls: string[] = [];
 		const ctx: any = {
 			hasUI: true,
-			mode: "tui",
 			waitForIdle: async () => calls.push("wait"),
-			ui: {
-				custom: async () => {
-					calls.push("overlay");
-					return undefined;
-				},
-				notify: () => {},
-			},
+			ui: { notify: () => calls.push("notify") },
 		};
-		await __test__.openTaskViewerOverlay(ctx, "current", runFor("source.jsonl", "child") as any);
-		expect(calls).toEqual(["overlay"]);
+		await __test__.showTaskRunView(ctx, "current", runFor("source.jsonl", "child") as any);
+		expect(calls).toEqual(["notify"]);
 	});
 
 	it("does not restore stale widget chrome after replacement, but restores cancellation and errors", async () => {
