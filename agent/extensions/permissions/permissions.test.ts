@@ -1412,7 +1412,7 @@ describe("permissions extension sandbox lifecycle", () => {
 	type RegisteredCommand = { handler: (args: string | undefined, ctx: ExtensionContext) => Promise<void> | void };
 
 	async function setupPermissionsHarness(options: {
-		mode: "plan" | "workspace-write" | "full-access";
+		mode: "plan" | "workspace-write" | "full-access" | "auto";
 		rules?: Rule[];
 		sandbox?: Record<string, unknown>;
 		sandboxManager: {
@@ -1427,6 +1427,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		approvalOptions?: string[][];
 		approvalTitles?: string[];
 		writeApprovalFile?: () => void;
+		classifyPermissionRequest?: PermissionsExtensionDependencies["classifyPermissionRequest"];
 	}) {
 		await fs.mkdir(TEST_SCRATCH_DIR, { recursive: true });
 		const tmp = await fs.mkdtemp(path.join(TEST_SCRATCH_DIR, "perm-extension-probe-"));
@@ -1481,7 +1482,10 @@ describe("permissions extension sandbox lifecycle", () => {
 		} as unknown as ExtensionContext;
 
 		const { default: registerPermissions } = await import("./permissions");
-		registerPermissions(pi, { writeApprovalFile: options.writeApprovalFile });
+		registerPermissions(pi, {
+			writeApprovalFile: options.writeApprovalFile,
+			classifyPermissionRequest: options.classifyPermissionRequest,
+		});
 		for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
 
 		return {
@@ -1886,6 +1890,128 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 
 		expect(notifications).toContain("Bash sandbox: active; bash exec mode: sandboxed");
+	});
+
+	it("shows the config-derived mode with no session override", async () => {
+		const notifications: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			notifications,
+			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (c) => c },
+		});
+		try {
+			await harness.commands.get("permissions")?.handler("mode", harness.ctx);
+		} finally {
+			await harness.restore();
+		}
+
+		expect(notifications).toContain("Active permission mode: workspace-write");
+	});
+
+	it("sets a session override via /permissions mode <mode>", async () => {
+		const notifications: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			notifications,
+			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (c) => c },
+		});
+		try {
+			await harness.commands.get("permissions")?.handler("mode auto", harness.ctx);
+			await harness.commands.get("permissions")?.handler("mode", harness.ctx);
+		} finally {
+			await harness.restore();
+		}
+
+		expect(notifications).toContain('✓ Permission mode set to "auto" for this session');
+		expect(notifications).toContain("Active permission mode: auto (session override)");
+	});
+
+	it("rejects an unknown mode without changing the active mode", async () => {
+		const notifications: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			notifications,
+			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (c) => c },
+		});
+		try {
+			await harness.commands.get("permissions")?.handler("mode bogus", harness.ctx);
+			await harness.commands.get("permissions")?.handler("mode", harness.ctx);
+		} finally {
+			await harness.restore();
+		}
+
+		expect(notifications.some((message) => message.startsWith('Unknown mode "bogus"'))).toBe(true);
+		expect(notifications).toContain("Active permission mode: workspace-write");
+	});
+
+	it("clears a session override via /permissions mode default", async () => {
+		const notifications: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			notifications,
+			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (c) => c },
+		});
+		try {
+			await harness.commands.get("permissions")?.handler("mode auto", harness.ctx);
+			await harness.commands.get("permissions")?.handler("mode default", harness.ctx);
+			await harness.commands.get("permissions")?.handler("mode", harness.ctx);
+		} finally {
+			await harness.restore();
+		}
+
+		expect(notifications).toContain("✓ Session mode override cleared. Active permission mode: workspace-write");
+		expect(notifications).toContain("Active permission mode: workspace-write");
+	});
+
+	it("notifies live when the classifier auto-approves an ask-worthy bash command", async () => {
+		const notifications: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "auto",
+			now: () => 0,
+			notifications,
+			classifyPermissionRequest: async () => ({
+				decision: "allow",
+				confidence: 0.97,
+				rationale: "matches the requested build step",
+			}),
+			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (c) => c },
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const result = await toolCall(
+				{ toolName: "bash", input: { command: "some-uncommon-tool --version" } },
+				harness.ctx,
+			);
+			expect(result).toBeUndefined(); // no block result → allowed
+		} finally {
+			await harness.restore();
+		}
+
+		expect(notifications).toContain("✓ Auto-approved bash (0.97): matches the requested build step");
+	});
+
+	it("clears the session mode override on a new session", async () => {
+		const notifications: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			notifications,
+			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (c) => c },
+		});
+		try {
+			await harness.commands.get("permissions")?.handler("mode auto", harness.ctx);
+			for (const handler of harness.handlers.get("session_start") ?? []) await handler({}, harness.ctx);
+			await harness.commands.get("permissions")?.handler("mode", harness.ctx);
+		} finally {
+			await harness.restore();
+		}
+
+		expect(notifications).toContain("Active permission mode: workspace-write");
 	});
 
 	it("reports fallback execution mode after the sandbox is disabled", async () => {
@@ -3233,6 +3359,7 @@ describe("tree-sitter policy integration", () => {
 });
 
 import { PERMISSIONS_COMPLETIONS } from "./permissions";
+import type { PermissionsExtensionDependencies } from "./permissions";
 
 test("permissions completions list all accepted subcommands", () => {
 	expect(PERMISSIONS_COMPLETIONS.map((s) => s.value)).toEqual(["help", "approvals", "reset", "mode", "sandbox"]);

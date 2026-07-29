@@ -73,10 +73,19 @@
  *                  (structured filesystem tools only)
  *
  * Auto mode ("mode": "auto"):
- *   NOT enabled by default — the default mode is "workspace-write" unless a
- *   profile/agent explicitly sets "mode": "auto". In auto mode, a rule that
- *   resolves to "ask" is first offered to a small classifier model instead of
- *   immediately prompting the human. The classifier can only ever *skip* the
+ *   NOT enabled by default — the default mode is "workspace-write". Switch
+ *   into it for the current session with `/permissions mode auto` (any of
+ *   plan|workspace-write|auto|full-access work the same way; `/permissions
+ *   mode default` clears the override). This is a session-scoped runtime
+ *   override, not written to permissions.jsonc; it's cleared on a new
+ *   session. It can also be set durably per profile/agent via "mode": "auto"
+ *   in config — a profile/agent that pins its own mode always wins over the
+ *   runtime override, by design (a locked-down subagent shouldn't be
+ *   defeatable by a casual command).
+ *
+ *   In auto mode, a rule that resolves to "ask" is first offered to a small
+ *   classifier model instead of immediately prompting the human. The
+ *   classifier can only ever *skip* the
  *   human prompt (decision: "allow" above the confidence threshold); any
  *   error, timeout, low confidence, or unparseable response always falls
  *   back to the normal human prompt. A small hardcoded escalate list (see
@@ -177,6 +186,13 @@ import {
 } from "./shared";
 export type { AgentProfile, ExternalPathPolicy, PermissionMode, PermissionsConfig, Rule } from "./shared";
 
+const PERMISSION_MODES = [
+	"plan",
+	"workspace-write",
+	"auto",
+	"full-access",
+] as const satisfies readonly PermissionMode[];
+
 type PermissionDecision = { action: "allow" } | { action: "block"; reason: string };
 
 const ALLOW_PERMISSION: PermissionDecision = { action: "allow" };
@@ -238,7 +254,7 @@ export const PERMISSIONS_COMPLETIONS = [
 	{ value: "help", label: "help: show usage" },
 	{ value: "approvals", label: "approvals: show session approvals" },
 	{ value: "reset", label: "reset: reset approvals/rules" },
-	{ value: "mode", label: "mode: show permission mode" },
+	{ value: "mode", label: "mode: show or set permission mode (plan|workspace-write|auto|full-access|default)" },
 	{ value: "sandbox", label: "sandbox: show or manage sandbox (status|probe|repair|enable|disable)" },
 ] as const;
 
@@ -338,7 +354,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 	}
 
 	async function sandboxBypassMatch(command: string, execution: SandboxExecution): Promise<string | undefined> {
-		const policy = activePolicy(config, agentName, profileName);
+		const policy = activePolicy(configWithModeOverride(), agentName, profileName);
 		const rule = matchRule(policy.rules, "bash", { command });
 		if (rule?.sandbox === false && rule.action !== "block") {
 			return sandboxBypassReasonForRule(rule);
@@ -420,6 +436,9 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 	let profileName: string | undefined;
 	let approvalsSettings = getApprovalsSettings(config);
 	let persistentApprovals: ApprovalRecord[] = [];
+	// Session-scoped runtime override set via `/permissions mode <mode>`. Not persisted to
+	// permissions.jsonc — wins over every config-declared mode until cleared or the session ends.
+	let modeOverride: PermissionMode | undefined;
 
 	const sessionAllows = new Set<string>();
 	const sessionPathApprovals: ApprovalRecord[] = [];
@@ -517,7 +536,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 	}
 
 	function buildSandboxExecution(ctx: ExtensionContext): SandboxExecution {
-		const policy = activePolicy(config, agentName, profileName);
+		const policy = activePolicy(configWithModeOverride(), agentName, profileName);
 		const tmpDirBase = getEffectiveSandboxTmpDir(ctx.cwd, config.sandbox);
 		const tmpDirMode = getSandboxTmpDirMode(config.sandbox);
 		let effectiveTmpDir = tmpDirBase;
@@ -879,6 +898,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		sessionAllows.clear();
 		sessionPathApprovals.length = 0;
 		sessionBashApprovals.length = 0;
+		modeOverride = undefined;
 		sandboxDisabledForSession = false;
 		sandboxHealthMonitor.reset();
 		sandboxTmpDir = undefined;
@@ -1380,7 +1400,14 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			ctx,
 			settings: getClassifierSettings(config),
 		});
-		return verdict.decision === "allow";
+		if (verdict.decision !== "allow") return false;
+		if (ctx.hasUI) {
+			ctx.ui.notify(
+				`✓ Auto-approved ${toolName} (${verdict.confidence.toFixed(2)}): ${verdict.rationale}`,
+				"info",
+			);
+		}
+		return true;
 	}
 
 	async function checkBashPermission(
@@ -1389,7 +1416,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		projectRoot: string,
 		ctx: ExtensionContext,
 	): Promise<PermissionDecision> {
-		const policy = activePolicy(config, agentName, profileName);
+		const policy = activePolicy(configWithModeOverride(), agentName, profileName);
 		const bashApprovals = [...persistentApprovals, ...sessionBashApprovals];
 		if (approvalsCoverBash(bashApprovals, command, projectRoot, agentName, approvalsSettings)) {
 			return ALLOW_PERMISSION;
@@ -1536,7 +1563,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		projectRoot: string,
 		ctx: ExtensionContext,
 	): Promise<PermissionDecision> {
-		const policy = activePolicy(config, agentName, profileName);
+		const policy = activePolicy(configWithModeOverride(), agentName, profileName);
 
 		let bashApprovals: ApprovalRecord[] = [];
 		let isApprovedBashSegment: ((candidate: string) => boolean) | undefined;
@@ -1738,7 +1765,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 
 			if (subcommand === "help") {
 				ctx.ui.notify(
-					"Usage: /permissions [verbose|approvals|reset [session|saved|project|agent|all]|mode|sandbox [status|probe [workspace]|repair|enable|disable]]",
+					`Usage: /permissions [verbose|approvals|reset [session|saved|project|agent|all]|mode [${PERMISSION_MODES.join("|")}|default]|sandbox [status|probe [workspace]|repair|enable|disable]]`,
 					"info",
 				);
 				return;
@@ -1755,7 +1782,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			}
 
 			if (subcommand === "mode") {
-				showPermissionsMode(ctx);
+				handlePermissionsModeCommand(subcommandArgs, ctx);
 				return;
 			}
 
@@ -1805,7 +1832,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 				return;
 			}
 
-			const policy = activePolicy(config, agentName, profileName);
+			const policy = activePolicy(configWithModeOverride(), agentName, profileName);
 			const rules = policy.rules;
 			const externalPath = policy.externalPath;
 			const mode = policy.mode;
@@ -2243,10 +2270,45 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		if (parts.length > 0) ctx.ui.notify(`Permissions reset: ${parts.join(", ")}`, "info");
 	}
 
-	function showPermissionsMode(ctx: ExtensionContext) {
+	function configWithModeOverride(): PermissionsConfig {
+		if (modeOverride === undefined) return config;
+		return { ...config, default: { ...config.default, mode: modeOverride } };
+	}
+
+	function handlePermissionsModeCommand(requestedMode: string, ctx: ExtensionContext) {
 		agentName = detectAgentName(pi);
 		profileName = detectProfileName(pi);
-		const policy = activePolicy(config, agentName, profileName);
-		ctx.ui.notify(`Active permission mode: ${policy.mode}`, "info");
+
+		if (requestedMode === "default" || requestedMode === "clear") {
+			modeOverride = undefined;
+			const policy = activePolicy(config, agentName, profileName);
+			ctx.ui.notify(`✓ Session mode override cleared. Active permission mode: ${policy.mode}`, "info");
+			return;
+		}
+
+		if (requestedMode) {
+			if (!PERMISSION_MODES.includes(requestedMode as PermissionMode)) {
+				ctx.ui.notify(
+					`Unknown mode "${requestedMode}". Valid modes: ${PERMISSION_MODES.join(", ")} (or "default"/"clear" to remove a session override).`,
+					"error",
+				);
+				return;
+			}
+			modeOverride = requestedMode as PermissionMode;
+			const policy = activePolicy(configWithModeOverride(), agentName, profileName);
+			if (policy.mode === modeOverride) {
+				ctx.ui.notify(`✓ Permission mode set to "${modeOverride}" for this session`, "info");
+			} else {
+				ctx.ui.notify(
+					`Session override set to "${modeOverride}", but profile/agent "${profileName ?? agentName}" pins mode "${policy.mode}" — it takes precedence. Active mode remains "${policy.mode}".`,
+					"warning",
+				);
+			}
+			return;
+		}
+
+		const policy = activePolicy(configWithModeOverride(), agentName, profileName);
+		const overrideNote = modeOverride !== undefined ? " (session override)" : "";
+		ctx.ui.notify(`Active permission mode: ${policy.mode}${overrideNote}`, "info");
 	}
 }
