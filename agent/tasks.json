@@ -3,26 +3,26 @@
     "smart": {
       "description": "A smarter thinking model for complex tasks and reasoning",
       "provider": "openai-codex",
-      "model": "gpt-5.6-sol",
-      "thinkingLevel": "high"
+      "model": "gpt-5.6-terra",
+      "thinkingLevel": "max"
     },
     "light": {
       "description": "Lower-cost lightweight reasoning model",
       "provider": "openai-codex",
       "model": "gpt-5.6-luna",
-      "thinkingLevel": "low"
+      "thinkingLevel": "medium"
     },
     "balanced": {
       "description": "Cost-effective default model for most tasks",
       "provider": "openai-codex",
-      "model": "gpt-5.6-sol",
-      "thinkingLevel": "low"
+      "model": "gpt-5.6-luna",
+      "thinkingLevel": "xhigh"
     },
     "heavy": {
       "description": "Heavier model for deep planning and hard tasks",
       "provider": "openai-codex",
       "model": "gpt-5.6-sol",
-      "thinkingLevel": "xhigh"
+      "thinkingLevel": "high"
     }
   }
 }
