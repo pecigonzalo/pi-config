@@ -5,6 +5,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import {
 	APPROVAL_CLOCK_SKEW_MS,
@@ -941,14 +942,17 @@ describe("sandboxed command runner", () => {
 		expect(chunks.join("")).toContain("hello from sandbox");
 	});
 
-	it("injects cache redirection env vars for sandboxed commands", async () => {
-		const originalGoCache = process.env.GOCACHE;
+	it("reuses the global Go download cache through a read-only file proxy", async () => {
+		const originalGoModCache = process.env.GOMODCACHE;
+		const originalGoProxy = process.env.GOPROXY;
 		const sandboxTmpDir = path.join(os.tmpdir(), "pi-test-cache-env");
-		const globalGoCache = path.join(os.tmpdir(), "pi-test-global-go-cache");
+		const globalGoModCache = path.join(TEST_SCRATCH_DIR, "pi test global go mod cache");
 		const chunks: string[] = [];
 		let result: Awaited<ReturnType<typeof runSandboxedCommand>>;
 		try {
-			process.env.GOCACHE = globalGoCache;
+			await fs.mkdir(path.join(globalGoModCache, "cache", "download"), { recursive: true });
+			process.env.GOMODCACHE = globalGoModCache;
+			process.env.GOPROXY = "https://proxy.golang.org,direct";
 			result = await runSandboxedCommand(
 				{
 					initialize: async () => {},
@@ -957,15 +961,18 @@ describe("sandboxed command runner", () => {
 				},
 				{
 					command:
-						'printf \'%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n\' "$TMPDIR" "$XDG_CACHE_HOME" "$BUN_INSTALL_CACHE_DIR" "$NPM_CONFIG_CACHE" "$GOCACHE" "$GOTMPDIR" "$GOPATH" "$GOMODCACHE"',
+						'printf \'%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n\' "$TMPDIR" "$XDG_CACHE_HOME" "$BUN_INSTALL_CACHE_DIR" "$NPM_CONFIG_CACHE" "$GOCACHE" "$GOTMPDIR" "$GOPATH" "$GOMODCACHE" "$GOPROXY"',
 					cwd: process.cwd(),
 					env: { TMPDIR: sandboxTmpDir },
 					onData: (chunk) => chunks.push(chunk.toString("utf8")),
 				},
 			);
 		} finally {
-			if (originalGoCache === undefined) delete process.env.GOCACHE;
-			else process.env.GOCACHE = originalGoCache;
+			if (originalGoModCache === undefined) delete process.env.GOMODCACHE;
+			else process.env.GOMODCACHE = originalGoModCache;
+			if (originalGoProxy === undefined) delete process.env.GOPROXY;
+			else process.env.GOPROXY = originalGoProxy;
+			await fs.rm(globalGoModCache, { recursive: true, force: true });
 		}
 
 		expect(result.exitCode).toBe(0);
@@ -975,10 +982,11 @@ describe("sandboxed command runner", () => {
 				path.join(sandboxTmpDir, "xdg-cache"),
 				path.join(sandboxTmpDir, "bun-cache"),
 				path.join(sandboxTmpDir, "npm-cache"),
-				globalGoCache,
+				path.join(sandboxTmpDir, "go-build-cache"),
 				sandboxTmpDir,
 				path.join(sandboxTmpDir, "go"),
 				path.join(sandboxTmpDir, "go", "pkg", "mod"),
+				`${pathToFileURL(path.join(globalGoModCache, "cache", "download")).href},https://proxy.golang.org,direct`,
 				"",
 			].join("\n"),
 		);
@@ -993,13 +1001,14 @@ describe("sandboxed command runner", () => {
 				wrapWithSandbox: async (command) => command,
 			},
 			{
-				command: 'printf \'%s\n%s\n%s\n%s\n\' "$GOCACHE" "$GOTMPDIR" "$GOPATH" "$GOMODCACHE"',
+				command: 'printf \'%s\n%s\n%s\n%s\n%s\n\' "$GOCACHE" "$GOTMPDIR" "$GOPATH" "$GOMODCACHE" "$GOPROXY"',
 				cwd: process.cwd(),
 				env: {
 					GOCACHE: "/tmp/custom-go-cache",
 					GOTMPDIR: "/tmp/custom-go-tmp",
 					GOPATH: "/tmp/custom-go-path",
 					GOMODCACHE: "/tmp/custom-go-mod-cache",
+					GOPROXY: "https://go.example.test,direct",
 				},
 				onData: (chunk) => chunks.push(chunk.toString("utf8")),
 			},
@@ -1007,9 +1016,14 @@ describe("sandboxed command runner", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(chunks.join("")).toBe(
-			["/tmp/custom-go-cache", "/tmp/custom-go-tmp", "/tmp/custom-go-path", "/tmp/custom-go-mod-cache", ""].join(
-				"\n",
-			),
+			[
+				"/tmp/custom-go-cache",
+				"/tmp/custom-go-tmp",
+				"/tmp/custom-go-path",
+				"/tmp/custom-go-mod-cache",
+				"https://go.example.test,direct",
+				"",
+			].join("\n"),
 		);
 	});
 
@@ -2726,36 +2740,17 @@ describe("sandbox network config", () => {
 		}
 	});
 
-	it("includes current GOCACHE in default allowWrite", () => {
-		const originalGoCache = process.env.GOCACHE;
-		process.env.GOCACHE = "/tmp/custom-go-cache";
+	it("keeps the user Go module cache read-only by default", () => {
+		const originalGoModCache = process.env.GOMODCACHE;
+		process.env.GOMODCACHE = "/tmp/custom-go-mod-cache";
 		try {
 			const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
-			expect(compiled.config.filesystem?.allowWrite).toContain("/tmp/custom-go-cache");
+			expect(
+				isSandboxWriteAllowedForPath(compiled.config, "/tmp/custom-go-mod-cache/cache/download/module.zip"),
+			).toBe(false);
 		} finally {
-			if (originalGoCache === undefined) delete process.env.GOCACHE;
-			else process.env.GOCACHE = originalGoCache;
-		}
-	});
-
-	it("includes current GOCACHE path aliases in default allowWrite", async () => {
-		const originalGoCache = process.env.GOCACHE;
-		const tmp = await fs.mkdtemp(path.join(TEST_SCRATCH_DIR, "go-cache-alias-"));
-		const realGoCache = path.join(tmp, "real-go-cache");
-		const linkedGoCache = path.join(tmp, "linked-go-cache");
-		try {
-			await fs.mkdir(realGoCache, { recursive: true });
-			await fs.symlink(realGoCache, linkedGoCache, "dir");
-			process.env.GOCACHE = linkedGoCache;
-
-			const compiled = compileSandboxConfig(policy, "/repo", { enabled: true, tmpDir: "/tmp/custom-pi" });
-
-			expect(compiled.config.filesystem?.allowWrite).toContain(path.resolve(linkedGoCache));
-			expect(compiled.config.filesystem?.allowWrite).toContain(await fs.realpath(realGoCache));
-		} finally {
-			if (originalGoCache === undefined) delete process.env.GOCACHE;
-			else process.env.GOCACHE = originalGoCache;
-			await fs.rm(tmp, { recursive: true, force: true });
+			if (originalGoModCache === undefined) delete process.env.GOMODCACHE;
+			else process.env.GOMODCACHE = originalGoModCache;
 		}
 	});
 
@@ -2808,16 +2803,13 @@ describe("sandbox network config", () => {
 		expect(optOutConfig.config.allowPty).toBe(false);
 	});
 
-	it("allows Go to populate current GOCACHE outside the workspace", async () => {
-		let currentGoCache: string;
+	it("uses a sandbox-local Go build cache", async () => {
 		try {
-			currentGoCache = (await execFile("go", ["env", "GOCACHE"])).stdout.trim();
+			await execFile("go", ["version"]);
 		} catch {
 			return;
 		}
-		if (!currentGoCache || currentGoCache === "off" || !path.isAbsolute(currentGoCache)) return;
 
-		const originalGoCache = process.env.GOCACHE;
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-go-cache-"));
 		const repo = path.join(tmp, "repo");
 
@@ -2835,10 +2827,8 @@ const cacheBust = "${path.basename(tmp)}"
 func TestGoCache(t *testing.T) {}
 `,
 			);
-			process.env.GOCACHE = currentGoCache;
-
-			const compiled = compileSandboxConfig(policy, repo, { enabled: true, network: true });
-			expect(compiled.config.filesystem?.allowWrite).toContain(currentGoCache);
+			const compiled = compileSandboxConfig(policy, repo, { enabled: true, network: true, tmpDir: tmp });
+			expect(compiled.config.filesystem?.allowWrite).toContain(tmp);
 
 			const chunks: string[] = [];
 			const result = await runSandboxedCommand(
@@ -2857,11 +2847,28 @@ func TestGoCache(t *testing.T) {}
 
 			if (result.exitCode !== 0) throw new Error(chunks.join(""));
 		} finally {
-			if (originalGoCache === undefined) delete process.env.GOCACHE;
-			else process.env.GOCACHE = originalGoCache;
 			await fs.rm(tmp, { recursive: true, force: true });
 		}
 	}, 15_000);
+
+	it("allows certificate fixtures in the sandbox Go cache without unprotecting workspace keys", () => {
+		const protectedPolicy = {
+			...policy,
+			protectedResources: {
+				denyRead: ["\\.(pem|key|p12|pfx|crt|ca-bundle)$"],
+				denyWrite: ["\\.(pem|key|p12|pfx|crt|ca-bundle)$"],
+			},
+		};
+		const compiled = compileSandboxConfig(protectedPolicy, "/repo", {
+			enabled: true,
+			tmpDir: "/tmp/custom-pi",
+		});
+
+		const denyWrite = compiled.config.filesystem?.denyWrite ?? [];
+		expect(denyWrite).toContain("/repo/**/*.crt");
+		expect(denyWrite).not.toContain("/tmp/custom-pi/**/*.crt");
+		expect(isSandboxWriteAllowedForPath(compiled.config, "/tmp/custom-pi/go/pkg/mod/example/testdata")).toBe(true);
+	});
 
 	it("uses sandbox path globs rather than permission regexes for protected resources", () => {
 		const protectedPolicy = {

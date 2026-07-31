@@ -2,6 +2,7 @@ import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import {
 	type EffectivePolicy,
@@ -36,8 +37,10 @@ function getCompatWritePaths(): string[] {
 
 let darwinUserCacheDir: string | undefined;
 let darwinUserCacheDirLoaded = false;
-let goBuildCacheDir: string | undefined;
-let goBuildCacheDirLoaded = false;
+let goModCacheDir: string | undefined;
+let goModCacheDirLoaded = false;
+let goProxy: string | undefined;
+let goProxyLoaded = false;
 
 /**
  * On macOS, many tools use the per-user Darwin cache directory returned by
@@ -67,31 +70,82 @@ function normalizeCacheDir(value: string | undefined): string | undefined {
 	return path.isAbsolute(trimmed) ? trimmed : undefined;
 }
 
-function getGoBuildCacheDir(): string | undefined {
-	if (process.env.GOCACHE !== undefined && process.env.GOCACHE.trim().length > 0) {
-		return normalizeCacheDir(process.env.GOCACHE);
+function isSandboxPath(value: string | undefined): boolean {
+	const sandboxTmpDir = normalizeCacheDir(process.env.PI_SANDBOX_TMPDIR);
+	const candidate = normalizeCacheDir(value);
+	if (!sandboxTmpDir || !candidate) return false;
+	const relative = path.relative(sandboxTmpDir, candidate);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function getHostGoEnv(): NodeJS.ProcessEnv {
+	const env = { ...process.env };
+	if (isSandboxPath(env.GOPATH) || isSandboxPath(env.GOMODCACHE)) {
+		delete env.GOPATH;
+		delete env.GOMODCACHE;
 	}
-	if (goBuildCacheDirLoaded) return goBuildCacheDir;
-	goBuildCacheDirLoaded = true;
+	return env;
+}
+
+function getGoModCacheDir(): string | undefined {
+	const configured = process.env.GOMODCACHE?.trim();
+	if (configured === "off") return undefined;
+	// Pi may inject a session-local GOPATH/GOMODCACHE into its own environment;
+	// resolve the user's normal Go environment instead of treating that overlay
+	// as the reusable host cache.
+
+	if (configured && !isSandboxPath(configured)) return normalizeCacheDir(configured);
+	if (goModCacheDirLoaded) return goModCacheDir;
+	goModCacheDirLoaded = true;
 	try {
-		const resolved = execFileSync("go", ["env", "GOCACHE"], {
+		const resolved = execFileSync("go", ["env", "GOMODCACHE"], {
+			env: getHostGoEnv(),
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
 		}).trim();
-		goBuildCacheDir = normalizeCacheDir(resolved);
+		goModCacheDir = normalizeCacheDir(resolved);
 	} catch {
-		goBuildCacheDir = undefined;
+		goModCacheDir = undefined;
 	}
-	return goBuildCacheDir;
+	return goModCacheDir;
+}
+
+function getGoProxy(): string | undefined {
+	if (process.env.GOPROXY !== undefined && process.env.GOPROXY.trim().length > 0) {
+		return process.env.GOPROXY.trim();
+	}
+	if (goProxyLoaded) return goProxy;
+	goProxyLoaded = true;
+	try {
+		goProxy =
+			execFileSync("go", ["env", "GOPROXY"], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			}).trim() || undefined;
+	} catch {
+		goProxy = undefined;
+	}
+	return goProxy;
+}
+
+function getGlobalGoDownloadProxy(): string | undefined {
+	const globalGoModCache = getGoModCacheDir();
+	if (!globalGoModCache) return undefined;
+	const downloadCache = path.join(globalGoModCache, "cache", "download");
+	try {
+		if (!fs.statSync(downloadCache).isDirectory()) return undefined;
+	} catch {
+		return undefined;
+	}
+	return pathToFileURL(downloadCache).href;
 }
 
 function getPlatformCacheWritePaths(): string[] {
 	const darwinCacheDir = getDarwinUserCacheDir();
 	const darwinLibraryCacheDir =
 		process.platform === "darwin" ? path.join(os.homedir(), "Library", "Caches") : undefined;
-	const goCacheDir = getGoBuildCacheDir();
 	return dedupeStrings(
-		[darwinCacheDir, darwinLibraryCacheDir, goCacheDir]
+		[darwinCacheDir, darwinLibraryCacheDir]
 			.filter((value): value is string => value !== undefined)
 			.flatMap(existingPathAliases),
 	);
@@ -327,6 +381,17 @@ function getDockerBuildxWritePaths(cwd: string, overrides: SandboxSettings | und
 	]);
 }
 
+// Go's file proxy reads module archives from the user's cache, while module
+// extraction and new downloads go to the sandbox-local GOMODCACHE. Keep the
+// source cache read-only even when it overlaps another writable path.
+function getGlobalGoModCacheDenyWritePaths(): string[] {
+	const globalGoModCache = getGoModCacheDir();
+	if (!globalGoModCache) return [];
+	return dedupeStrings(
+		existingPathAliases(globalGoModCache).flatMap((cachePath) => [cachePath, path.join(cachePath, "**")]),
+	);
+}
+
 function configuredGoWritePaths(cwd: string, overrides: SandboxSettings | undefined): string[] {
 	const env = overrides?.env;
 	if (!env) return [];
@@ -382,7 +447,20 @@ function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): No
 		overrides.NPM_CONFIG_CACHE ?? overrides.npm_config_cache ?? path.join(effectiveTmpDir, "npm-cache");
 	const goPath = overrides.GOPATH ?? path.join(effectiveTmpDir, "go");
 	const goModCache = overrides.GOMODCACHE ?? path.join(goPath, "pkg", "mod");
-	const goBuildCache = overrides.GOCACHE ?? getGoBuildCacheDir() ?? path.join(effectiveTmpDir, "go-build-cache");
+	const goBuildCache = overrides.GOCACHE ?? path.join(effectiveTmpDir, "go-build-cache");
+	const globalGoModCache = getGoModCacheDir();
+	// Use only the download-cache subtree as a read-only local module proxy;
+	// Go writes extracted modules and new downloads to the local cache above.
+	const globalGoProxy =
+		globalGoModCache && path.resolve(globalGoModCache) !== path.resolve(goModCache)
+			? getGlobalGoDownloadProxy()
+			: undefined;
+	const inheritedGoProxy = getGoProxy();
+	const effectiveGoProxy =
+		overrides.GOPROXY ??
+		(globalGoProxy && inheritedGoProxy !== "off"
+			? [globalGoProxy, inheritedGoProxy].filter(Boolean).join(",")
+			: inheritedGoProxy || globalGoProxy);
 
 	return {
 		...mergedEnv,
@@ -399,6 +477,7 @@ function getSandboxCacheEnv(cwd: string, env: NodeJS.ProcessEnv | undefined): No
 		GOTMPDIR: overrides.GOTMPDIR ?? effectiveTmpDir,
 		GOPATH: goPath,
 		GOMODCACHE: goModCache,
+		GOPROXY: effectiveGoProxy,
 	};
 }
 
@@ -467,6 +546,7 @@ function compileSandboxFilesystemConfig(
 	]);
 	const denyWrite = dedupeStrings([
 		...protectedDenyWrite.paths,
+		...getGlobalGoModCacheDenyWritePaths(),
 		...resolveSandboxPathTokens(overrides?.denyWrite ?? [], cwd),
 	]);
 	const warnings = dedupeStrings([
