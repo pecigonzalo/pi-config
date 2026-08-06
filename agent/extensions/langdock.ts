@@ -87,14 +87,20 @@ async function fetchModelsFromLangdock(context: RefreshModelsContext) {
 		return [];
 	}
 
-	const [anthropic, openai] = await Promise.all([
-		fetchModels(ANTHROPIC_MODELS_URL, apiKey, context.signal),
-		fetchModels(OPENAI_MODELS_URL, apiKey, context.signal),
-	]);
-	return [
-		...createModels(anthropic, "anthropic-messages", ANTHROPIC_BASE_URL),
-		...createModels(openai, "openai-responses", OPENAI_BASE_URL),
-	];
+	try {
+		const [anthropic, openai] = await Promise.all([
+			fetchModels(ANTHROPIC_MODELS_URL, apiKey, context.signal),
+			fetchModels(OPENAI_MODELS_URL, apiKey, context.signal),
+		]);
+		return [
+			...createModels(anthropic, "anthropic-messages", ANTHROPIC_BASE_URL),
+			...createModels(openai, "openai-responses", OPENAI_BASE_URL),
+		];
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(`Langdock model discovery failed: ${message}`);
+		throw error;
+	}
 }
 
 // Register a new provider for LangDock
