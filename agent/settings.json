@@ -1,13 +1,13 @@
 {
-  "lastChangelogVersion": "0.82.0",
+  "lastChangelogVersion": "0.84.1",
   "theme": "dracula",
   "extensions": [
     "-extensions/store/index.ts",
     "-extensions/learning-review/index.ts"
   ],
-  "defaultProvider": "anthropic",
-  "defaultModel": "claude-sonnet-5",
-  "defaultThinkingLevel": "medium",
+  "defaultProvider": "openrouter",
+  "defaultModel": "deepseek/deepseek-v4-flash",
+  "defaultThinkingLevel": "high",
   "compaction": {
     "enabled": true
   },
