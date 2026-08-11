@@ -759,6 +759,17 @@ describe("tasks extension compact schema", () => {
 					filePath: "/tmp/tasks.json",
 				},
 			],
+			profiles: [
+				{
+					name: "read-only",
+					description: "Read-only analysis profile",
+					enabled: true,
+					systemPromptMode: "append",
+					systemPrompt: "Read only.",
+					source: "user",
+					filePath: "/tmp/read-only.md",
+				},
+			],
 		});
 		const { eventHandlers } = createExtensionHarness();
 
@@ -768,10 +779,17 @@ describe("tasks extension compact schema", () => {
 		);
 
 		expect(result.systemPrompt).toContain("Task delegation choices for this directory:");
-		expect(result.systemPrompt).toContain("`implementer` (default effort: `balanced`)");
+		expect(result.systemPrompt).toContain("`agentScope` selects the config source");
+		expect(result.systemPrompt).toContain("`implementer` (default effort: `balanced`): Implementation worker");
 		expect(result.systemPrompt).not.toContain("`orchestrator`");
-		expect(result.systemPrompt).toContain("`balanced` (openai-codex/gpt-5.6-terra)");
-		expect(result.systemPrompt).toContain("`smart` (openai-codex/gpt-5.6-sol, thinking: `high`)");
+		expect(result.systemPrompt).toContain(
+			"Valid `profile` choices are: `read-only` (user): Read-only analysis profile",
+		);
+		expect(result.systemPrompt).toContain("Omit `profile` to use the selected agent's default profile");
+		expect(result.systemPrompt).toContain("`balanced` (openai-codex/gpt-5.6-terra): Balanced effort");
+		expect(result.systemPrompt).toContain(
+			"`smart` (openai-codex/gpt-5.6-sol, thinking: `high`): High-thinking effort",
+		);
 		expect(result.systemPrompt).toContain("do not use a thinking level such as `high` as an effort");
 		expect(result.systemPrompt).toContain(
 			'omit `agent` and provide a behavioral `prompt`; do not set `agent: "generic"`',

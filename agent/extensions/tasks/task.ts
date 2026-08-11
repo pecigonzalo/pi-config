@@ -1033,8 +1033,25 @@ function formatTaskAgentOptions(resources: ResourceDiscoveryResult): string {
 	return (
 		getTaskCallableAgents(resources)
 			.map((agent) => {
-				const defaultEffort = agent.defaultEffort ? ` (default effort: \`${agent.defaultEffort}\`)` : "";
-				return `\`${agent.name}\`${defaultEffort}`;
+				const defaults: string[] = [];
+				if (agent.defaultEffort) defaults.push(`default effort: \`${agent.defaultEffort}\``);
+				if (agent.defaultProfile) defaults.push(`default profile: \`${agent.defaultProfile}\``);
+				const defaultsSuffix = defaults.length > 0 ? ` (${defaults.join(", ")})` : "";
+				const description = agent.description ? `: ${agent.description}` : "";
+				return `\`${agent.name}\`${defaultsSuffix}${description}`;
+			})
+			.join(", ") || "none"
+	);
+}
+
+function formatTaskProfileOptions(resources: ResourceDiscoveryResult): string {
+	return (
+		resources.profiles
+			.filter((profile) => profile.enabled)
+			.map((profile) => {
+				const source = ` (${profile.source})`;
+				const description = profile.description ? `: ${profile.description}` : "";
+				return `\`${profile.name}\`${source}${description}`;
 			})
 			.join(", ") || "none"
 	);
@@ -1046,7 +1063,8 @@ function formatTaskEffortOptions(resources: ResourceDiscoveryResult): string {
 			.map((effort) => {
 				const model = effort.provider ? `${effort.provider}/${effort.model}` : effort.model;
 				const thinkingLevel = effort.thinkingLevel ? `, thinking: \`${effort.thinkingLevel}\`` : "";
-				return `\`${effort.name}\` (${model}${thinkingLevel})`;
+				const description = effort.description ? `: ${effort.description}` : "";
+				return `\`${effort.name}\` (${model}${thinkingLevel})${description}`;
 			})
 			.join(", ") || "none"
 	);
@@ -1059,8 +1077,10 @@ function formatTaskDelegationGuidance(cwd: string, projectTrusted = false): stri
 
 	return [
 		"Task delegation choices for this directory:",
+		`- \`agentScope\` selects the config source: \`"user"\` (default) uses global agents and profiles from ~/.pi, \`"project"\` restricts to the trusted project's local .pi config, \`"both"\` merges project-local over global by name.`,
 		`- With the default \`agentScope: "user"\`, valid task agents are: ${formatTaskAgentOptions(userResources)}.`,
 		`- With \`agentScope: "project"\`, valid task agents are: ${formatTaskAgentOptions(projectResources)}. With \`agentScope: "both"\`, valid task agents are: ${formatTaskAgentOptions(combinedResources)}.`,
+		`- Valid \`profile\` choices are: ${formatTaskProfileOptions(combinedResources)}. Omit \`profile\` to use the selected agent's default profile.`,
 		`- Valid \`effort\` presets are: ${formatTaskEffortOptions(combinedResources)}. Use these exact preset names; do not use a thinking level such as \`high\` as an effort. Omit \`effort\` to use the selected agent's default.`,
 		'- To create a generic worker, omit `agent` and provide a behavioral `prompt`; do not set `agent: "generic"`.',
 		"- Child workers cannot use `task` unless their selected agent or profile declares `allowDelegation: true`.",
