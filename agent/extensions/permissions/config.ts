@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getBuiltinPermissionRules } from "./default-rules";
 import { getBuiltinProtectedResourceMatches } from "./protected-resources";
 import {
 	type AgentProfile,
@@ -181,12 +182,22 @@ export function inferPiPackageDirFrom(candidate: string | undefined): string | u
 	return undefined;
 }
 
+let inferredPiPackageDir: string | undefined;
+let inferredPiPackageDirResolved = false;
+
+function resolvePiPackageDir(vars: Record<string, string | undefined>): string | undefined {
+	if (vars.PI_PACKAGE_DIR) return vars.PI_PACKAGE_DIR;
+	if (inferredPiPackageDirResolved) return inferredPiPackageDir;
+	inferredPiPackageDirResolved = true;
+	inferredPiPackageDir = inferPiPackageDirFrom(process.argv[1]) ?? inferPiPackageDirFrom(process.execPath);
+	return inferredPiPackageDir;
+}
+
 export function getInterpolationVariables(): Record<string, string | undefined> {
 	const vars: Record<string, string | undefined> = { ...process.env };
 	vars.HOME ??= os.homedir();
 
-	const piPackageDir =
-		vars.PI_PACKAGE_DIR ?? inferPiPackageDirFrom(process.argv[1]) ?? inferPiPackageDirFrom(process.execPath);
+	const piPackageDir = resolvePiPackageDir(vars);
 	if (piPackageDir) {
 		vars.PI_PACKAGE_DIR = piPackageDir;
 		vars.PI_DOCS_DIR ??= path.resolve(piPackageDir, "docs");
@@ -426,9 +437,22 @@ export function activePolicy(config: PermissionsConfig, agentName: string, profi
 	const protectedRules = compileProtectedRules(protectedResources);
 	const defaultMode = config.default?.mode ?? "workspace-write";
 	const defaultCompiled = compileModeDefaults(defaultMode);
+	const builtinRules = getBuiltinPermissionRules(getInterpolationVariables().PI_PACKAGE_DIR);
+	// Rule layering (first matching rule wins):
+	//   1. protected-resource rules (invariants)
+	//   2. builtin invariants — not overridable by `default.rules`
+	//   3. user-configured `default.rules`
+	//   4. builtin defaults — safe defaults user rules can override
+	//   5. mode defaults (plan read-only, workspace-write bash ask, ...)
 	let effective = {
 		mode: defaultMode,
-		rules: [...protectedRules, ...(config.default?.rules ?? []), ...defaultCompiled.rules],
+		rules: [
+			...protectedRules,
+			...builtinRules.invariants,
+			...(config.default?.rules ?? []),
+			...builtinRules.defaults,
+			...defaultCompiled.rules,
+		],
 		externalPath: config.default?.externalPath ?? defaultCompiled.externalPath,
 	};
 

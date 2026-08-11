@@ -23,6 +23,7 @@ import {
 	findGitRepoRoot,
 	getFilesystemApprovalTargets,
 	isPathOutsideCwd,
+	matchRule,
 	ruleMatch,
 } from "./matching";
 import {
@@ -114,6 +115,105 @@ describe("permissions config merge", () => {
 		expect(merged?.mode).toBe("workspace-write");
 		expect(merged?.externalPath).toBe("block");
 		expect(merged?.rules?.map((r) => r.tool)).toEqual(["bash", "read"]);
+	});
+
+	it("allows the user skill catalog through the built-in default policy", () => {
+		const home = process.env.HOME ?? process.env.USERPROFILE ?? os.homedir();
+		const skillPath = path.join(home, ".agents", "skills", "standards-code", "SKILL.md");
+		const policy = configModule.activePolicy({}, "default");
+
+		for (const tool of ["read", "grep", "find", "ls"] as const) {
+			const rule = matchRule(policy.rules, tool, { path: skillPath });
+			expect(rule?.action).toBe("allow");
+			expect(rule?.externalPathAction).toBe("allow");
+		}
+
+		expect(matchRule(policy.rules, "write", { path: skillPath })).toBeUndefined();
+	});
+
+	it("allows Pi package documentation through the built-in default policy", () => {
+		const oldPackageDir = process.env.PI_PACKAGE_DIR;
+		process.env.PI_PACKAGE_DIR = "/tmp/pi.package";
+		try {
+			const policy = configModule.activePolicy({}, "default");
+			expect(matchRule(policy.rules, "read", { path: "/tmp/pi.package/README.md" })?.externalPathAction).toBe(
+				"allow",
+			);
+			expect(
+				matchRule(policy.rules, "read", { path: "/tmp/pi.package/docs/settings.md" })?.externalPathAction,
+			).toBe("allow");
+			expect(
+				matchRule(policy.rules, "grep", { path: "/tmp/pi.package/examples/demo.ts" })?.externalPathAction,
+			).toBe("allow");
+			expect(matchRule(policy.rules, "ls", { path: "/tmp/pi.package" })?.externalPathAction).toBe("allow");
+			expect(matchRule(policy.rules, "read", { path: "/tmp/pi.package/src/index.ts" })).toBeUndefined();
+		} finally {
+			if (oldPackageDir === undefined) delete process.env.PI_PACKAGE_DIR;
+			else process.env.PI_PACKAGE_DIR = oldPackageDir;
+		}
+	});
+
+	it("blocks direct writes to Git metadata through the built-in default policy", () => {
+		const policy = configModule.activePolicy({}, "default");
+		const gitObjectPath = path.join("/repo", ".git", "objects", "new-object");
+
+		for (const tool of ["write", "edit"] as const) {
+			const rule = matchRule(policy.rules, tool, { path: gitObjectPath });
+			expect(rule?.action).toBe("block");
+			expect(rule?.reason).toBe("Git internals");
+		}
+	});
+
+	it("keeps Git hooks and config covered by protected resources rather than the generic rule", () => {
+		const policy = configModule.activePolicy({}, "default");
+		const hookPath = path.join("/repo", ".git", "hooks", "pre-commit");
+		const configPath = path.join("/repo", ".git", "config");
+
+		for (const tool of ["write", "edit"] as const) {
+			const hookRule = matchRule(policy.rules, tool, { path: hookPath });
+			expect(hookRule?.action).toBe("block");
+			expect(hookRule?.reason).toBe("Blocked by protected resource policy");
+
+			const configRule = matchRule(policy.rules, tool, { path: configPath });
+			expect(configRule?.action).toBe("block");
+			expect(configRule?.reason).toBe("Blocked by protected resource policy");
+		}
+	});
+
+	it("keeps builtin invariants enforced ahead of user-configured rules", () => {
+		const policy = configModule.activePolicy(
+			{
+				default: {
+					rules: [
+						{ tool: "write", match: "(^|[/])\\.git[/]", action: "allow", externalPathAction: "allow" },
+						{ tool: "edit", match: "(^|[/])\\.git[/]", action: "allow", externalPathAction: "allow" },
+					],
+				},
+			},
+			"default",
+		);
+		const gitObjectPath = path.join("/repo", ".git", "objects", "new-object");
+
+		for (const tool of ["write", "edit"] as const) {
+			const rule = matchRule(policy.rules, tool, { path: gitObjectPath });
+			expect(rule?.action).toBe("block");
+			expect(rule?.reason).toBe("Git internals");
+		}
+	});
+
+	it("lets user-configured rules override builtin defaults", () => {
+		const policy = configModule.activePolicy(
+			{
+				default: {
+					rules: [{ tool: "read", match: "\\.agents/skills", action: "block" }],
+				},
+			},
+			"default",
+		);
+		const home = process.env.HOME ?? process.env.USERPROFILE ?? os.homedir();
+		const skillPath = path.join(home, ".agents", "skills", "standards-code", "SKILL.md");
+
+		expect(matchRule(policy.rules, "read", { path: skillPath })?.action).toBe("block");
 	});
 
 	it("resolves protected resources with explicit unprotect overrides", () => {

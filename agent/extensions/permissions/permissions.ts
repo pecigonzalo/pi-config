@@ -66,6 +66,10 @@
  * If no rule matches, the externalPath policy is checked for structured
  * filesystem tools, then the call is allowed.
  *
+ * Built-in runtime rules wrap user rules: invariants (e.g. .git internals)
+ * are evaluated before them, safe defaults (e.g. the user skill catalog)
+ * after them, so user rules can override the latter but not the former.
+ *
  * Per-agent profiles:
  *   inherit     : true (default): agent rules are prepended to default rules
  *                  false: agent rules completely replace default rules
