@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import {
+	baseRestrictionMode,
 	type EffectivePolicy,
 	type PermissionMode,
 	type SandboxManagerLike,
@@ -500,12 +501,14 @@ function formatUnmappedProtectedPatternWarning(access: ProtectedResourceAccess, 
 
 function getSandboxModeDefault(policy: EffectivePolicy, cwd: string): SandboxModeDefault {
 	const workspaceWritePaths = getWorkspaceWritePaths(cwd);
-	const modeDefaults: Record<PermissionMode, SandboxModeDefault> = {
+	// Keyed on the restriction-tier base mode (see baseRestrictionMode) — "auto" resolves to
+	// "workspace-write" before indexing, so it can't drift out of sync with a fourth copied entry.
+	const modeDefaults: Record<Exclude<PermissionMode, "auto">, SandboxModeDefault> = {
 		plan: { enabled: true, network: false, allowWrite: [] },
 		"workspace-write": { enabled: true, network: true, allowWrite: workspaceWritePaths },
 		"full-access": { enabled: false, network: true, allowWrite: workspaceWritePaths },
 	};
-	return modeDefaults[policy.mode];
+	return modeDefaults[baseRestrictionMode(policy.mode)];
 }
 
 function compileSandboxFilesystemConfig(

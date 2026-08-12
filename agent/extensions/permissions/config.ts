@@ -10,6 +10,7 @@ import {
 	type ExternalPathPolicy,
 	type PermissionMode,
 	type PermissionsConfig,
+	type ResolvedClassifierSettings,
 	type ResolvedProtectedResources,
 	type Rule,
 	dedupeStrings,
@@ -348,6 +349,10 @@ export function loadConfig(cwd: string, options?: { onWarning?: (message: string
 			...(global?.protectedResources ?? {}),
 			...(project?.protectedResources ?? {}),
 		},
+		classifier: {
+			...(global?.classifier ?? {}),
+			...(project?.classifier ?? {}),
+		},
 	});
 }
 
@@ -402,6 +407,22 @@ export function compileModeDefaults(mode: PermissionMode): { rules: Rule[]; exte
 				externalPath: "allow",
 				rules: [],
 			};
+		case "auto": {
+			// Same rule boundaries as "workspace-write" (see baseRestrictionMode in shared.ts) —
+			// only the bash rule's reason text differs, to mention the classifier's role.
+			const base = compileModeDefaults("workspace-write");
+			return {
+				externalPath: base.externalPath,
+				rules: base.rules.map((rule) =>
+					rule.tool === "bash"
+						? {
+								...rule,
+								reason: "Auto mode requires confirmation for shell commands unless explicitly allowed or auto-reviewed by the classifier",
+							}
+						: rule,
+				),
+			};
+		}
 		case "workspace-write":
 		default:
 			return {
@@ -415,6 +436,24 @@ export function compileModeDefaults(mode: PermissionMode): { rules: Rule[]; exte
 				],
 			};
 	}
+}
+
+const DEFAULT_CLASSIFIER_SETTINGS: ResolvedClassifierSettings = {
+	enabled: true,
+	provider: "anthropic",
+	model: "claude-haiku-4-5",
+	confidenceThreshold: 0.9,
+	historyTurns: 6,
+	timeoutMs: 8000,
+	maxTokens: 300,
+};
+
+/**
+ * Resolves classifier settings with defaults applied. Callers must still gate on
+ * `policy.mode === "auto"` — these settings have no effect otherwise.
+ */
+export function getClassifierSettings(config: PermissionsConfig): ResolvedClassifierSettings {
+	return { ...DEFAULT_CLASSIFIER_SETTINGS, ...config.classifier };
 }
 
 function mergePolicyLayer(
