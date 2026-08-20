@@ -1,14 +1,68 @@
-import { createProvider, type RefreshModelsContext, type Model } from "@earendil-works/pi-ai";
+import {
+	createProvider,
+	type Api,
+	type Model,
+	type ProviderStreams,
+	type RefreshModelsContext,
+} from "@earendil-works/pi-ai";
 import { anthropicMessagesApi, openAIResponsesApi } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const ANTHROPIC_MODELS_URL = "https://api.langdock.com/anthropic/eu/v1/models";
-const ANTHROPIC_BASE_URL = "https://api.langdock.com/anthropic/eu/v1";
-const OPENAI_MODELS_URL = "https://api.langdock.com/openai/eu/v1/models";
-const OPENAI_BASE_URL = "https://api.langdock.com/openai/eu/v1";
+type LangdockApi = "anthropic-messages" | "openai-responses";
+type LangdockRegion = "global" | "eu" | "us";
+type LangdockAnthropicRegion = Exclude<LangdockRegion, "global">;
+
+const REGIONS: readonly LangdockRegion[] = ["global", "eu", "us"];
+const ANTHROPIC_REGIONS: readonly LangdockAnthropicRegion[] = ["eu", "us"];
+const LANGDOCK_API_BASE_URL = "https://api.langdock.com";
+const DEFAULT_REGION: LangdockRegion = "eu";
+const OPENAI_BASE_URL = `${LANGDOCK_API_BASE_URL}/openai/${DEFAULT_REGION}/v1`;
 const API_KEY_ENVIRONMENT_VARIABLE = "LANGDOCK_API_KEY";
 
-type LangdockApi = "anthropic-messages" | "openai-responses";
+interface LangdockEndpoint {
+	api: LangdockApi;
+	region: LangdockRegion;
+	modelsUrl: string;
+	baseUrl: string;
+}
+
+const REGIONAL_MODEL_ID_PATTERN = /^(global|eu|us):(.*)$/;
+
+function getUpstreamModel<TApi extends Api>(model: Model<TApi>): Model<TApi> {
+	const upstreamId = REGIONAL_MODEL_ID_PATTERN.exec(model.id)?.[2];
+	return upstreamId === undefined ? model : { ...model, id: upstreamId };
+}
+
+function withUpstreamModelIds(streams: ProviderStreams): ProviderStreams {
+	const fetchDeferred = streams.fetchDeferred;
+	const cancelDeferred = streams.cancelDeferred;
+	return {
+		stream: (model, context, options) => streams.stream(getUpstreamModel(model), context, options),
+		streamSimple: (model, context, options) => streams.streamSimple(getUpstreamModel(model), context, options),
+		...(fetchDeferred
+			? {
+					fetchDeferred: (model, handle, options) => fetchDeferred(getUpstreamModel(model), handle, options),
+				}
+			: {}),
+		...(cancelDeferred
+			? {
+					cancelDeferred: (model, handle, options) =>
+						cancelDeferred(getUpstreamModel(model), handle, options),
+				}
+			: {}),
+	};
+}
+
+function getEndpoint(api: LangdockApi, region: LangdockRegion): LangdockEndpoint {
+	const apiPath = api === "anthropic-messages" ? "anthropic" : "openai";
+	const baseUrl = `${LANGDOCK_API_BASE_URL}/${apiPath}/${region}/v1`;
+	return {
+		api,
+		region,
+		modelsUrl: `${baseUrl}/models`,
+		baseUrl,
+	};
+}
 
 interface LangdockModel {
 	id: string;
@@ -65,10 +119,15 @@ async function fetchModels(endpoint: string, apiKey: string, signal?: AbortSigna
 	return parseModelList(await response.json(), endpoint);
 }
 
-function createModels(models: LangdockModel[], api: LangdockApi, baseUrl: string): Model<LangdockApi>[] {
+function createModels(
+	models: LangdockModel[],
+	api: LangdockApi,
+	region: LangdockRegion,
+	baseUrl: string,
+): Model<LangdockApi>[] {
 	return models.map((model) => ({
-		id: model.id,
-		name: model.name ?? model.id,
+		id: `${region}:${model.id}`,
+		name: `${model.name ?? model.id} (${region})`,
 		api,
 		baseUrl,
 		provider: "langdock",
@@ -88,14 +147,19 @@ async function fetchModelsFromLangdock(context: RefreshModelsContext) {
 	}
 
 	try {
-		const [anthropic, openai] = await Promise.all([
-			fetchModels(ANTHROPIC_MODELS_URL, apiKey, context.signal),
-			fetchModels(OPENAI_MODELS_URL, apiKey, context.signal),
-		]);
-		return [
-			...createModels(anthropic, "anthropic-messages", ANTHROPIC_BASE_URL),
-			...createModels(openai, "openai-responses", OPENAI_BASE_URL),
+		const endpoints = [
+			...ANTHROPIC_REGIONS.map((region) => getEndpoint("anthropic-messages", region)),
+			...REGIONS.map((region) => getEndpoint("openai-responses", region)),
 		];
+		const results = await Promise.all(
+			endpoints.map(async (endpoint) => ({
+				endpoint,
+				models: await fetchModels(endpoint.modelsUrl, apiKey, context.signal),
+			})),
+		);
+		return results.flatMap(({ endpoint, models }) =>
+			createModels(models, endpoint.api, endpoint.region, endpoint.baseUrl),
+		);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(`Langdock model discovery failed: ${message}`);
@@ -134,8 +198,8 @@ export default function (pi: ExtensionAPI) {
 		},
 		models: [],
 		api: {
-			"openai-responses": openAIResponsesApi(),
-			"anthropic-messages": anthropicMessagesApi(),
+			"openai-responses": withUpstreamModelIds(openAIResponsesApi()),
+			"anthropic-messages": withUpstreamModelIds(anthropicMessagesApi()),
 		},
 		fetchModels: fetchModelsFromLangdock,
 	});
