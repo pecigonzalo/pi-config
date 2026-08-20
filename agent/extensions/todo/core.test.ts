@@ -6,6 +6,7 @@ import {
 	findTodo,
 	MAX_PERSISTED_HISTORY_ENTRIES,
 	createTodoState,
+	prepareTodoToolArguments,
 	type TodoExecuteParams,
 	type TodoState,
 } from "./core";
@@ -387,6 +388,24 @@ describe("todo regressions to fix", () => {
 		expect(result.details.error).toBeUndefined();
 		expect(harness.todo(1)?.title).toBe("Full shape add");
 		expect(harness.todo(1)?.parentId).toBeUndefined();
+	});
+
+	it("filters non-neutral fields from unrelated actions in model-generated calls", () => {
+		const harness = createHarness();
+		harness.execute({ action: "add", title: "Start me" });
+
+		const prepared = prepareTodoToolArguments({
+			action: "toggle",
+			id: 1,
+			priority: "low",
+			effort: "S",
+			toStatus: "in-progress",
+		});
+
+		expect(prepared).toEqual({ action: "toggle", id: 1, toStatus: "in-progress" });
+		const result = harness.execute(prepared as TodoExecuteParams);
+		expect(result.details.error).toBeUndefined();
+		expect(harness.todo(1)?.status).toBe("in-progress");
 	});
 
 	it("BUG: /todos tag filtering should match tags regardless of command casing", () => {

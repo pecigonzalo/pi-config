@@ -8,6 +8,7 @@ export {
 	filteredTodoPool,
 	findTodo,
 	listText,
+	prepareTodoToolArguments,
 	readTodoText,
 	resultText,
 	statusLabel,

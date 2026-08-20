@@ -54,6 +54,28 @@ const allowedParams: Record<TodoAction, Set<string>> = {
 	set_wip_limit: new Set(["limit"]),
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object";
+}
+
+function isTodoAction(value: unknown): value is TodoAction {
+	return typeof value === "string" && value in allowedParams;
+}
+
+/**
+ * Removes fields belonging to a different action from model-generated calls.
+ * The public schema is intentionally flat for provider compatibility, so some
+ * models emit the complete object shape even when most fields are unrelated.
+ */
+export function prepareTodoToolArguments(args: unknown): TodoExecuteParams {
+	if (!isRecord(args) || !isTodoAction(args.action)) return args as TodoExecuteParams;
+
+	const allowed = allowedParams[args.action];
+	return Object.fromEntries(
+		Object.entries(args).filter(([key]) => key === "action" || allowed.has(key)),
+	) as unknown as TodoExecuteParams;
+}
+
 const TODO_OUTPUT_MAX_LINES = Math.min(DEFAULT_MAX_LINES, 700);
 const TODO_OUTPUT_MAX_BYTES = Math.min(DEFAULT_MAX_BYTES, 30 * 1024);
 

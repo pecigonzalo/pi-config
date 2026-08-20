@@ -18,6 +18,7 @@ import { parseTodoWidgetMode, parseTodosCommandArgs, parseTodosCommandRoute } fr
 import {
 	executeTodoAction,
 	findTodo as findTodoInState,
+	prepareTodoToolArguments,
 	resultText as getTodoResultText,
 	type TodoExecuteParams,
 } from "./engine";
@@ -77,6 +78,18 @@ export const TODOS_COMPLETIONS = [
 	{ value: "done", label: "done: filter by done status" },
 	{ value: "widget", label: "widget: manage the todo widget (widget on|off|toggle|status)" },
 ] as const;
+
+export const TODO_PROMPT_GUIDELINES = [
+	"Use the `todo` tool only for genuinely multi-step work where progress tracking is useful, such as investigation followed by implementation and verification, changes spanning multiple files with coordination, or tasks with blockers and dependencies.",
+	"Do not use the `todo` tool for small or straightforward work, including single-file edits, review-and-commit requests, simple checks or verification runs, quick follow-up fixes, or purely conversational responses.",
+	"Treat `todo.action` parameter sets as strict. Send only the fields listed for the selected action; omit every other optional field. Do not send a full object containing defaults, empty arrays, or fields from another action.",
+	"Use `todo` add with title (required) and optional description, tags, priority, effort, parentId, or blockerIds. Use `todo` update with id (required) and optional title, description, tags, priority, effort, parentId, or blockerIds.",
+	'Use `todo` toggle with id (required) and optional toStatus only. For example, `{ action: "toggle", id: 1, toStatus: "in-progress" }` changes status. Never send priority or effort to toggle, and never send toStatus to update. Use update, not toggle, to change priority or effort.',
+	"Use `todo` list with only view, includeArchived, status, or tag. Use read/archive/history with their id-specific fields, link/unlink for relationships, clear with only action, and set_wip_limit with limit.",
+	"Before starting complex multi-step work, use the `todo` tool to create or update the relevant todo items so progress stays visible throughout the turn.",
+	"Keep `todo` tool work focused and update todo status promptly when work starts, pauses, or finishes.",
+	"Use `todo` parent and blocker links when sequencing matters or one task depends on another.",
+];
 
 export default function (pi: ExtensionAPI) {
 	const initialState = createTodoState();
@@ -372,16 +385,11 @@ export default function (pi: ExtensionAPI) {
 		name: "todo",
 		label: "Todo",
 		description:
-			"Manage a todo graph. Actions: list, add, update, toggle, read, archive, link, unlink, history, clear, set_wip_limit",
-		promptSnippet: "Track multi-step work with a persistent todo graph.",
-		promptGuidelines: [
-			"Use the `todo` tool only for genuinely multi-step work where progress tracking is useful, such as investigation followed by implementation and verification, changes spanning multiple files with coordination, or tasks with blockers and dependencies.",
-			"Do not use the `todo` tool for small or straightforward work, including single-file edits, review-and-commit requests, simple checks or verification runs, quick follow-up fixes, or purely conversational responses.",
-			"Before starting complex multi-step work, use the `todo` tool to create or update the relevant todo items so progress stays visible throughout the turn.",
-			"Keep `todo` tool work focused and use the `todo` tool to update status promptly when a task starts, pauses, or finishes.",
-			"Use the `todo` tool parent and blocker links when sequencing matters or one task depends on another.",
-		],
+			"Manage a persistent todo graph. The action selects a strict parameter set. Actions: list (view/includeArchived/status/tag), add (title/description/tags/priority/effort/parentId/blockerIds), update (id/title/description/tags/priority/effort/parentId/blockerIds), toggle (id/toStatus), read (id), archive (id/archived), link (id/parentId/addBlockerIds), unlink (id/clearParent/removeBlockerIds), history (id/historyLimit), clear, set_wip_limit (limit). Omit fields that do not belong to the selected action.",
+		promptSnippet: "Track multi-step work with a persistent todo graph using action-specific parameters.",
+		promptGuidelines: TODO_PROMPT_GUIDELINES,
 		parameters: TodoParams,
+		prepareArguments: prepareTodoToolArguments,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			return runTodoAction(params as TodoExecuteParams);
@@ -391,7 +399,9 @@ export default function (pi: ExtensionAPI) {
 			const callArgs: Record<string, unknown> = isRecord(args) ? args : {};
 			let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", String(callArgs.action ?? ""));
 			if (typeof callArgs.id === "number") text += " " + theme.fg("accent", `#${callArgs.id}`);
-			if (typeof callArgs.title === "string") text += " " + theme.fg("dim", `"${callArgs.title}"`);
+			if (typeof callArgs.title === "string" && callArgs.title.trim()) {
+				text += " " + theme.fg("dim", `"${callArgs.title}"`);
+			}
 			if (callArgs.action === "toggle" && isTodoStatus(callArgs.toStatus)) {
 				text += " " + theme.fg("muted", `→ ${statusLabel(callArgs.toStatus)}`);
 			}
