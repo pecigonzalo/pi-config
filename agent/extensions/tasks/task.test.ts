@@ -5,6 +5,13 @@ import * as syncFs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { EventEmitter } from "node:events";
+import {
+	getTaskTerminalAttachment,
+	resolveConfiguredTaskTerminalBackend,
+	resolveTaskTerminalBackendById,
+	setTaskTerminalCommandRunnerForTests,
+	__test__ as taskTerminalTest,
+} from "./task-terminal.js";
 import { setTaskSessionRootForTests } from "./task-session-validation.js";
 
 let taskExtension: (typeof import("./task"))["default"];
@@ -659,7 +666,6 @@ describe("tasks extension compact schema", () => {
 				hasUI: false,
 				sessionManager: {
 					getSessionFile: () => undefined,
-					getSessionId: () => "test-session",
 					getBranch: () => [],
 					appendCustomEntry: () => "entry-id",
 				},
@@ -687,7 +693,6 @@ describe("tasks extension compact schema", () => {
 				hasUI: false,
 				sessionManager: {
 					getSessionFile: () => undefined,
-					getSessionId: () => "test-session",
 					getBranch: () => [],
 					appendCustomEntry: () => "entry-id",
 				},
@@ -754,6 +759,17 @@ describe("tasks extension compact schema", () => {
 					filePath: "/tmp/tasks.json",
 				},
 			],
+			profiles: [
+				{
+					name: "read-only",
+					description: "Read-only analysis profile",
+					enabled: true,
+					systemPromptMode: "append",
+					systemPrompt: "Read only.",
+					source: "user",
+					filePath: "/tmp/read-only.md",
+				},
+			],
 		});
 		const { eventHandlers } = createExtensionHarness();
 
@@ -763,10 +779,17 @@ describe("tasks extension compact schema", () => {
 		);
 
 		expect(result.systemPrompt).toContain("Task delegation choices for this directory:");
-		expect(result.systemPrompt).toContain("`implementer` (default effort: `balanced`)");
+		expect(result.systemPrompt).toContain("`agentScope` selects the config source");
+		expect(result.systemPrompt).toContain("`implementer` (default effort: `balanced`): Implementation worker");
 		expect(result.systemPrompt).not.toContain("`orchestrator`");
-		expect(result.systemPrompt).toContain("`balanced` (openai-codex/gpt-5.6-terra)");
-		expect(result.systemPrompt).toContain("`smart` (openai-codex/gpt-5.6-sol, thinking: `high`)");
+		expect(result.systemPrompt).toContain(
+			"Valid `profile` choices are: `read-only` (user): Read-only analysis profile",
+		);
+		expect(result.systemPrompt).toContain("Omit `profile` to use the selected agent's default profile");
+		expect(result.systemPrompt).toContain("`balanced` (openai-codex/gpt-5.6-terra): Balanced effort");
+		expect(result.systemPrompt).toContain(
+			"`smart` (openai-codex/gpt-5.6-sol, thinking: `high`): High-thinking effort",
+		);
 		expect(result.systemPrompt).toContain("do not use a thinking level such as `high` as an effort");
 		expect(result.systemPrompt).toContain(
 			'omit `agent` and provide a behavioral `prompt`; do not set `agent: "generic"`',
@@ -804,7 +827,6 @@ describe("tasks extension compact schema", () => {
 					hasUI: false,
 					sessionManager: {
 						getSessionFile: () => undefined,
-						getSessionId: () => "test-session",
 						getBranch: () => [],
 						appendCustomEntry: () => "entry-id",
 					},
@@ -869,74 +891,123 @@ describe("tasks worker tool configuration", () => {
 		expect(resolved.config.allowDelegation).toBeTrue();
 	});
 
-	it("passes through tools/excludeTools for the worker session spec", () => {
-		const spec = __test__.buildWorkerSessionSpec(
-			{
-				displayAgentName: "worker",
-				tools: ["read", "edit"],
-				excludeTools: ["bash"],
-				allowDelegation: true,
-				skills: undefined,
-				context: { mode: "fresh", project: false, skills: false },
-				inheritProjectContext: true,
-			},
-			process.cwd(),
-			true,
-		);
+	it("appends exclude-tools flags for child pi processes", () => {
+		const args: string[] = [];
 
-		expect(spec.error).toBeUndefined();
-		expect(spec.tools).toEqual(["read", "edit"]);
-		expect(spec.excludeTools).toEqual(["bash"]);
+		__test__.appendWorkerToolFlags(args, {
+			tools: ["read", "edit"],
+			excludeTools: ["bash"],
+			allowDelegation: true,
+		});
+
+		expect(args).toEqual(["--tools", "read,edit", "--exclude-tools", "bash"]);
 	});
 
-	it("approves project-local inputs for child sessions when project context is requested", () => {
-		const trusted = __test__.resolveWorkerProjectTrust(
-			{ context: { mode: "fresh", project: true, skills: false }, inheritProjectContext: false },
+	it("disables task delegation for child workers by default", () => {
+		const args: string[] = [];
+
+		__test__.appendWorkerToolFlags(args, { tools: ["read", "task"] });
+
+		expect(args).toEqual(["--tools", "read,task", "--exclude-tools", "task"]);
+	});
+
+	it("approves project-local inputs for child pi processes when project context is requested", () => {
+		const args: string[] = [];
+
+		__test__.appendProjectTrustFlags(
+			args,
+			{
+				context: { mode: "fresh", project: true, skills: false },
+				inheritProjectContext: false,
+			},
 			true,
 		);
 
-		expect(trusted).toBeTrue();
+		expect(args).toEqual(["--approve"]);
 	});
 
 	it("does not approve project-local inputs when the launch directory is untrusted", () => {
-		const trusted = __test__.resolveWorkerProjectTrust(
-			{ context: { mode: "fresh", project: true, skills: false }, inheritProjectContext: true },
+		const args: string[] = [];
+
+		__test__.appendProjectTrustFlags(
+			args,
+			{
+				context: { mode: "fresh", project: true, skills: false },
+				inheritProjectContext: true,
+			},
 			false,
 		);
 
-		expect(trusted).toBeFalse();
+		expect(args).toEqual(["--no-approve"]);
 	});
 
 	it("does not approve project-local inputs when project context is not requested", () => {
-		const trusted = __test__.resolveWorkerProjectTrust(
-			{ context: { mode: "fresh", project: false, skills: false }, inheritProjectContext: false },
+		const args: string[] = [];
+
+		__test__.appendProjectTrustFlags(
+			args,
+			{
+				context: { mode: "fresh", project: false, skills: false },
+				inheritProjectContext: false,
+			},
 			true,
 		);
 
-		expect(trusted).toBeFalse();
+		expect(args).toEqual([]);
 	});
 
 	it("uses resolved context.skills as the canonical launch inheritance decision", () => {
-		const inherited = __test__.buildWorkerSessionSpec(
+		const inheritedArgs: string[] = [];
+		__test__.appendWorkerSkillFlags(
+			inheritedArgs,
 			{ displayAgentName: "worker", context: { mode: "fork", project: false, skills: true } },
 			process.cwd(),
 			false,
 		);
-		const isolated = __test__.buildWorkerSessionSpec(
+
+		const isolatedArgs: string[] = [];
+		__test__.appendWorkerSkillFlags(
+			isolatedArgs,
 			{ displayAgentName: "worker", context: { mode: "fresh", project: false, skills: false } },
 			process.cwd(),
 			false,
 		);
-		const explicitEmpty = __test__.buildWorkerSessionSpec(
+
+		const explicitEmptyArgs: string[] = [];
+		__test__.appendWorkerSkillFlags(
+			explicitEmptyArgs,
 			{ skills: [], displayAgentName: "worker", context: { mode: "fork", project: false, skills: true } },
 			process.cwd(),
 			false,
 		);
 
-		expect(inherited.noSkills).toBeFalse();
-		expect(inherited.additionalSkillPaths).toBeUndefined();
-		expect(isolated.noSkills).toBeTrue();
-		expect(explicitEmpty.noSkills).toBeTrue();
+		expect(inheritedArgs).toEqual([]);
+		expect(isolatedArgs).toEqual(["--no-skills"]);
+		expect(explicitEmptyArgs).toEqual(["--no-skills"]);
+	});
+
+	it("clears inherited main worker environment while preserving explicit task worker config", () => {
+		const previousAgent = process.env.PI_AGENT_NAME;
+		const previousProfile = process.env.PI_PROFILE_NAME;
+		process.env.PI_AGENT_NAME = "main-agent";
+		process.env.PI_PROFILE_NAME = "main-profile";
+		try {
+			const genericEnv = __test__.getWorkerProcessEnv({});
+			const explicitEnv = __test__.getWorkerProcessEnv({
+				agent: { name: "task-agent" },
+				profile: { name: "task-profile", permissionsProfile: "task-permissions" },
+			});
+
+			expect(genericEnv.PI_AGENT_NAME).toBeUndefined();
+			expect(genericEnv.PI_PROFILE_NAME).toBeUndefined();
+			expect(explicitEnv.PI_AGENT_NAME).toBe("task-agent");
+			expect(explicitEnv.PI_PROFILE_NAME).toBe("task-permissions");
+		} finally {
+			if (previousAgent === undefined) delete process.env.PI_AGENT_NAME;
+			else process.env.PI_AGENT_NAME = previousAgent;
+			if (previousProfile === undefined) delete process.env.PI_PROFILE_NAME;
+			else process.env.PI_PROFILE_NAME = previousProfile;
+		}
 	});
 });
 
@@ -1029,12 +1100,28 @@ describe("required task skill instructions", () => {
 		expect(prompt).toContain(`path="${skillPath}"`);
 	});
 
-	it("resolves required-skill paths and composes the launch prompt for append and replace modes", async () => {
+	it("removes the prompt directory and preserves the original mutation failure", async () => {
+		const originalError = new Error("queued mutation failed");
+		mockFileMutationError = originalError;
+		lastMutatedFilePath = undefined;
+
+		try {
+			await expect(__test__.writePromptToTempFile("reviewer", "prompt")).rejects.toBe(originalError);
+			expect(lastMutatedFilePath).toBeDefined();
+			expect(syncFs.existsSync(path.dirname(lastMutatedFilePath!))).toBe(false);
+		} finally {
+			mockFileMutationError = undefined;
+			lastMutatedFilePath = undefined;
+		}
+	});
+
+	it("writes required instructions and prompt flags for append and replace modes", async () => {
 		const skillPath = await createSkill("review", "Launch-level required instruction.");
 		mockSkillResolution = { paths: [path.dirname(skillPath)], missing: [] };
 
 		try {
 			for (const mode of ["append", "replace"] as const) {
+				const args: string[] = [];
 				const worker = {
 					skills: ["review"],
 					systemPrompt: "Configured launch behavior.",
@@ -1042,14 +1129,21 @@ describe("required task skill instructions", () => {
 					displayAgentName: "reviewer",
 					context: { mode: "fresh", project: false, skills: false },
 				};
-				const spec = __test__.buildWorkerSessionSpec(worker, process.cwd(), false);
-				expect(spec.error).toBeUndefined();
-				expect(spec.additionalSkillPaths).toEqual([path.dirname(skillPath)]);
-				expect(spec.noSkills).toBeTrue();
+				expect(__test__.appendWorkerSkillFlags(args, worker, process.cwd(), false)).toBeUndefined();
 
-				const prompt = await __test__.prepareWorkerSystemPrompt(worker, process.cwd(), false);
-				expect(prompt).toContain("Configured launch behavior.");
-				expect(prompt).toContain("Launch-level required instruction.");
+				const promptFile = await __test__.appendWorkerPromptFlags(args, worker, process.cwd(), false);
+				try {
+					expect(promptFile.filePath).not.toBeNull();
+					const prompt = await fs.readFile(promptFile.filePath!, "utf-8");
+
+					expect(args).toContain("--skill");
+					expect(args).toContain(path.dirname(skillPath));
+					expect(args).toContain(mode === "append" ? "--append-system-prompt" : "--system-prompt");
+					expect(prompt).toContain("Configured launch behavior.");
+					expect(prompt).toContain("Launch-level required instruction.");
+				} finally {
+					if (promptFile.dir) await fs.rm(promptFile.dir, { recursive: true, force: true });
+				}
 			}
 		} finally {
 			mockSkillResolution = { paths: [], missing: [] };
@@ -1196,7 +1290,6 @@ describe("tasks extension persisted-session guardrails", () => {
 				hasUI: false,
 				sessionManager: {
 					getSessionFile: () => undefined,
-					getSessionId: () => "test-session",
 					getBranch: () => [],
 					appendCustomEntry: () => "entry-id",
 				},
@@ -1891,66 +1984,102 @@ describe("main-session composition recovery", () => {
 	}
 });
 
-describe("tasks extension worker UI relay", () => {
-	it("relays dialog requests to the parent UI, prefixed with the worker's task label", async () => {
-		const selectCalls: Array<{ title: string; options: string[]; opts?: unknown }> = [];
-		const parentUi: any = {
-			select: async (title: string, options: string[], opts?: unknown) => {
-				selectCalls.push({ title, options, opts });
-				return "Allow once";
+describe("tasks extension RPC UI relay", () => {
+	it("relays dialog requests to the parent UI and returns the selected value", async () => {
+		const selectCalls: Array<{
+			title: string;
+			options: string[];
+			dialogOptions?: { timeout?: number; signal?: AbortSignal };
+		}> = [];
+		const responses: Record<string, unknown>[] = [];
+
+		await __test__.relayTaskExtensionUiRequest({
+			request: {
+				type: "extension_ui_request",
+				id: "req-select",
+				method: "select",
+				title: "Permission required",
+				options: ["Allow once", "Block"],
+				timeout: 5000,
 			},
-		};
-		const relayedKeys = { status: new Set<string>(), widget: new Set<string>() };
-		const workerUi = __test__.createWorkerUiContext(
-			parentUi,
-			{ agent: "thinker", step: 1, key: "run-1:1" },
-			relayedKeys,
-		);
+			controller: { agent: "thinker", step: 1, key: "run-1:1" },
+			parentUi: {
+				hasUI: true,
+				ui: {
+					select: async (
+						title: string,
+						options: string[],
+						dialogOptions?: { timeout?: number; signal?: AbortSignal },
+					) => {
+						selectCalls.push({ title, options, dialogOptions });
+						return "Allow once";
+					},
+				},
+			},
+			sendResponse: async (payload: Record<string, unknown>) => {
+				responses.push(payload);
+			},
+		});
 
-		const opts = { timeout: 5000 };
-		const value = await workerUi.select("Permission required", ["Allow once", "Block"], opts);
-
-		expect(value).toBe("Allow once");
 		expect(selectCalls).toHaveLength(1);
 		expect(selectCalls[0]?.title).toBe("Task thinker step 1 · Permission required");
 		expect(selectCalls[0]?.options).toEqual(["Allow once", "Block"]);
-		expect(selectCalls[0]?.opts).toBe(opts);
+		expect(selectCalls[0]?.dialogOptions?.timeout).toBeGreaterThan(0);
+		expect(selectCalls[0]?.dialogOptions?.timeout).toBeLessThanOrEqual(5000);
+		expect(responses).toEqual([{ type: "extension_ui_response", id: "req-select", value: "Allow once" }]);
 	});
 
-	it("serializes dialog relays from concurrently-running child tasks", async () => {
+	it("serializes dialog relays from parallel child tasks", async () => {
 		const confirmCalls: string[] = [];
+		const responses: Record<string, unknown>[] = [];
 		let releaseFirstConfirm: (() => void) | undefined;
 		let firstConfirmStarted: (() => void) | undefined;
 		const firstConfirmStartedPromise = new Promise<void>((resolve) => {
 			firstConfirmStarted = resolve;
 		});
 
-		const parentUi: any = {
-			confirm: async (title: string) => {
-				confirmCalls.push(title);
-				if (title.includes("step 1")) {
-					firstConfirmStarted?.();
-					await new Promise<void>((resolve) => {
-						releaseFirstConfirm = resolve;
-					});
-				}
-				return true;
+		const parentUi = {
+			hasUI: true,
+			ui: {
+				confirm: async (title: string) => {
+					confirmCalls.push(title);
+					if (title.includes("step 1")) {
+						firstConfirmStarted?.();
+						await new Promise<void>((resolve) => {
+							releaseFirstConfirm = resolve;
+						});
+					}
+					return true;
+				},
 			},
 		};
-		const relayedKeys = { status: new Set<string>(), widget: new Set<string>() };
-		const firstWorkerUi = __test__.createWorkerUiContext(
-			parentUi,
-			{ agent: "thinker", step: 1, key: "run-dialog:1" },
-			relayedKeys,
-		);
-		const secondWorkerUi = __test__.createWorkerUiContext(
-			parentUi,
-			{ agent: "thinker", step: 2, key: "run-dialog:2" },
-			relayedKeys,
-		);
 
-		const firstConfirm = firstWorkerUi.confirm("Permission required", "");
-		const secondConfirm = secondWorkerUi.confirm("Permission required", "");
+		const firstRelay = __test__.relayTaskExtensionUiRequest({
+			request: {
+				type: "extension_ui_request",
+				id: "req-confirm-1",
+				method: "confirm",
+				title: "Permission required",
+			},
+			controller: { agent: "thinker", step: 1, key: "run-dialog:1" },
+			parentUi,
+			sendResponse: async (payload: Record<string, unknown>) => {
+				responses.push(payload);
+			},
+		});
+		const secondRelay = __test__.relayTaskExtensionUiRequest({
+			request: {
+				type: "extension_ui_request",
+				id: "req-confirm-2",
+				method: "confirm",
+				title: "Permission required",
+			},
+			controller: { agent: "thinker", step: 2, key: "run-dialog:2" },
+			parentUi,
+			sendResponse: async (payload: Record<string, unknown>) => {
+				responses.push(payload);
+			},
+		});
 
 		await firstConfirmStartedPromise;
 		await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1958,12 +2087,137 @@ describe("tasks extension worker UI relay", () => {
 		expect(confirmCalls[0]).toContain("step 1");
 
 		releaseFirstConfirm?.();
-		const [firstResult, secondResult] = await Promise.all([firstConfirm, secondConfirm]);
+		await Promise.all([firstRelay, secondRelay]);
 
 		expect(confirmCalls).toHaveLength(2);
 		expect(confirmCalls[1]).toContain("step 2");
-		expect(firstResult).toBe(true);
-		expect(secondResult).toBe(true);
+		expect(responses).toEqual([
+			{ type: "extension_ui_response", id: "req-confirm-1", confirmed: true },
+			{ type: "extension_ui_response", id: "req-confirm-2", confirmed: true },
+		]);
+	});
+
+	it("expires queued dialogs without invoking the parent UI", async () => {
+		const responses: Record<string, unknown>[] = [];
+		let release: (() => void) | undefined;
+		let started!: () => void;
+		const startedPromise = new Promise<void>((resolve) => (started = resolve));
+		const confirm = async (title: string) => {
+			if (title.includes("step 1")) {
+				started();
+				await new Promise<void>((resolve) => (release = resolve));
+			}
+			return true;
+		};
+		const parentUi = { hasUI: true, ui: { confirm } };
+		const first = __test__.relayTaskExtensionUiRequest({
+			request: { type: "extension_ui_request", id: "queued-1", method: "confirm", title: "blocker" },
+			controller: { agent: "a", step: 1, key: "queued:1" },
+			parentUi,
+			sendResponse: async (p: Record<string, unknown>) => responses.push(p),
+		});
+		await startedPromise;
+		const second = __test__.relayTaskExtensionUiRequest({
+			request: { type: "extension_ui_request", id: "queued-2", method: "confirm", title: "expires", timeout: 1 },
+			controller: { agent: "a", step: 2, key: "queued:2" },
+			parentUi,
+			sendResponse: async (p: Record<string, unknown>) => responses.push(p),
+		});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		release?.();
+		await Promise.all([first, second]);
+		expect(responses.filter((p) => p.id === "queued-2")).toEqual([
+			{ type: "extension_ui_response", id: "queued-2", confirmed: false },
+		]);
+	});
+
+	it("cancels an aborted queued dialog before dequeue", async () => {
+		const responses: Record<string, unknown>[] = [];
+		let release!: () => void;
+		let started!: () => void;
+		const startedPromise = new Promise<void>((resolve) => (started = resolve));
+		const parentUi = {
+			hasUI: true,
+			ui: {
+				confirm: async (title: string) => {
+					if (title.includes("step 1")) {
+						started();
+						await new Promise<void>((resolve) => (release = resolve));
+					}
+					return true;
+				},
+			},
+		};
+		const first = __test__.relayTaskExtensionUiRequest({
+			request: { type: "extension_ui_request", id: "abort-1", method: "confirm", title: "blocker" },
+			controller: { agent: "a", step: 1, key: "abort:1" },
+			parentUi,
+			sendResponse: async (p: Record<string, unknown>) => responses.push(p),
+		});
+		await startedPromise;
+		const abort = new AbortController();
+		const second = __test__.relayTaskExtensionUiRequest({
+			request: { type: "extension_ui_request", id: "abort-2", method: "confirm", title: "aborted" },
+			controller: { agent: "a", step: 2, key: "abort:2" },
+			parentUi,
+			dialogSignal: abort.signal,
+			sendResponse: async (p: Record<string, unknown>) => responses.push(p),
+		});
+		abort.abort();
+		release();
+		await Promise.all([first, second]);
+		expect(responses.filter((p) => p.id === "abort-2")).toEqual([
+			{ type: "extension_ui_response", id: "abort-2", confirmed: false },
+		]);
+	});
+
+	it("sends exactly one response when dialog resolution races cancellation", async () => {
+		const responses: Record<string, unknown>[] = [];
+		const abort = new AbortController();
+		let resolveConfirm!: (value: boolean) => void;
+		let confirmStarted!: () => void;
+		const confirmStartedPromise = new Promise<void>((resolve) => (confirmStarted = resolve));
+		const relay = __test__.relayTaskExtensionUiRequest({
+			request: { type: "extension_ui_request", id: "race", method: "confirm", title: "race" },
+			controller: { agent: "a", step: 1, key: "race:1" },
+			parentUi: {
+				hasUI: true,
+				ui: {
+					confirm: async () =>
+						new Promise<boolean>((resolve) => {
+							resolveConfirm = resolve;
+							confirmStarted();
+						}),
+				},
+			},
+			dialogSignal: abort.signal,
+			sendResponse: async (p: Record<string, unknown>) => responses.push(p),
+		});
+		await confirmStartedPromise;
+		resolveConfirm(true);
+		abort.abort();
+		await relay;
+		expect(responses).toHaveLength(1);
+	});
+
+	it("cancels dialog requests when no parent UI is available", async () => {
+		const responses: Record<string, unknown>[] = [];
+
+		await __test__.relayTaskExtensionUiRequest({
+			request: {
+				type: "extension_ui_request",
+				id: "req-missing-ui",
+				method: "select",
+				title: "Permission required",
+				options: ["Allow once", "Block"],
+			},
+			controller: { agent: "thinker", step: 1, key: "run-2:1" },
+			sendResponse: async (payload: Record<string, unknown>) => {
+				responses.push(payload);
+			},
+		});
+
+		expect(responses).toEqual([{ type: "extension_ui_response", id: "req-missing-ui", cancelled: true }]);
 	});
 
 	it("falls back to a notification for non-TUI task viewing", async () => {
@@ -2032,50 +2286,97 @@ describe("tasks extension worker UI relay", () => {
 		expect(customCalls).toBe(1);
 	});
 
-	it("namespaces status and widget updates from child tasks", () => {
+	it("namespaces status and widget updates from child tasks", async () => {
 		const statusCalls: any[][] = [];
 		const widgetCalls: any[][] = [];
-		const parentUi: any = {
-			setStatus: (...args: any[]) => statusCalls.push(args),
-			setWidget: (...args: any[]) => widgetCalls.push(args),
-		};
-		const relayedKeys = { status: new Set<string>(), widget: new Set<string>() };
-		const workerUi = __test__.createWorkerUiContext(
-			parentUi,
-			{ agent: "thinker", step: 2, key: "run-3:2" },
-			relayedKeys,
-		);
+		const trackedStatusKeys = new Set<string>();
+		const trackedWidgetKeys = new Set<string>();
 
-		workerUi.setStatus("permissions", "Waiting for approval");
-		workerUi.setWidget("approval", ["Choose an option", "Allow once", "Block"], { placement: "belowEditor" });
+		await __test__.relayTaskExtensionUiRequest({
+			request: {
+				type: "extension_ui_request",
+				id: "req-status",
+				method: "setStatus",
+				statusKey: "permissions",
+				statusText: "Waiting for approval",
+			},
+			controller: { agent: "thinker", step: 2, key: "run-3:2" },
+			parentUi: {
+				hasUI: true,
+				ui: {
+					setStatus: (...args: any[]) => {
+						statusCalls.push(args);
+					},
+					setWidget: (...args: any[]) => {
+						widgetCalls.push(args);
+					},
+				},
+			},
+			sendResponse: async () => {},
+			trackedStatusKeys,
+			trackedWidgetKeys,
+		});
+
+		await __test__.relayTaskExtensionUiRequest({
+			request: {
+				type: "extension_ui_request",
+				id: "req-widget",
+				method: "setWidget",
+				widgetKey: "approval",
+				widgetLines: ["Choose an option", "Allow once", "Block"],
+				widgetPlacement: "belowEditor",
+			},
+			controller: { agent: "thinker", step: 2, key: "run-3:2" },
+			parentUi: {
+				hasUI: true,
+				ui: {
+					setStatus: (...args: any[]) => {
+						statusCalls.push(args);
+					},
+					setWidget: (...args: any[]) => {
+						widgetCalls.push(args);
+					},
+				},
+			},
+			sendResponse: async () => {},
+			trackedStatusKeys,
+			trackedWidgetKeys,
+		});
 
 		expect(statusCalls).toHaveLength(1);
-		expect(statusCalls[0]?.[0]).toContain("tasks.run-3-2.status.permissions");
+		expect(statusCalls[0]?.[0]).toContain("tasks.rpc.run-3-2.status.permissions");
 		expect(statusCalls[0]?.[1]).toBe("[Task thinker step 2] Waiting for approval");
-		expect([...relayedKeys.status]).toEqual([statusCalls[0]?.[0]]);
+		expect([...trackedStatusKeys]).toEqual([statusCalls[0]?.[0]]);
 
 		expect(widgetCalls).toHaveLength(1);
-		expect(widgetCalls[0]?.[0]).toContain("tasks.run-3-2.widget.approval");
+		expect(widgetCalls[0]?.[0]).toContain("tasks.rpc.run-3-2.widget.approval");
 		expect(widgetCalls[0]?.[1]).toEqual(["[Task thinker step 2] Choose an option", "Allow once", "Block"]);
 		expect(widgetCalls[0]?.[2]).toEqual({ placement: "belowEditor" });
-		expect([...relayedKeys.widget]).toEqual([widgetCalls[0]?.[0]]);
+		expect([...trackedWidgetKeys]).toEqual([widgetCalls[0]?.[0]]);
 	});
 
-	it("does not relay child notify calls to the parent ui", () => {
+	it("does not emit out-of-band notifications for child notify requests", async () => {
 		const notifyCalls: Array<{ message: string; level?: string }> = [];
-		const parentUi: any = {
-			notify: (message: string, level?: string) => {
-				notifyCalls.push({ message, level });
-			},
-		};
-		const relayedKeys = { status: new Set<string>(), widget: new Set<string>() };
-		const workerUi = __test__.createWorkerUiContext(
-			parentUi,
-			{ agent: "implementer", step: 1, key: "run-notify:1" },
-			relayedKeys,
-		);
 
-		workerUi.notify("Bash sandbox active (mode=workspace-write)", "info");
+		await __test__.relayTaskExtensionUiRequest({
+			request: {
+				type: "extension_ui_request",
+				id: "req-notify",
+				method: "notify",
+				message: "Bash sandbox active (mode=workspace-write)",
+				notifyType: "info",
+			},
+			controller: { agent: "implementer", step: 1, key: "run-notify:1" },
+			parentUi: {
+				hasUI: true,
+				ui: {
+					notify: (message: string, level?: string) => {
+						notifyCalls.push({ message, level });
+					},
+				},
+			},
+			sendResponse: async () => {},
+		});
 
 		expect(notifyCalls).toEqual([]);
 	});
@@ -2455,10 +2756,440 @@ describe("task origin resolution", () => {
 	});
 });
 
+describe("task terminal backend configuration", () => {
+	it("parses disabled and explicit backend preferences", () => {
+		expect(__test__.parseTaskTerminalBackendPreference("disabled")).toEqual({ preference: "disabled" });
+		expect(__test__.parseTaskTerminalBackendPreference("wezterm")).toEqual({ preference: "wezterm" });
+		expect(__test__.parseTaskTerminalBackendPreference("bogus")).toEqual({
+			preference: "disabled",
+			unsupported: "bogus",
+		});
+	});
+
+	it("normalizes legacy wezterm metadata into generic terminal fields", () => {
+		const snapshot = __test__.normalizeChildSessionSnapshot({
+			v: 1,
+			runId: "run-1",
+			toolCallId: "tool-1",
+			mode: "single",
+			step: 1,
+			childSessionId: "child-1",
+			childSessionPath: "/tmp/child-1.jsonl",
+			effectiveContext: "fresh",
+			persist: true,
+			taskPreview: "task",
+			createdAt: "2024-01-01T00:00:00.000Z",
+			status: "succeeded",
+			weztermPaneId: "42",
+			weztermWorkspace: "pi-tasks",
+		});
+
+		expect(snapshot).toMatchObject({
+			terminalBackend: "wezterm",
+			terminalTargetId: "42",
+			terminalWorkspace: "pi-tasks",
+			weztermPaneId: "42",
+			weztermWorkspace: "pi-tasks",
+		});
+	});
+
+	it("preserves generic terminal metadata when already present", () => {
+		const snapshot = __test__.normalizeChildSessionSnapshot({
+			v: 1,
+			runId: "run-2",
+			toolCallId: "tool-2",
+			mode: "single",
+			step: 1,
+			childSessionId: "child-2",
+			childSessionPath: "/tmp/child-2.jsonl",
+			effectiveContext: "fresh",
+			persist: true,
+			taskPreview: "task",
+			createdAt: "2024-01-01T00:00:00.000Z",
+			status: "succeeded",
+			terminalBackend: "wezterm",
+			terminalTargetId: "77",
+			terminalWorkspace: "pi-tasks-alt",
+		});
+
+		expect(snapshot).toMatchObject({
+			terminalBackend: "wezterm",
+			terminalTargetId: "77",
+			terminalWorkspace: "pi-tasks-alt",
+			weztermPaneId: "77",
+			weztermWorkspace: "pi-tasks-alt",
+		});
+	});
+
+	it("does not attach workspace-only metadata without a canonical pane ID", () => {
+		const snapshot = __test__.normalizeChildSessionSnapshot({
+			v: 1,
+			runId: "run-3",
+			toolCallId: "tool-3",
+			mode: "single",
+			step: 1,
+			childSessionId: "child-3",
+			childSessionPath: "/tmp/child-3.jsonl",
+			effectiveContext: "fresh",
+			persist: true,
+			taskPreview: "task",
+			createdAt: "2024-01-01T00:00:00.000Z",
+			status: "succeeded",
+			terminalBackend: "wezterm",
+			terminalWorkspace: "pi-session-abc",
+		});
+
+		expect(snapshot).toMatchObject({
+			terminalBackend: undefined,
+			terminalTargetId: undefined,
+			terminalWorkspace: undefined,
+			weztermPaneId: undefined,
+			weztermWorkspace: undefined,
+		});
+		expect(getTaskTerminalAttachment(snapshot)).toBeUndefined();
+	});
+
+	it("enforces canonical pane ID boundaries and normalizes outer whitespace", () => {
+		expect(getTaskTerminalAttachment({ terminalBackend: "wezterm", terminalTargetId: "0" })).toBeUndefined();
+		expect(
+			getTaskTerminalAttachment({
+				terminalBackend: "wezterm",
+				terminalTargetId: String(Number.MAX_SAFE_INTEGER) + "0",
+			}),
+		).toBeUndefined();
+		expect(getTaskTerminalAttachment({ terminalBackend: "wezterm", terminalTargetId: " 42 " })).toEqual({
+			backend: "wezterm",
+			targetId: "42",
+		});
+		for (const targetId of ["4 2", "4\t2", "4\n2", "42 43", "01"]) {
+			expect(
+				getTaskTerminalAttachment({ terminalBackend: "wezterm", terminalTargetId: targetId }),
+			).toBeUndefined();
+		}
+		expect(
+			getTaskTerminalAttachment({
+				terminalBackend: "wezterm",
+				terminalTargetId: String(Number.MAX_SAFE_INTEGER),
+			}),
+		).toEqual({ backend: "wezterm", targetId: String(Number.MAX_SAFE_INTEGER) });
+	});
+
+	it("rejects invalid persisted generic and legacy pane IDs, preferring valid canonical generic metadata", () => {
+		expect(
+			getTaskTerminalAttachment({
+				terminalBackend: "wezterm",
+				terminalTargetId: "not-a-pane",
+				weztermPaneId: "also-invalid",
+			}),
+		).toBeUndefined();
+		expect(
+			getTaskTerminalAttachment({
+				terminalBackend: "wezterm",
+				terminalTargetId: "42",
+				terminalWorkspace: "canonical",
+				weztermPaneId: "43",
+				weztermWorkspace: "legacy",
+			}),
+		).toEqual({ backend: "wezterm", targetId: "42", workspace: "canonical" });
+		expect(
+			getTaskTerminalAttachment({
+				terminalBackend: "wezterm",
+				terminalTargetId: "bad",
+				weztermPaneId: "43",
+				weztermWorkspace: "legacy",
+			}),
+		).toEqual({ backend: "wezterm", targetId: "43", workspace: "legacy" });
+	});
+});
+
+describe("deterministic task terminal ownership", () => {
+	const previousBackend = process.env.PI_TASKS_TERMINAL_BACKEND;
+	const previousDomain = process.env.PI_TASKS_WEZTERM_DOMAIN;
+	const makeFixture = async (attachment?: Record<string, unknown>) => {
+		const fixtureId = `${Date.now()}-${Math.random()}`;
+		const childSessionId = `terminal-child-${fixtureId}`;
+		const childSessionPath = path.join(testAgentDir, "sessions", `${childSessionId}.jsonl`);
+		await fs.mkdir(path.dirname(childSessionPath), { recursive: true });
+		await fs.writeFile(
+			childSessionPath,
+			JSON.stringify({ type: "session", version: 3, id: childSessionId }) + "\n",
+		);
+		const run = makeRun(`terminal-run-${fixtureId}`, childSessionId);
+		run.sourceSessionFile = childSessionPath;
+		run.steps[0].snapshot.childSessionPath = childSessionPath;
+		Object.assign(run.steps[0].snapshot, attachment);
+		return { run, childSessionPath };
+	};
+	const ok = (stdout = "") => ({ ok: true, stdout, stderr: "", code: 0 });
+	const fail = (stderr = "failed") => ({ ok: false, stdout: "", stderr, code: 1 });
+
+	afterEach(() => {
+		setTaskTerminalCommandRunnerForTests(undefined);
+		if (previousBackend === undefined) delete process.env.PI_TASKS_TERMINAL_BACKEND;
+		else process.env.PI_TASKS_TERMINAL_BACKEND = previousBackend;
+		if (previousDomain === undefined) delete process.env.PI_TASKS_WEZTERM_DOMAIN;
+		else process.env.PI_TASKS_WEZTERM_DOMAIN = previousDomain;
+	});
+
+	it("malformed, multi-token, and non-numeric WezTerm spawn output fails", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const { run } = await makeFixture();
+		let mode: "ok" | "malformed" | "multi-token" | "non-numeric" | "nonzero" | "timeout" = "ok";
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (mode === "nonzero") return fail("spawn failed");
+			if (mode === "timeout") return { ok: false, stdout: "", stderr: "", code: null, error: "timed out" };
+			if (mode === "malformed") return ok("42 nope");
+			if (mode === "multi-token") return ok("42\n43");
+			if (mode === "non-numeric") return ok("pane-42");
+			return ok("42\n");
+		});
+		expect((await resolveTaskTerminalBackendById("wezterm")).backend).toBeDefined();
+		expect((await resolveConfiguredTaskTerminalBackend()).backend).toBeDefined();
+		const ctx = { sessionManager: { getSessionFile: () => undefined } };
+		expect((await __test__.attachTaskRunInTerminal(ctx, run)).ok).toBe(true);
+		for (const invalidMode of ["malformed", "multi-token", "non-numeric"] as const) {
+			mode = invalidMode;
+			expect((await __test__.attachTaskRunInTerminal(ctx, (await makeFixture()).run)).ok).toBe(false);
+		}
+		mode = "nonzero";
+		expect((await __test__.attachTaskRunInTerminal(ctx, (await makeFixture()).run)).ok).toBe(false);
+		mode = "timeout";
+		expect((await __test__.attachTaskRunInTerminal(ctx, (await makeFixture()).run)).ok).toBe(false);
+	});
+
+	it("focuses an existing live pane without spawning", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const { run } = await makeFixture({ terminalBackend: "wezterm", terminalTargetId: "9" });
+		const calls: string[][] = [];
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			calls.push(args);
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("list")) return ok('[{"pane_id":9}]');
+			return ok();
+		});
+		expect((await __test__.attachTaskRunInTerminal({ sessionManager: {} }, run)).ok).toBe(true);
+		expect(calls.some((args) => args.includes("spawn"))).toBe(false);
+	});
+
+	it("stale cancellation and stale headless refusal each leave spawn count unchanged", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		let launches = 0;
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("list")) return ok("[]");
+			launches++;
+			return ok("11");
+		});
+		const { run } = await makeFixture({ terminalBackend: "wezterm", terminalTargetId: "9" });
+		const ctx = (answer?: boolean) => ({
+			sessionManager: {},
+			hasUI: answer !== undefined,
+			ui: { confirm: async () => answer! },
+		});
+		expect((await __test__.attachTaskRunInTerminal(ctx(true), run)).ok).toBe(true);
+		expect(launches).toBe(1);
+		expect(
+			(
+				await __test__.attachTaskRunInTerminal(
+					ctx(false),
+					await makeFixture({ terminalBackend: "wezterm", terminalTargetId: "9" }).then((x) => x.run),
+				)
+			).ok,
+		).toBe(false);
+		expect(
+			(
+				await __test__.attachTaskRunInTerminal(
+					{ sessionManager: {} },
+					await makeFixture({ terminalBackend: "wezterm", terminalTargetId: "9" }).then((x) => x.run),
+				)
+			).ok,
+		).toBe(false);
+	});
+
+	it("refuses relaunch when pane probing is unknown", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		let launches = 0;
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("list")) return { ...fail("connection unavailable"), code: null };
+			launches++;
+			return ok("11");
+		});
+		const { run } = await makeFixture({ terminalBackend: "wezterm", terminalTargetId: "9" });
+		expect((await __test__.attachTaskRunInTerminal({ sessionManager: {} }, run)).ok).toBe(false);
+		expect(launches).toBe(0);
+	});
+
+	it("refuses non-persisted attachment without launching", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		let launches = 0;
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("spawn")) launches++;
+			if (args.includes("--version")) return ok("wezterm 1");
+			return ok("11");
+		});
+		const { run } = await makeFixture();
+		run.steps[0].snapshot.persist = false;
+		const result = await __test__.attachTaskRunInTerminal({ sessionManager: {} }, run);
+		expect(result.ok).toBe(false);
+		expect(launches).toBe(0);
+	});
+
+	it("refuses unknown probe in UI mode without confirming or launching", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		let launches = 0;
+		let confirms = 0;
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("list")) return { ...fail("connection unavailable"), code: null };
+			if (args.includes("spawn")) launches++;
+			return ok("11");
+		});
+		const { run } = await makeFixture({ terminalBackend: "wezterm", terminalTargetId: "9" });
+		const result = await __test__.attachTaskRunInTerminal(
+			{
+				hasUI: true,
+				ui: { confirm: async () => (confirms++, true) },
+				sessionManager: {},
+			},
+			run,
+		);
+		expect(result.ok).toBe(false);
+		expect(confirms).toBe(0);
+		expect(launches).toBe(0);
+	});
+
+	it("passes bounded timeouts to probe focus open and close", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const timeouts: number[] = [];
+		setTaskTerminalCommandRunnerForTests(async (_command, args, options) => {
+			if (options?.timeoutMs !== undefined) timeouts.push(options.timeoutMs);
+			if (args.includes("list")) return ok('[{"pane_id":9}]');
+			if (args.includes("spawn")) return ok("10");
+			return ok();
+		});
+		const { backend } = await resolveTaskTerminalBackendById("wezterm");
+		expect(backend).toBeDefined();
+		const attachment = { backend: "wezterm" as const, targetId: "9" };
+		await backend!.probe(attachment);
+		await backend!.focus(attachment);
+		await backend!.openSession({ sessionPath: "/tmp/task.jsonl", command: "pi", args: [] });
+		await backend!.close(attachment);
+		expect(timeouts.length).toBe(4);
+		expect(timeouts.every((timeout) => Number.isFinite(timeout) && timeout > 0 && timeout === 5_000)).toBe(true);
+	});
+
+	it("shares one launch promise for concurrent attachments resolving to the same step", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const { run } = await makeFixture();
+		let launches = 0;
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => (release = resolve));
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("spawn")) {
+				launches++;
+				await gate;
+			}
+			return ok("12");
+		});
+		const first = __test__.attachTaskRunInTerminal({ sessionManager: {} }, run);
+		const second = __test__.attachTaskRunInTerminal({ sessionManager: {} }, run, run.steps[0]);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		release();
+		await Promise.all([first, second]);
+		expect(launches).toBe(1);
+	});
+
+	it("persistence append failure launches once, attempts kill-pane, and retry does not duplicate when close rejects", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const { run, childSessionPath } = await makeFixture();
+		let launches = 0;
+		let closeAttempts = 0;
+		let rejectClose = true;
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("spawn")) {
+				launches++;
+				return ok("13");
+			}
+			if (args.includes("list")) return ok('[{"pane_id":13}]');
+			if (args.includes("kill-pane")) {
+				closeAttempts++;
+				if (rejectClose) throw new Error("close promise rejected");
+				return fail("close failed");
+			}
+			return ok();
+		});
+		const ctx = {
+			sessionManager: {
+				getSessionFile: () => childSessionPath,
+				appendCustomEntry: () => {
+					throw new Error("append failed");
+				},
+			},
+		};
+		const first = await __test__.attachTaskRunInTerminal(ctx, run);
+		expect(first.ok).toBe(false);
+		expect(launches).toBe(1);
+		expect(closeAttempts).toBe(1);
+		expect(first.message).toContain("close promise rejected");
+		const retry = await __test__.attachTaskRunInTerminal(ctx, run);
+		expect(retry.ok).toBe(true);
+		expect(launches).toBe(1);
+	});
+
+	it("holds successful launch ownership in memory when metadata cannot be persisted", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const { run } = await makeFixture();
+		let launches = 0;
+		let focuses = 0;
+		setTaskTerminalCommandRunnerForTests(async (_command, args) => {
+			if (args.includes("--version")) return ok("wezterm 1");
+			if (args.includes("spawn")) {
+				launches++;
+				return ok("14");
+			}
+			if (args.includes("list")) return ok('[{"pane_id":14}]');
+			if (args.includes("activate-pane")) focuses++;
+			return ok();
+		});
+		const ctx = { sessionManager: {} };
+		expect((await __test__.attachTaskRunInTerminal(ctx, run)).ok).toBe(true);
+		const retry = await __test__.attachTaskRunInTerminal(ctx, run);
+		expect(retry.ok).toBe(true);
+		expect(launches).toBe(1);
+		expect(focuses).toBe(1);
+	});
+
+	it("surfaces appendCustomEntry failure after launch", async () => {
+		process.env.PI_TASKS_TERMINAL_BACKEND = "wezterm";
+		const { run, childSessionPath } = await makeFixture();
+		setTaskTerminalCommandRunnerForTests(async (_command, args) =>
+			args.includes("--version") ? ok("wezterm 1") : ok("13"),
+		);
+		const result = await __test__.attachTaskRunInTerminal(
+			{
+				sessionManager: {
+					getSessionFile: () => childSessionPath,
+					appendCustomEntry: () => {
+						throw new Error("append failed");
+					},
+				},
+			},
+			run,
+		);
+		expect(result.ok).toBe(false);
+		expect(result.message).toContain("append failed");
+	});
+});
+
 describe("/tasks list formatting", () => {
 	it("includes attach guidance in list output", () => {
 		const output = __test__.formatTaskRunList("current", [makeRun("alpha-run", "alpha-child")]);
 		expect(output).toContain("/tasks attach <selector>");
+		expect(output).toContain("/tasks attach 1");
 	});
 
 	it("uses the same run summary lines for the persistent task widget", () => {
@@ -2496,6 +3227,52 @@ describe("/tasks selector precedence", () => {
 		expect(byChildSession.error).toBeUndefined();
 		expect(byChildSession.resolution?.matchedBy).toBe("childSession");
 		expect(byChildSession.resolution?.step?.snapshot.childSessionId).toBe("focus-child");
+	});
+});
+
+describe("tasks process termination escalation", () => {
+	class FakeProcess extends EventEmitter {
+		exitCode: number | null = null;
+		signalCode: NodeJS.Signals | null = null;
+		signals: string[] = [];
+
+		kill(signal: NodeJS.Signals): boolean {
+			this.signals.push(signal);
+			if (signal === "SIGKILL") this.signalCode = signal;
+			return true;
+		}
+	}
+
+	it("escalates to SIGKILL when the process stays running", async () => {
+		const proc = new FakeProcess();
+		__test__.terminateProcessWithEscalation(proc as any, { timeoutMs: 10 });
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(proc.signals).toEqual(["SIGTERM", "SIGKILL"]);
+	});
+
+	it("does not escalate once close is observed", async () => {
+		const proc = new FakeProcess();
+		const closure = __test__.terminateProcessWithEscalation(proc as any, { timeoutMs: 20 });
+		setTimeout(() => {
+			proc.exitCode = 0;
+			proc.emit("close", 0);
+		}, 5);
+		await closure;
+		expect(proc.signals).toEqual(["SIGTERM"]);
+	});
+
+	it("escalates from TERM to KILL and awaits process close", async () => {
+		const proc = new FakeProcess();
+		let resolved = false;
+		const closure = __test__.terminateProcessWithEscalation(proc as any, { timeoutMs: 5 }).then(() => {
+			resolved = true;
+		});
+		await new Promise((resolve) => setTimeout(resolve, 15));
+		expect(proc.signals).toEqual(["SIGTERM", "SIGKILL"]);
+		expect(resolved).toBe(false);
+		proc.emit("close", null, "SIGKILL");
+		await closure;
+		expect(resolved).toBe(true);
 	});
 });
 
@@ -2621,9 +3398,177 @@ describe("parallel cancellation", () => {
 	});
 });
 
+describe("tasks transport helpers", () => {
+	it("decodes split UTF-8 stderr and flushes an incomplete final sequence", () => {
+		let output = "";
+		const decoder = __test__.createUtf8StreamDecoder((text: string) => {
+			output += text;
+		});
+		const bytes = Buffer.from("A€");
+
+		decoder.write(bytes.subarray(0, 2));
+		decoder.write(bytes.subarray(2));
+		decoder.write(Buffer.from([0xe2, 0x82]));
+		decoder.flush();
+
+		expect(output).toBe("A€�");
+	});
+
+	it("maps natural nonzero exits and signals", () => {
+		expect(
+			__test__.mapTransportClose(7, null, {
+				aborted: false,
+				transportLabel: "Task process",
+			}),
+		).toEqual({ exitCode: 7 });
+		expect(
+			__test__.mapTransportClose(null, "SIGKILL", {
+				aborted: false,
+				transportLabel: "Task process",
+			}),
+		).toEqual({
+			exitCode: 1,
+			signalMessage: "Task process terminated by signal SIGKILL",
+		});
+	});
+
+	it("maps intentional numeric exit 143 to success", () => {
+		expect(
+			__test__.mapTransportClose(143, null, {
+				aborted: false,
+				intentionalExitCode: 143,
+				transportLabel: "Task RPC process",
+			}),
+		).toEqual({ exitCode: 0 });
+	});
+
+	it("maps intentional settlement termination and aborts", () => {
+		expect(
+			__test__.mapTransportClose(null, "SIGTERM", {
+				aborted: false,
+				intentionalSignal: "SIGTERM",
+				transportLabel: "Task RPC process",
+			}),
+		).toEqual({ exitCode: 0 });
+		expect(
+			__test__.mapTransportClose(null, "SIGTERM", {
+				aborted: true,
+				intentionalSignal: "SIGTERM",
+				transportLabel: "Task RPC process",
+			}),
+		).toEqual({ exitCode: 130 });
+	});
+});
+
+describe("tasks RPC completion coordination", () => {
+	function createCompletionHarness(delayMs = 10) {
+		const controller = {
+			isStreaming: false,
+			pendingSteeringCount: 0,
+			pendingFollowUpCount: 0,
+			pendingResponses: new Map<string, unknown>(),
+		};
+		let closed = false;
+		let terminateCount = 0;
+		const coordinator = __test__.createRpcCompletionCoordinator({
+			controller,
+			isClosed: () => closed,
+			terminate: () => {
+				terminateCount += 1;
+				closed = true;
+			},
+			delayMs,
+		});
+		return {
+			controller,
+			coordinator,
+			get terminateCount() {
+				return terminateCount;
+			},
+		};
+	}
+
+	it("ignores agent_end and agent_settled before agent_start", async () => {
+		const harness = createCompletionHarness();
+		harness.coordinator.onAgentEnd();
+		harness.coordinator.onAgentSettled();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(0);
+	});
+
+	it("waits for pending responses until cleanup reschedules completion", async () => {
+		const harness = createCompletionHarness();
+		(harness.controller as { pendingResponses: Map<string, unknown> }).pendingResponses = new Map([
+			["response", {}],
+		]);
+		harness.coordinator.onAgentStart();
+		harness.coordinator.onAgentEnd();
+		harness.coordinator.onAgentSettled();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(0);
+		(harness.controller as { pendingResponses: Map<string, unknown> }).pendingResponses.clear();
+		harness.coordinator.onQueueUpdate(0, 0);
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(1);
+	});
+
+	it("waits for agent_settled after agent_end", async () => {
+		const harness = createCompletionHarness();
+		harness.coordinator.onAgentStart();
+		harness.coordinator.onAgentEnd();
+
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(0);
+
+		harness.coordinator.onAgentSettled();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(1);
+	});
+
+	it("resets settlement authorization on every agent_start", async () => {
+		const harness = createCompletionHarness();
+		harness.coordinator.onAgentStart();
+		harness.coordinator.onAgentSettled();
+		harness.controller.isStreaming = true;
+		harness.coordinator.onAgentStart();
+		harness.controller.isStreaming = false;
+		harness.coordinator.onQueueUpdate(0, 0);
+		harness.coordinator.onAgentEnd();
+
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(0);
+
+		harness.coordinator.onAgentSettled();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(1);
+	});
+
+	it("waits for queued continuation and its settlement", async () => {
+		const harness = createCompletionHarness();
+		harness.coordinator.onAgentEnd();
+		harness.coordinator.onQueueUpdate(0, 1);
+
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(0);
+
+		harness.controller.isStreaming = true;
+		harness.coordinator.onAgentStart();
+		harness.coordinator.onQueueUpdate(0, 0);
+		harness.controller.isStreaming = false;
+		harness.coordinator.onAgentEnd();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(0);
+
+		harness.coordinator.onAgentSettled();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(harness.terminateCount).toBe(1);
+	});
+});
+
 test("tasks completions list all accepted subcommands", () => {
 	expect(__test__.TASKS_COMPLETIONS.map((s: { value: string }) => s.value)).toEqual([
 		"list",
+		"show",
 		"view",
 		"open",
 		"attach",
@@ -2680,76 +3625,39 @@ describe("task output capture", () => {
 		for (let i = 0; i < 600; i++) expect(__test__.pushBoundedMessage(messages, { i })).toBe(i < 512);
 		expect(messages.length).toBe(512);
 	});
-});
 
-describe("live task controller access", () => {
-	function createFakeSession(): any {
-		let listener: ((event: unknown) => void) | undefined;
-		return {
-			messages: [],
-			isStreaming: false,
-			subscribe: (l: (event: unknown) => void) => {
-				listener = l;
-				return () => {
-					listener = undefined;
-				};
-			},
+	it("caps terminal output across sustained UTF-8 chunks", () => {
+		const stdout = taskTerminalTest.capTaskTerminalOutput("🙂漢".repeat(100_000));
+		const stderr = taskTerminalTest.capTaskTerminalOutput("é".repeat(100_000));
+		expect(Buffer.byteLength(stdout)).toBeLessThanOrEqual(262_200);
+		expect(stderr).toContain("é");
+		expect(stdout).not.toContain("�");
+		expect(stderr).not.toContain("�");
+		expect(stdout).toContain("[command output truncated]");
+	});
+
+	it("signals event-line overflow once and ignores later chunks", () => {
+		const accumulator = { buffer: "", overflowed: false, maxBytes: 8 };
+		let failure = "";
+		let terminationCount = 0;
+		const onOverflow = () => {
+			failure = "event overflow";
+			terminationCount++;
 		};
-	}
 
-	async function withLiveController(run: any, status: "running" | "completed") {
-		const live = await import("./task-live.js");
-		const runs = await import("./task-runs.js");
-		const key = runs.makeTaskRunStepKey(run.runId, run.steps[0].step);
-		const controller = live.registerAgentSessionController({
-			key,
-			toolCallId: run.toolCallId,
-			runId: run.runId,
-			step: run.steps[0].step,
-			childSessionId: run.steps[0].snapshot.childSessionId,
-			childSessionPath: run.steps[0].snapshot.childSessionPath,
-			task: "task",
-			agent: "agent",
-			session: createFakeSession(),
-			close: async () => {},
-		});
-		controller.status = status;
-		return { live, key, controller };
-	}
-
-	afterEach(async () => {
-		const live = await import("./task-live.js");
-		live.clearLiveTaskControllers();
+		expect(__test__.consumeBoundedEventChunk(accumulator, "123456789", onOverflow)).toEqual([]);
+		expect(__test__.consumeBoundedEventChunk(accumulator, '{"ok":true}\n', onOverflow)).toEqual([]);
+		expect(terminationCount).toBe(1);
+		expect(failure).toBe("event overflow");
 	});
 
-	it("resolveLiveTaskControllerForRun only returns a running controller", async () => {
-		const runningRun = makeRun("running-run", "running-child", "running");
-		await withLiveController(runningRun, "running");
-		expect(__test__.resolveLiveTaskControllerForRun(runningRun).controller?.status).toBe("running");
+	it("returns complete event lines without invoking the failure callback", () => {
+		const accumulator = { buffer: "", overflowed: false, maxBytes: 32 };
+		let closeCount = 0;
+		const onOverflow = () => closeCount++;
 
-		const finishedRun = makeRun("finished-run", "finished-child", "running");
-		await withLiveController(finishedRun, "completed");
-		expect(__test__.resolveLiveTaskControllerForRun(finishedRun).controller).toBeUndefined();
-	});
-
-	it("describeTaskRunAccess offers attach and steer only while a controller is actually running", async () => {
-		const runningRun = makeRun("running-run-2", "running-child-2", "running");
-		await withLiveController(runningRun, "running");
-		const runningAccess = __test__.describeTaskRunAccess(runningRun);
-		expect(runningAccess).toContain("attach");
-		expect(runningAccess).toContain("steer");
-
-		const finishedRun = makeRun("finished-run-2", "finished-child-2", "running");
-		await withLiveController(finishedRun, "completed");
-		const finishedAccess = __test__.describeTaskRunAccess(finishedRun);
-		expect(finishedAccess).not.toContain("attach");
-		expect(finishedAccess).not.toContain("steer");
-	});
-
-	it("describeTaskRunAccess does not offer attach for a persisted step with no live controller", () => {
-		const completedRun = makeRun("completed-run", "completed-child", "succeeded");
-		const access = __test__.describeTaskRunAccess(completedRun);
-		expect(access).toContain("open");
-		expect(access).not.toContain("attach");
+		expect(__test__.consumeBoundedEventChunk(accumulator, '{"ok":1}', onOverflow)).toEqual([]);
+		expect(__test__.consumeBoundedEventChunk(accumulator, "\nnext\n", onOverflow)).toEqual(['{"ok":1}', "next"]);
+		expect(closeCount).toBe(0);
 	});
 });

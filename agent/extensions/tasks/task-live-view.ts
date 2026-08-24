@@ -2,19 +2,24 @@ import {
 	AssistantMessageComponent,
 	ExtensionInputComponent,
 	ToolExecutionComponent,
-	type AgentSessionEvent,
 	type ExtensionContext,
 	type ExtensionUIContext,
 	UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Text, type Component, type Focusable } from "@earendil-works/pi-tui";
-import type { LiveTaskController } from "./task-live.js";
+import type { Message } from "@earendil-works/pi-ai";
+import {
+	liveTaskSessionDirectory,
+	sendLiveTaskRpcCommand,
+	readLiveTaskMessages,
+	type LiveTaskController,
+} from "./task-live.js";
 
 /**
  * The /tasks attach live view: a real component (built from the same message/tool-execution
- * rendering pieces interactive mode itself uses) subscribed directly to a running worker's
- * AgentSession -- no polling, no wire protocol. Typing a line and pressing Enter calls
- * controller.session.steer(text) directly; Escape detaches without touching the worker.
+ * rendering pieces interactive mode itself uses) subscribed to a running worker's event stream
+ * over the RPC wire. Typing a line and pressing Enter steers the worker through the same
+ * controller every other consumer uses; Escape detaches without touching the worker.
  */
 
 /**
@@ -44,10 +49,15 @@ class TaskLiveViewComponent extends Container implements Focusable, Component {
 	private readonly unsubscribe: () => void;
 	private disposed = false;
 
+	/** Wire events are untyped JSON; this is the shape the tool renderer accepts. */
+	private static asToolResultPatch(value: unknown): Parameters<ToolExecutionComponent["updateResult"]>[0] {
+		return (value ?? {}) as Parameters<ToolExecutionComponent["updateResult"]>[0];
+	}
+
 	constructor(
 		private readonly controller: LiveTaskController,
 		private readonly tui: LiveViewTui,
-		private readonly cwd: string,
+		initialMessages: Message[],
 		private readonly done: (result: { detachReason: "detached" | "exited" }) => void,
 	) {
 		super();
@@ -55,8 +65,8 @@ class TaskLiveViewComponent extends Container implements Focusable, Component {
 		this.addChild(this.chat);
 		this.inputRow = this.createInputRow();
 		this.addChild(this.inputRow);
-		this.replayHistory();
-		this.unsubscribe = controller.session.subscribe((event) => this.handleEvent(event));
+		this.replayHistory(initialMessages);
+		this.unsubscribe = controller.events.subscribe((event) => this.handleEvent(event));
 	}
 
 	private createInputRow(): ExtensionInputComponent {
@@ -71,7 +81,11 @@ class TaskLiveViewComponent extends Container implements Focusable, Component {
 
 	private handleSubmit(value: string): void {
 		const text = value.trim();
-		if (text) void this.controller.session.steer(text);
+		if (text) {
+			void sendLiveTaskRpcCommand(this.controller, { type: "steer", message: text }, { timeout: 10_000 }).catch(
+				() => {},
+			);
+		}
 		this.removeChild(this.inputRow);
 		this.inputRow = this.createInputRow();
 		this.inputRow.focused = true;
@@ -79,27 +93,38 @@ class TaskLiveViewComponent extends Container implements Focusable, Component {
 		this.tui.requestRender();
 	}
 
-	private replayHistory(): void {
-		for (const message of this.controller.session.messages) {
+	private replayHistory(messages: Message[]): void {
+		for (const message of messages) {
 			if (message.role === "user")
 				this.chat.addChild(new UserMessageComponent(extractMessageText(message.content)));
 			else if (message.role === "assistant") this.chat.addChild(new AssistantMessageComponent(message));
+			else if (message.role === "toolResult") continue;
 		}
 	}
 
-	private handleEvent(event: AgentSessionEvent): void {
+	private handleEvent(raw: unknown): void {
+		const event = raw as {
+			type?: string;
+			message?: Message;
+			toolCallId?: string;
+			toolName?: string;
+			args?: unknown;
+			partialResult?: unknown;
+			result?: unknown;
+			isError?: boolean;
+		};
 		switch (event.type) {
 			case "message_start":
-				if (event.message.role === "assistant") {
+				if (event.message?.role === "assistant") {
 					this.streamingComponent = new AssistantMessageComponent();
 					this.chat.addChild(this.streamingComponent);
 					this.streamingComponent.updateContent(event.message);
-				} else if (event.message.role === "user") {
+				} else if (event.message?.role === "user") {
 					this.chat.addChild(new UserMessageComponent(extractMessageText(event.message.content)));
 				}
 				break;
 			case "message_update":
-				if (this.streamingComponent && event.message.role === "assistant") {
+				if (this.streamingComponent && event.message?.role === "assistant") {
 					this.streamingComponent.updateContent(event.message);
 					for (const content of event.message.content) {
 						if (content.type !== "toolCall") continue;
@@ -113,7 +138,7 @@ class TaskLiveViewComponent extends Container implements Focusable, Component {
 								{},
 								undefined,
 								this.tui,
-								this.cwd,
+								liveTaskSessionDirectory(this.controller),
 							);
 							this.chat.addChild(component);
 							this.pendingTools.set(content.id, component);
@@ -122,37 +147,48 @@ class TaskLiveViewComponent extends Container implements Focusable, Component {
 				}
 				break;
 			case "message_end":
-				if (event.message.role === "assistant") {
+				if (event.message?.role === "assistant") {
 					this.streamingComponent?.updateContent(event.message);
 					this.streamingComponent = undefined;
 					for (const [, component] of this.pendingTools) component.setArgsComplete();
 				}
 				break;
 			case "tool_execution_start": {
-				let component = this.pendingTools.get(event.toolCallId);
-				if (!component) {
+				let component = this.pendingTools.get(event.toolCallId ?? "");
+				if (!component && event.toolName) {
 					component = new ToolExecutionComponent(
 						event.toolName,
-						event.toolCallId,
+						event.toolCallId ?? "",
 						event.args,
 						{},
 						undefined,
 						this.tui,
-						this.cwd,
+						liveTaskSessionDirectory(this.controller),
 					);
 					this.chat.addChild(component);
-					this.pendingTools.set(event.toolCallId, component);
+					this.pendingTools.set(event.toolCallId ?? "", component);
 				}
-				component.markExecutionStarted();
+				component?.markExecutionStarted();
 				break;
 			}
 			case "tool_execution_update": {
-				this.pendingTools.get(event.toolCallId)?.updateResult({ ...event.partialResult, isError: false }, true);
+				this.pendingTools
+					.get(event.toolCallId ?? "")
+					?.updateResult(
+						{ ...TaskLiveViewComponent.asToolResultPatch(event.partialResult), isError: false },
+						true,
+					);
 				break;
 			}
 			case "tool_execution_end": {
-				this.pendingTools.get(event.toolCallId)?.updateResult({ ...event.result, isError: event.isError });
-				this.pendingTools.delete(event.toolCallId);
+				const component = this.pendingTools.get(event.toolCallId ?? "");
+				if (component) {
+					component.updateResult({
+						...TaskLiveViewComponent.asToolResultPatch(event.result),
+						isError: event.isError === true,
+					});
+					this.pendingTools.delete(event.toolCallId ?? "");
+				}
 				break;
 			}
 			case "agent_settled":
@@ -201,9 +237,9 @@ export async function attachToLiveTaskController(
 	if (!ctx.hasUI) {
 		return { ok: false, level: "warning", message: "Attach requires an interactive terminal." };
 	}
+	const initialMessages = await readLiveTaskMessages(controller);
 	const result = await ctx.ui.custom<{ detachReason: "detached" | "exited" }>(
-		(tui, _theme, _keybindings, done) =>
-			new TaskLiveViewComponent(controller, tui, controller.session.sessionManager.getCwd(), done),
+		(tui, _theme, _keybindings, done) => new TaskLiveViewComponent(controller, tui, initialMessages, done),
 		{ overlay: true },
 	);
 	return {

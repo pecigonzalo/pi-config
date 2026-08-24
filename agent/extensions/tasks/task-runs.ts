@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { ContextMode } from "./agents.js";
+import { getTaskTerminalAttachment, isTaskTerminalBackendId, type TaskTerminalBackendId } from "./task-terminal.js";
 
 export type TaskExecutionMode = "single" | "parallel" | "chain";
 export type ChildSessionStatus = "created" | "succeeded" | "failed" | "aborted";
@@ -26,6 +27,11 @@ export interface ChildSessionSnapshot extends TaskOriginSnapshot {
 	childSessionName?: string;
 	parentSessionId?: string;
 	parentSessionPath?: string;
+	terminalBackend?: TaskTerminalBackendId;
+	terminalTargetId?: string;
+	terminalWorkspace?: string;
+	weztermPaneId?: string;
+	weztermWorkspace?: string;
 	effectiveContext: ContextMode;
 	persist: boolean;
 	agent?: string;
@@ -183,6 +189,13 @@ export function normalizeChildSessionSnapshot(
 
 	const status = isChildSessionStatus(data.status) ? data.status : "created";
 	const contextMode = isContextMode(data.effectiveContext) ? data.effectiveContext : "fresh";
+	const attachment = getTaskTerminalAttachment({
+		terminalBackend: isTaskTerminalBackendId(data.terminalBackend) ? data.terminalBackend : undefined,
+		terminalTargetId: typeof data.terminalTargetId === "string" ? data.terminalTargetId : undefined,
+		terminalWorkspace: typeof data.terminalWorkspace === "string" ? data.terminalWorkspace : undefined,
+		weztermPaneId: typeof data.weztermPaneId === "string" ? data.weztermPaneId : undefined,
+		weztermWorkspace: typeof data.weztermWorkspace === "string" ? data.weztermWorkspace : undefined,
+	});
 
 	return {
 		v: typeof data.v === "number" && Number.isFinite(data.v) ? data.v : metadataVersion,
@@ -198,6 +211,11 @@ export function normalizeChildSessionSnapshot(
 		originEntryId: typeof data.originEntryId === "string" ? data.originEntryId : undefined,
 		originUserEntryId: typeof data.originUserEntryId === "string" ? data.originUserEntryId : undefined,
 		originPreview: typeof data.originPreview === "string" ? data.originPreview : undefined,
+		terminalBackend: attachment?.backend,
+		terminalTargetId: attachment?.targetId,
+		terminalWorkspace: attachment?.workspace,
+		weztermPaneId: attachment?.backend === "wezterm" ? attachment.targetId : undefined,
+		weztermWorkspace: attachment?.backend === "wezterm" ? attachment.workspace : undefined,
 		effectiveContext: contextMode,
 		persist,
 		agent: typeof data.agent === "string" ? data.agent : undefined,

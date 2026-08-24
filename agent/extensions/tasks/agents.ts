@@ -75,7 +75,7 @@ export interface EffortConfig {
 	description?: string;
 	model: string;
 	provider?: string;
-	thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	source: ConfigSource;
 	filePath: string;
 }

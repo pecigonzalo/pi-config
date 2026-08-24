@@ -3,8 +3,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { __test__ } from "./task.js";
-import { clearLiveTaskControllers, registerAgentSessionController } from "./task-live.js";
-import { makeTaskRunStepKey } from "./task-runs.js";
 import { setTaskSessionRootForTests } from "./task-session-validation.js";
 
 const session = (file: string, id: string) => ({
@@ -56,7 +54,6 @@ describe("task session replacement safety", () => {
 
 	afterEach(() => {
 		setTaskSessionRootForTests(undefined);
-		clearLiveTaskControllers();
 	});
 	it("waits before switching and only uses the verified replacement callback context", async () => {
 		const file = path.join(sessionRoot, `task-replacement-${Date.now()}-${Math.random()}.jsonl`);
@@ -151,13 +148,7 @@ describe("task session replacement safety", () => {
 		expect(calls).toEqual(["wait", "navigate"]);
 	});
 
-	it("shows the task overlay without waiting for the main session to be idle", async () => {
-		// Unlike switchSession/navigateTree (structural session-replacement operations that
-		// genuinely need the main turn to settle first), showing the overlay is read-only and
-		// must work while a task step is actively running -- that's the whole point of being
-		// able to inspect a live task. Waiting here would silently hang until the outer task
-		// tool call returns. The risky action *within* the overlay (opening a persisted session)
-		// still waits for idle on its own, independently, inside tryOpenTaskSession.
+	it("waits before opening the task overlay", async () => {
 		const calls: string[] = [];
 		const ctx: any = {
 			hasUI: true,
@@ -172,7 +163,7 @@ describe("task session replacement safety", () => {
 			},
 		};
 		await __test__.openTaskViewerOverlay(ctx, "current", runFor("source.jsonl", "child") as any);
-		expect(calls).toEqual(["overlay"]);
+		expect(calls).toEqual(["wait", "overlay"]);
 	});
 
 	it("does not restore stale widget chrome after replacement, but restores cancellation and errors", async () => {
@@ -206,61 +197,5 @@ describe("task session replacement safety", () => {
 			}),
 		).rejects.toThrow("boom");
 		expect(calls.filter((call) => call.endsWith(":set")).length).toBe(restoredBeforeError + 1);
-	});
-
-	it("routes opening a live worker to the attach view instead of replacing the current session", async () => {
-		// A still-running worker must never be opened as a session replace -- that would
-		// dispose the delegating parent's own session. Opening it should route to the live
-		// attach view instead, and only a finished worker goes down the replacement path.
-		const file = path.join(sessionRoot, `live-attach-${Date.now()}-${Math.random()}.jsonl`);
-		fs.writeFileSync(file, JSON.stringify({ type: "session", id: "child" }) + "\n");
-
-		const fakeSession: any = {
-			subscribe: () => () => {},
-			isStreaming: false,
-			messages: [],
-			sessionManager: {
-				getSessionId: () => "child",
-				getCwd: () => sessionRoot,
-				getSessionFile: () => file,
-			},
-		};
-		const controller = registerAgentSessionController({
-			key: makeTaskRunStepKey("run-1", 1),
-			toolCallId: "tool-1",
-			runId: "run-1",
-			step: 1,
-			childSessionId: "child",
-			childSessionPath: file,
-			task: "task",
-			agent: "reviewer",
-			session: fakeSession,
-			close: async () => {},
-		});
-		try {
-			const calls: string[] = [];
-			const ctx: any = {
-				hasUI: true,
-				ui: {
-					custom: async () => {
-						calls.push("custom");
-						return { detachReason: "detached" as const };
-					},
-					notify: () => {},
-				},
-				switchSession: async () => {
-					calls.push("switch");
-					throw new Error("switchSession must not run for a live worker");
-				},
-			};
-			const result = await __test__.openTaskRunSession(ctx, runFor(file, "child") as any);
-			expect(calls).toEqual(["custom"]);
-			expect(result.ok).toBe(true);
-			expect(result.message).toContain("Detached");
-		} finally {
-			await controller.close();
-			fs.unlinkSync(file);
-			clearLiveTaskControllers();
-		}
 	});
 });
