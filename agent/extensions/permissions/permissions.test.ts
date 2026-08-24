@@ -1768,6 +1768,30 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 	});
 
+	it("gates background_run identically to bash for a blocked pattern", async () => {
+		const command = "rm -rf /blocked-by-rule";
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			rules: [{ tool: "bash", match: "^rm\\b", action: "block", reason: "no rm allowed" }],
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (value: string) => value,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const bashResult = await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
+			const backgroundResult = await toolCall({ toolName: "background_run", input: { command } }, harness.ctx);
+			expect(bashResult).toEqual({ block: true, reason: "no rm allowed" });
+			expect(backgroundResult).toEqual(bashResult);
+		} finally {
+			await harness.restore();
+		}
+	});
+
 	it("keeps a dangerous final line visible in full command and exact approval target sections", async () => {
 		const approvalTitles: string[] = [];
 		const finalLine = "rm -rf /dangerous-final-line";
