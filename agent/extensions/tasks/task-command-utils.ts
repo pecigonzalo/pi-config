@@ -3,7 +3,7 @@ import * as path from "node:path";
 const TASK_SELECTOR_CANDIDATE_LIMIT = 8;
 
 export type TasksScope = "current";
-export type TasksAction = "list" | "show" | "open" | "parent" | "steer" | "attach" | "origin" | "view" | "toggle";
+export type TasksAction = "list" | "open" | "parent" | "steer" | "attach" | "origin" | "view" | "toggle";
 
 export interface ParsedTasksCommand {
 	scope: TasksScope;
@@ -83,11 +83,7 @@ export function parseTasksCommand(args: string): ParsedTasksCommand {
 	}
 
 	if (
-		(lower[0] === "show" ||
-			lower[0] === "open" ||
-			lower[0] === "attach" ||
-			lower[0] === "origin" ||
-			lower[0] === "view") &&
+		(lower[0] === "open" || lower[0] === "attach" || lower[0] === "origin" || lower[0] === "view") &&
 		tokens.length >= 2
 	) {
 		return {

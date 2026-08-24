@@ -3,7 +3,6 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { ContextMode } from "./agents.js";
-import { getTaskTerminalAttachment, isTaskTerminalBackendId, type TaskTerminalBackendId } from "./task-terminal.js";
 
 export type TaskExecutionMode = "single" | "parallel" | "chain";
 export type ChildSessionStatus = "created" | "succeeded" | "failed" | "aborted";
@@ -27,11 +26,6 @@ export interface ChildSessionSnapshot extends TaskOriginSnapshot {
 	childSessionName?: string;
 	parentSessionId?: string;
 	parentSessionPath?: string;
-	terminalBackend?: TaskTerminalBackendId;
-	terminalTargetId?: string;
-	terminalWorkspace?: string;
-	weztermPaneId?: string;
-	weztermWorkspace?: string;
 	effectiveContext: ContextMode;
 	persist: boolean;
 	agent?: string;
@@ -189,13 +183,6 @@ export function normalizeChildSessionSnapshot(
 
 	const status = isChildSessionStatus(data.status) ? data.status : "created";
 	const contextMode = isContextMode(data.effectiveContext) ? data.effectiveContext : "fresh";
-	const attachment = getTaskTerminalAttachment({
-		terminalBackend: isTaskTerminalBackendId(data.terminalBackend) ? data.terminalBackend : undefined,
-		terminalTargetId: typeof data.terminalTargetId === "string" ? data.terminalTargetId : undefined,
-		terminalWorkspace: typeof data.terminalWorkspace === "string" ? data.terminalWorkspace : undefined,
-		weztermPaneId: typeof data.weztermPaneId === "string" ? data.weztermPaneId : undefined,
-		weztermWorkspace: typeof data.weztermWorkspace === "string" ? data.weztermWorkspace : undefined,
-	});
 
 	return {
 		v: typeof data.v === "number" && Number.isFinite(data.v) ? data.v : metadataVersion,
@@ -211,11 +198,6 @@ export function normalizeChildSessionSnapshot(
 		originEntryId: typeof data.originEntryId === "string" ? data.originEntryId : undefined,
 		originUserEntryId: typeof data.originUserEntryId === "string" ? data.originUserEntryId : undefined,
 		originPreview: typeof data.originPreview === "string" ? data.originPreview : undefined,
-		terminalBackend: attachment?.backend,
-		terminalTargetId: attachment?.targetId,
-		terminalWorkspace: attachment?.workspace,
-		weztermPaneId: attachment?.backend === "wezterm" ? attachment.targetId : undefined,
-		weztermWorkspace: attachment?.backend === "wezterm" ? attachment.workspace : undefined,
 		effectiveContext: contextMode,
 		persist,
 		agent: typeof data.agent === "string" ? data.agent : undefined,
@@ -296,29 +278,6 @@ export function formatTimestampCompact(value: string): string {
 		.toISOString()
 		.replace("T", " ")
 		.replace(/\.\d{3}Z$/, "Z");
-}
-
-async function listSessionFiles(rootDir: string): Promise<string[]> {
-	const files: string[] = [];
-	let currentLayer: string[] = [rootDir];
-	while (currentLayer.length > 0) {
-		const nextLayer: string[] = [];
-		for (const dir of currentLayer) {
-			let entries: fs.Dirent[];
-			try {
-				entries = await fs.promises.readdir(dir, { withFileTypes: true });
-			} catch {
-				continue;
-			}
-			for (const entry of entries) {
-				const fullPath = path.join(dir, entry.name);
-				if (entry.isDirectory()) nextLayer.push(fullPath);
-				else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(fullPath);
-			}
-		}
-		currentLayer = nextLayer;
-	}
-	return files;
 }
 
 async function collectTaskMetadataRecordsFromSessionFile(
@@ -483,31 +442,6 @@ export function buildTaskRunViews(records: TaskChildSessionRecord[], liveStepKey
 		if (updatedDiff !== 0) return updatedDiff;
 		return right.latestSourceOrder - left.latestSourceOrder;
 	});
-}
-
-export async function reconstructRecentTaskRuns(options: {
-	rootDir: string;
-	maxConcurrency: number;
-	customType: string;
-	metadataVersion: number;
-	mapWithConcurrencyLimit: <T, U>(
-		items: readonly T[],
-		concurrency: number,
-		fn: (item: T, index: number) => Promise<U>,
-	) => Promise<U[]>;
-}): Promise<TaskRunView[]> {
-	if (!fs.existsSync(options.rootDir)) return [];
-	const sessionFiles = await listSessionFiles(options.rootDir);
-	const fileRecords = await options.mapWithConcurrencyLimit<string, TaskChildSessionRecord[]>(
-		sessionFiles,
-		options.maxConcurrency,
-		async (sessionFile) => {
-			return collectTaskMetadataRecordsFromSessionFile(sessionFile, options.customType, options.metadataVersion);
-		},
-	);
-	const records = fileRecords.flat();
-	const runs = buildTaskRunViews(records, new Set<string>());
-	return runs.filter((run) => run.persistedStepCount > 0);
 }
 
 export function reconstructCurrentTaskRuns(options: {
