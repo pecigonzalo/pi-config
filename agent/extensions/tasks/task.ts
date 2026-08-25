@@ -4787,175 +4787,185 @@ export default function (pi: ExtensionAPI) {
 		description: `Inspect persisted task child sessions. Usage: ${TASKS_COMMAND_USAGE}`,
 		getArgumentCompletions: (prefix: string) => TASKS_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
-			const parsed = parseTasksCommand(args);
-			// Only structural session-replacement commands wait for the main session to settle
-			// here. `open` deliberately does not: a still-running step attaches to the live
-			// worker instead (which must work *while* the task runs), and only the finished-
-			// session-replace branch waits for idle on its own, inside tryOpenTaskSession.
-			if (parsed.action === "parent" || parsed.action === "origin") {
-				await ctx.waitForIdle();
-			}
-			if (parsed.error) {
-				ctx.ui.notify(`${parsed.error}. Usage: ${TASKS_COMMAND_USAGE}`, "error");
-				return;
-			}
-
-			if (parsed.action === "toggle") {
-				if (!ctx.hasUI) {
-					ctx.ui.notify("Task widget toggle is only available with UI.", "warning");
+			// Surface any thrown command error through the real UI: pi's generic
+			// extension-error path is easy to miss during active streaming.
+			try {
+				const parsed = parseTasksCommand(args);
+				// Only structural session-replacement commands wait for the main session to settle
+				// here. `open` deliberately does not: a still-running step attaches to the live
+				// worker instead (which must work *while* the task runs), and only the finished-
+				// session-replace branch waits for idle on its own, inside tryOpenTaskSession.
+				if (parsed.action === "parent" || parsed.action === "origin") {
+					await ctx.waitForIdle();
+				}
+				if (parsed.error) {
+					ctx.ui.notify(`${parsed.error}. Usage: ${TASKS_COMMAND_USAGE}`, "error");
 					return;
 				}
-				const nextEnabled = !isTaskWidgetEnabled(ctx);
-				if (!setTaskWidgetEnabled(ctx, nextEnabled)) {
-					ctx.ui.notify("Could not resolve the current session identity for /tasks toggle.", "error");
-					return;
-				}
-				syncTaskUiChrome(ctx);
-				ctx.ui.notify(
-					nextEnabled ? "Tasks widget enabled for this session." : "Tasks widget hidden for this session.",
-					"info",
-				);
-				return;
-			}
 
-			if (parsed.action === "parent") {
-				const currentSessionFile = ctx.sessionManager.getSessionFile?.();
-				if (!currentSessionFile) {
+				if (parsed.action === "toggle") {
+					if (!ctx.hasUI) {
+						ctx.ui.notify("Task widget toggle is only available with UI.", "warning");
+						return;
+					}
+					const nextEnabled = !isTaskWidgetEnabled(ctx);
+					if (!setTaskWidgetEnabled(ctx, nextEnabled)) {
+						ctx.ui.notify("Could not resolve the current session identity for /tasks toggle.", "error");
+						return;
+					}
+					syncTaskUiChrome(ctx);
 					ctx.ui.notify(
-						"Current session is not persisted. No parent session can be resolved automatically (detached or non-persisted session).",
-						"error",
+						nextEnabled
+							? "Tasks widget enabled for this session."
+							: "Tasks widget hidden for this session.",
+						"info",
 					);
 					return;
 				}
 
-				const parentResolution = await resolveParentSessionForCurrentSession(
-					currentSessionFile,
-					ctx.sessionManager.getBranch(),
-				);
-				if (!parentResolution.resolved) {
-					const baseMessage = parentResolution.error ?? "Failed to resolve parent session.";
-					const guidance = parentResolution.noParent
-						? ""
-						: '\nIf you know the parent session file, open it via /resume or run: pi --session "<parent-session-file>"';
-					ctx.ui.notify(`${baseMessage}${guidance}`, "error");
-					return;
-				}
+				if (parsed.action === "parent") {
+					const currentSessionFile = ctx.sessionManager.getSessionFile?.();
+					if (!currentSessionFile) {
+						ctx.ui.notify(
+							"Current session is not persisted. No parent session can be resolved automatically (detached or non-persisted session).",
+							"error",
+						);
+						return;
+					}
 
-				const parentSessionPath = parentResolution.resolved.parentSessionPath;
-				const normalizedCurrentSessionPath = normalizeSessionPathForComparison(currentSessionFile);
-				const normalizedParentSessionPath = normalizeSessionPathForComparison(parentSessionPath);
+					const parentResolution = await resolveParentSessionForCurrentSession(
+						currentSessionFile,
+						ctx.sessionManager.getBranch(),
+					);
+					if (!parentResolution.resolved) {
+						const baseMessage = parentResolution.error ?? "Failed to resolve parent session.";
+						const guidance = parentResolution.noParent
+							? ""
+							: '\nIf you know the parent session file, open it via /resume or run: pi --session "<parent-session-file>"';
+						ctx.ui.notify(`${baseMessage}${guidance}`, "error");
+						return;
+					}
 
-				if (normalizedParentSessionPath === normalizedCurrentSessionPath) {
+					const parentSessionPath = parentResolution.resolved.parentSessionPath;
+					const normalizedCurrentSessionPath = normalizeSessionPathForComparison(currentSessionFile);
+					const normalizedParentSessionPath = normalizeSessionPathForComparison(parentSessionPath);
+
+					if (normalizedParentSessionPath === normalizedCurrentSessionPath) {
+						ctx.ui.notify(
+							"Resolved parent session points to the current session. Refusing to open the same session file.",
+							"error",
+						);
+						return;
+					}
+					if (!fs.existsSync(parentSessionPath)) {
+						ctx.ui.notify(
+							`Resolved parent session is missing: ${shortenHomePath(parentSessionPath)}.\n${manualParentSessionOpenInstruction(parentSessionPath)}`,
+							"error",
+						);
+						return;
+					}
+
+					const openedMessage = "Opened parent session (from child session header).";
+
+					const openResult = await tryOpenTaskSession(ctx as unknown, parentSessionPath, {
+						withSession: async (replacementCtx) => {
+							await notifyTaskSessionOpened(replacementCtx, openedMessage);
+						},
+					});
+					if (openResult.opened) return;
+
 					ctx.ui.notify(
-						"Resolved parent session points to the current session. Refusing to open the same session file.",
-						"error",
+						`${openResult.message}\n${manualParentSessionOpenInstruction(parentSessionPath)}`,
+						"warning",
 					);
 					return;
 				}
-				if (!fs.existsSync(parentSessionPath)) {
-					ctx.ui.notify(
-						`Resolved parent session is missing: ${shortenHomePath(parentSessionPath)}.\n${manualParentSessionOpenInstruction(parentSessionPath)}`,
-						"error",
-					);
-					return;
-				}
 
-				const openedMessage = "Opened parent session (from child session header).";
-
-				const openResult = await tryOpenTaskSession(ctx as unknown, parentSessionPath, {
-					withSession: async (replacementCtx) => {
-						await notifyTaskSessionOpened(replacementCtx, openedMessage);
-					},
+				const runs = reconstructCurrentTaskRuns({
+					entries: ctx.sessionManager.getBranch(),
+					sourceSessionFile: ctx.sessionManager.getSessionFile?.(),
+					customType: TASK_CHILD_SESSION_CUSTOM_TYPE,
+					metadataVersion: TASK_CHILD_SESSION_METADATA_VERSION,
+					extraLiveStepKeys: collectLiveTaskControllerStepKeys(ctx.sessionManager.getSessionFile?.()),
 				});
-				if (openResult.opened) return;
 
-				ctx.ui.notify(
-					`${openResult.message}\n${manualParentSessionOpenInstruction(parentSessionPath)}`,
-					"warning",
-				);
-				return;
-			}
-
-			const runs = reconstructCurrentTaskRuns({
-				entries: ctx.sessionManager.getBranch(),
-				sourceSessionFile: ctx.sessionManager.getSessionFile?.(),
-				customType: TASK_CHILD_SESSION_CUSTOM_TYPE,
-				metadataVersion: TASK_CHILD_SESSION_METADATA_VERSION,
-				extraLiveStepKeys: collectLiveTaskControllerStepKeys(ctx.sessionManager.getSessionFile?.()),
-			});
-
-			if (runs.length === 0) {
-				ctx.ui.notify(TASKS_NO_CURRENT_RUNS_MESSAGE, "info");
-				return;
-			}
-
-			if (parsed.action === "list") {
-				if (
-					await withTaskWidgetTemporarilyHidden(ctx, (onReplacement) =>
-						browseTaskRuns(ctx, parsed.scope, runs, onReplacement),
-					)
-				)
-					return;
-				ctx.ui.notify(formatTaskRunList(parsed.scope, runs), "info");
-				return;
-			}
-
-			const selector = parsed.selector?.trim();
-			if (!selector) {
-				ctx.ui.notify(`Missing selector. Usage: ${TASKS_COMMAND_USAGE}`, "error");
-				return;
-			}
-
-			const resolved = resolveTaskSelector(selector, runs);
-			if (resolved.error || !resolved.resolution) {
-				ctx.ui.notify(resolved.error ?? `No task run matches selector "${selector}".`, "error");
-				return;
-			}
-
-			const { run, step } = resolved.resolution;
-			const selectedStep = step as TaskRunStepView | undefined;
-			if (parsed.action === "show") {
-				const hasWarnings =
-					run.warnings.length > 0 || run.steps.some((candidate) => candidate.warnings.length > 0);
-				ctx.ui.notify(
-					await formatTaskRunDetails(parsed.scope, run, selectedStep),
-					hasWarnings ? "warning" : "info",
-				);
-				syncTaskUiChrome(ctx);
-				return;
-			}
-			if (parsed.action === "view") {
-				await openTaskViewerOverlay(ctx, parsed.scope, run, selectedStep);
-				return;
-			}
-			if (parsed.action === "attach") {
-				const attachResult = await attachTaskRunInTerminal(ctx, run, selectedStep);
-				ctx.ui.notify(attachResult.message, attachResult.level);
-				syncTaskUiChrome(ctx);
-				return;
-			}
-			if (parsed.action === "origin") {
-				const originResult = await revealTaskRunOrigin(ctx, run, selectedStep);
-				ctx.ui.notify(originResult.message, originResult.level);
-				syncTaskUiChrome(ctx);
-				return;
-			}
-			if (parsed.action === "steer") {
-				const message = parsed.message?.trim();
-				if (!message) {
-					ctx.ui.notify(`Missing steering message. Usage: ${TASKS_COMMAND_USAGE}`, "error");
+				if (runs.length === 0) {
+					ctx.ui.notify(TASKS_NO_CURRENT_RUNS_MESSAGE, "info");
 					return;
 				}
-				const steerResult = await sendTaskSteeringMessage(run, selectedStep, message);
-				ctx.ui.notify(steerResult.message, steerResult.level);
-				syncTaskUiChrome(ctx);
-				return;
-			}
 
-			const openResult = await openTaskRunSession(ctx, run, selectedStep);
-			if (!openResult.opened) {
-				if (openResult.message) ctx.ui.notify(openResult.message, openResult.level);
-				syncTaskUiChrome(ctx);
+				if (parsed.action === "list") {
+					if (
+						await withTaskWidgetTemporarilyHidden(ctx, (onReplacement) =>
+							browseTaskRuns(ctx, parsed.scope, runs, onReplacement),
+						)
+					)
+						return;
+					ctx.ui.notify(formatTaskRunList(parsed.scope, runs), "info");
+					return;
+				}
+
+				const selector = parsed.selector?.trim();
+				if (!selector) {
+					ctx.ui.notify(`Missing selector. Usage: ${TASKS_COMMAND_USAGE}`, "error");
+					return;
+				}
+
+				const resolved = resolveTaskSelector(selector, runs);
+				if (resolved.error || !resolved.resolution) {
+					ctx.ui.notify(resolved.error ?? `No task run matches selector "${selector}".`, "error");
+					return;
+				}
+
+				const { run, step } = resolved.resolution;
+				const selectedStep = step as TaskRunStepView | undefined;
+				if (parsed.action === "show") {
+					const hasWarnings =
+						run.warnings.length > 0 || run.steps.some((candidate) => candidate.warnings.length > 0);
+					ctx.ui.notify(
+						await formatTaskRunDetails(parsed.scope, run, selectedStep),
+						hasWarnings ? "warning" : "info",
+					);
+					syncTaskUiChrome(ctx);
+					return;
+				}
+				if (parsed.action === "view") {
+					await openTaskViewerOverlay(ctx, parsed.scope, run, selectedStep);
+					return;
+				}
+				if (parsed.action === "attach") {
+					const attachResult = await attachTaskRunInTerminal(ctx, run, selectedStep);
+					ctx.ui.notify(attachResult.message, attachResult.level);
+					syncTaskUiChrome(ctx);
+					return;
+				}
+				if (parsed.action === "origin") {
+					const originResult = await revealTaskRunOrigin(ctx, run, selectedStep);
+					ctx.ui.notify(originResult.message, originResult.level);
+					syncTaskUiChrome(ctx);
+					return;
+				}
+				if (parsed.action === "steer") {
+					const message = parsed.message?.trim();
+					if (!message) {
+						ctx.ui.notify(`Missing steering message. Usage: ${TASKS_COMMAND_USAGE}`, "error");
+						return;
+					}
+					const steerResult = await sendTaskSteeringMessage(run, selectedStep, message);
+					ctx.ui.notify(steerResult.message, steerResult.level);
+					syncTaskUiChrome(ctx);
+					return;
+				}
+
+				const openResult = await openTaskRunSession(ctx, run, selectedStep);
+				if (!openResult.opened) {
+					if (openResult.message) ctx.ui.notify(openResult.message, openResult.level);
+					syncTaskUiChrome(ctx);
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (ctx.hasUI && ctx.ui) ctx.ui.notify(`/tasks failed: ${message}`, "error");
+				else console.error(`/tasks failed: ${message}`);
 			}
 		},
 	} satisfies Parameters<ExtensionAPI["registerCommand"]>[1];
