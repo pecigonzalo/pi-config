@@ -37,6 +37,45 @@ Both files are independent. When both exist, defaults are merged field-wise with
 
 Efforts are merged by name with project values overriding global ones.
 
+## Worker transport: why subprocess RPC (and not JSON or in-memory)
+
+Every delegated step runs as its own `pi --mode rpc` child process, driven over stdin/stdout
+JSON lines. This is a deliberate, settled decision -- revisit it only with new evidence, not
+because the alternatives look simpler. All three options have been tried:
+
+- **JSON one-shot (`pi --mode json -p`)**: fire-and-forget; the parent parses newline-delimited
+  JSON events from stdout. Removed. It is strictly weaker than RPC for our needs: no live
+  steering, no attach, no inspection while running -- and it shares RPC's core weakness (see
+  below) because it uses the same line-framed event stream.
+
+- **In-process `AgentSession` (`createAgentSession()` in the parent's process)**: tried and
+  reverted. It looks simplest (no protocol, direct `prompt()`/`steer()`/`subscribe()`) but it
+  fundamentally leaks process-global state across the parent and every worker:
+  - `process.env.PI_AGENT_NAME` / `PI_PROFILE_NAME` are read env-first by the permissions,
+    footer, and typescript extensions. The parent's composition (e.g. orchestrator's
+    `defaultProfile: read-only`) bled into workers, so `read-write` workers ran read-only and
+    failed every edit/write.
+  - Module-level extension state (`activeMainWorker`, baselines, registries) is shared by all
+    sessions in the process, so any session can silently rewrite another session's identity.
+  - pi's session-replacement machinery disposes whatever session is current in the terminal,
+    so inspecting a worker risked tearing down the delegating parent.
+
+  Each of these could be patched individually, but they are all the same root cause: one
+  process, many logical sessions, no isolation boundary.
+
+- **Subprocess RPC (current)**: each worker gets its own OS process and therefore its own env,
+  so `PI_AGENT_NAME`/`PI_PROFILE_NAME` are composed per worker (`getWorkerProcessEnv`) and the
+  permissions/footer/typescript extensions resolve correctly without any precedence hacks.
+  Crash isolation is free, live steer/attach/inspect work over the wire, and ephemeral steps
+  run via `--no-session`. The cost is a wire protocol and one process per step; both are
+  bounded and already paid for.
+
+Known trade-off to remember: RPC events are line-framed JSON, so a single huge event (e.g. a
+tool result embedding a screenshot as base64) becomes one very long line. The parent buffers
+lines up to `MAX_CHILD_EVENT_LINE_BYTES` before parsing. That cap was once 1 MiB and aborted
+image-bearing tasks with "Child emitted an oversized unterminated JSON event line"; it is now
+64 MiB. Do not lower it without accounting for image payloads.
+
 ## Nested delegation
 
 Child workers cannot delegate with `task` by default. To allow a specific agent
@@ -134,7 +173,7 @@ Semantics:
 - `/tasks` commands operate on task runs reconstructed from metadata in the current parent session.
 - `parent`: from the current session, open its parent session via `parentSession` in the child session header.
 - `show`: inspect run/step metadata, origin preview, actions, and warnings.
-- `open`: open selected persisted child session inside the current Pi UI when auto-open is available.
+- `open`: open a task step's session. A still-running step attaches to the live worker instead (same as `/tasks attach`) -- opening a second session on its file while the RPC child is writing it would corrupt the transcript. A finished step opens the persisted child session inside the current Pi UI when auto-open is available.
 - `attach`: for completed tasks, open the persisted child session in a new terminal window using the configured terminal backend. For already-running externally hosted tasks, open/switch to the terminal workspace first and then focus the existing terminal target.
 - `view`: open an in-TUI overlay viewer for a task run. The viewer shows metadata plus a recent transcript preview and supports steering shortcuts for live RPC-backed tasks. When no live controller is available, the viewer becomes read-only.
 - `origin`: reveal the recorded parent-session origin for the task. In the current parent session this navigates to the recorded source entry; otherwise it shows the source session path and origin preview.
@@ -143,12 +182,12 @@ Semantics:
 
 Interactive runtime behavior:
 
-- when the parent session has UI, persisted child sessions are launched under a live RPC controller so `/tasks steer ...` and richer inspection can talk to the running task process
+- every step runs under a live RPC controller (see "Worker transport"), so `/tasks steer ...`, attach, and inspection work for any running task; with parent UI, worker dialogs (select/confirm/input/editor) and status/widget updates relay to the parent's UI prefixed with the worker's task label
 - `/tasks` in the TUI opens an interactive task browser; `Ctrl+Shift+T` opens the current-session task browser directly
 - `/tasks toggle` enables or hides the below-editor task widget for the current session
 - textual `/tasks list` output includes attach guidance and per-run `/tasks attach <selector>` hints for attachable runs so it is clear how to open a child session in a terminal window
 - the viewer overlay keeps the parent session active while inspecting child state. Shortcut hints in the overlay: `Ctrl+O` open, `Ctrl+A` attach, `Ctrl+G` origin, `Enter`/`Ctrl+S` steer when live control is available, `Esc` close
-- in non-interactive contexts, task execution falls back to the legacy JSON-stream capture mode and live steering is unavailable
+- task execution has exactly one transport: a spawned `pi --mode rpc` child process per step (see "Worker transport" below). Interactive (TUI) and non-interactive contexts use the same path; only the UI relay differs.
 - `/tasks attach ...` uses a terminal-backend interface. Select it with `PI_TASKS_TERMINAL_BACKEND=auto|wezterm|disabled`. Today `wezterm` is implemented; the abstraction keeps room for alternatives such as tmux later.
 - with WezTerm, task attach uses a fixed domain plus a workspace per parent session. Completed tasks open with `wezterm start --domain <domain> --workspace <session-workspace> --new-tab -- ...`; running externally hosted tasks open/attach that workspace first and then focus the existing pane when possible. You can override the domain with `PI_TASKS_WEZTERM_DOMAIN` (default: `pi`).
 - `/tasks attach ...` avoids dual writers: completed tasks open in a new terminal window, but a running child can only be focused if it already has recorded external-terminal metadata; otherwise the command refuses and points you at `/tasks steer ...`

@@ -1,8 +1,7 @@
+import path from "node:path";
 import { type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { Message } from "@earendil-works/pi-ai";
-
-export type TaskTransport = "json" | "rpc";
 
 export interface RpcResponseEnvelope {
 	type: "response";
@@ -23,6 +22,27 @@ export interface LiveTaskRpcCommandOptions {
 	signal?: AbortSignal;
 }
 
+/** Fan-out hub for the raw session events a worker streams over the RPC wire. */
+export interface TaskEventHub {
+	dispatch(event: Record<string, unknown>): void;
+	subscribe(listener: (event: Record<string, unknown>) => void): () => void;
+}
+
+export function createTaskEventHub(): TaskEventHub {
+	const listeners = new Set<(event: Record<string, unknown>) => void>();
+	return {
+		dispatch(event) {
+			for (const listener of listeners) listener(event);
+		},
+		subscribe(listener) {
+			listeners.add(listener);
+			return () => listeners.delete(listener);
+		},
+	};
+}
+
+export type TaskEventHubLike = TaskEventHub;
+
 export interface LiveTaskController {
 	key: string;
 	toolCallId: string;
@@ -33,8 +53,11 @@ export interface LiveTaskController {
 	parentSessionPath?: string;
 	task: string;
 	agent: string;
-	transport: TaskTransport;
 	proc: ChildProcessWithoutNullStreams;
+	/** Working directory the worker was launched in (for tool-render display). */
+	cwd: string;
+	/** Raw session events streamed by the worker, fanned out to attach-view subscribers. */
+	events: TaskEventHub;
 	pendingResponses: Map<string, PendingRpcResponse>;
 	status: "running" | "completed" | "failed" | "aborted";
 	startedAt: string;
@@ -49,7 +72,6 @@ export interface LiveTaskController {
 }
 
 export interface LiveTaskRuntimeInfo {
-	transport: TaskTransport;
 	status: LiveTaskController["status"];
 	lastActivity?: string;
 	isStreaming: boolean;
@@ -57,8 +79,8 @@ export interface LiveTaskRuntimeInfo {
 	pendingFollowUpCount: number;
 	sessionName?: string;
 	messageCount?: number;
+	messages?: Message[];
 	lastAssistantText?: string;
-	syncCursor?: number;
 }
 
 /** Default bound for RPC commands that do not provide a timeout. */
@@ -156,7 +178,7 @@ export function sendLiveTaskRpcCommand(
 			return;
 		}
 		if (options.signal) options.signal.addEventListener("abort", onAbort, { once: true });
-		const timeoutMs = options.timeout === undefined ? DEFAULT_LIVE_TASK_RPC_TIMEOUT_MS : options.timeout;
+		const timeoutMs = options.timeout === undefined ? DEFAULT_LIVE_TASK_RPC_TIMEOUT_MS : timeout(options);
 		if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
 			timeoutHandle = setTimeout(
 				() => settle(() => reject(new Error("Live task RPC command timed out"))),
@@ -178,26 +200,31 @@ export function sendLiveTaskRpcCommand(
 	});
 }
 
-function readLiveTaskRuntimeInfoFromMessages(
-	messages: Message[],
-): Pick<LiveTaskRuntimeInfo, "messageCount" | "lastAssistantText"> {
-	return {
-		messageCount: messages.length,
-		lastAssistantText: getFinalAssistantText(messages),
-	};
+function timeout(options: LiveTaskRpcCommandOptions): number {
+	return options.timeout === undefined ? DEFAULT_LIVE_TASK_RPC_TIMEOUT_MS : options.timeout;
+}
+
+/** Fetches the worker's current message history over the wire (best effort). */
+export async function readLiveTaskMessages(controller: LiveTaskController): Promise<Message[]> {
+	try {
+		const response = await sendLiveTaskRpcCommand(controller, { type: "get_messages" });
+		if (response.success !== false && isRecord(response.data) && Array.isArray(response.data.messages)) {
+			return response.data.messages as Message[];
+		}
+	} catch {
+		// Worker gone or busy; empty history is fine for view purposes.
+	}
+	return [];
 }
 
 export async function readLiveTaskRuntimeInfo(controller: LiveTaskController): Promise<LiveTaskRuntimeInfo> {
 	const info: LiveTaskRuntimeInfo = {
-		transport: controller.transport,
 		status: controller.status,
 		lastActivity: controller.lastActivity,
 		isStreaming: controller.isStreaming,
 		pendingSteeringCount: controller.pendingSteeringCount,
 		pendingFollowUpCount: controller.pendingFollowUpCount,
-		syncCursor: controller.syncCursor,
 	};
-	if (controller.transport !== "rpc" || controller.status !== "running") return info;
 
 	try {
 		const stateResponse = await sendLiveTaskRpcCommand(controller, { type: "get_state" });
@@ -210,20 +237,16 @@ export async function readLiveTaskRuntimeInfo(controller: LiveTaskController): P
 		// Ignore RPC inspection failures; use cached controller state.
 	}
 
-	try {
-		const messagesResponse = await sendLiveTaskRpcCommand(controller, { type: "get_messages" });
-		if (
-			messagesResponse.success !== false &&
-			isRecord(messagesResponse.data) &&
-			Array.isArray(messagesResponse.data.messages)
-		) {
-			const messages = messagesResponse.data.messages as Message[];
-			controller.lastMessageCount = messages.length;
-			Object.assign(info, readLiveTaskRuntimeInfoFromMessages(messages));
-		}
-	} catch {
-		// Ignore RPC inspection failures; use cached controller state.
-	}
+	const messages = await readLiveTaskMessages(controller);
+	controller.lastMessageCount = messages.length;
+	info.messageCount = messages.length;
+	info.messages = messages;
+	info.lastAssistantText = getFinalAssistantText(messages);
 
 	return info;
+}
+
+export function liveTaskSessionDirectory(controller: LiveTaskController): string {
+	if (controller.childSessionPath) return path.dirname(controller.childSessionPath);
+	return controller.cwd;
 }

@@ -102,6 +102,7 @@ import {
 import {
 	clearLiveTaskControllers,
 	createIdempotentControllerClose,
+	createTaskEventHub,
 	deleteLiveTaskController,
 	getLiveTaskController,
 	listLiveTaskControllers,
@@ -127,7 +128,6 @@ const COLLAPSED_ITEM_COUNT = 10;
 const TASK_SESSION_VERSION_FALLBACK = 3;
 const TASK_CHILD_SESSION_CUSTOM_TYPE = "tasks.child-session";
 const TASK_CHILD_SESSION_METADATA_VERSION = 1;
-const TASKS_PARENT_SESSION_ROOT = path.join(getAgentDir(), "sessions");
 const TASKS_NO_CURRENT_RUNS_MESSAGE = "No task runs in current session.";
 const TASKS_BROWSER_SHORTCUT = "ctrl+shift+t";
 const TASKS_COMMAND_USAGE = [
@@ -218,9 +218,13 @@ function terminateProcessWithEscalation(
 	});
 }
 
-const MAX_CHILD_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_CHILD_STDERR_BYTES = 256 * 1024;
-const MAX_CHILD_EVENT_LINE_BYTES = 1024 * 1024;
+// A single RPC event line can legitimately be very large: tool results that embed
+// screenshots/images arrive as one base64 blob inside a single JSON line. The old 1 MiB cap
+// aborted workers mid-run ("Child emitted an oversized unterminated JSON event line") on any
+// image-bearing step. 64 MiB comfortably covers real image payloads while still bounding
+// memory against a genuinely runaway child.
+const MAX_CHILD_EVENT_LINE_BYTES = 64 * 1024 * 1024;
 const MAX_PARENT_MESSAGES = 512;
 const MAX_PARENT_MESSAGE_BYTES = 4 * 1024 * 1024;
 const TRUNCATION_MARKER = "\n[output truncated; full output is in the child session]\n";
@@ -2291,49 +2295,25 @@ async function preflightTaskRun(
 	};
 }
 
-async function runSingleAgentViaJson(
+async function runSingleAgentViaRpc(
 	preparedStep: PreparedTaskStep,
 	task: string,
 	step: number | undefined,
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => TaskDetails,
-	initialChildSession?: ChildSessionSnapshot,
+	initialChildSession: ChildSessionSnapshot | undefined,
+	toolCallId = `${Date.now()}-ephemeral`,
+	parentUiContext?: TaskRpcUiContext,
 ): Promise<SingleResult> {
 	const worker = preparedStep.worker;
 	const agent = worker.agent;
-	const args: string[] = ["--mode", "json", "-p"];
-	if (preparedStep.session.persist) {
-		if (!preparedStep.session.sessionFile) {
-			return {
-				agent: worker.displayAgentName,
-				agentSource: agent?.source ?? "unknown",
-				profile: worker.profile?.name,
-				effort: worker.effort?.name,
-				skills: worker.skills,
-				task,
-				exitCode: 1,
-				messages: [],
-				stderr: "Missing child session file for persisted task step.",
-				usage: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					cost: 0,
-					contextTokens: 0,
-					turns: 0,
-				},
-				model: worker.model,
-				step,
-				sessionMode: preparedStep.session.mode,
-				sessionPersist: preparedStep.session.persist,
-				sessionFile: preparedStep.session.sessionFile,
-				childSession: initialChildSession ? { ...initialChildSession } : undefined,
-			};
-		}
+	const args: string[] = ["--mode", "rpc"];
+	if (preparedStep.session.persist && preparedStep.session.sessionFile) {
 		args.push("--session", preparedStep.session.sessionFile);
 	} else {
+		// RPC is the only transport, so ephemeral (persist=false) steps run here too via an
+		// in-memory session inside the child process.
 		args.push("--no-session");
 	}
 
@@ -2343,7 +2323,6 @@ async function runSingleAgentViaJson(
 	appendWorkerToolFlags(args, worker);
 	appendProjectTrustFlags(args, worker, preparedStep.projectTrusted);
 	if (!worker.inheritProjectContext) args.push("--no-context-files");
-
 	const skillError = appendWorkerSkillFlags(args, worker, preparedStep.launchCwd, preparedStep.projectTrusted);
 	if (skillError) {
 		return {
@@ -2376,269 +2355,6 @@ async function runSingleAgentViaJson(
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
-
-	const currentResult: SingleResult = {
-		agent: worker.displayAgentName,
-		agentSource: agent?.source ?? "unknown",
-		profile: worker.profile?.name,
-		effort: worker.effort?.name,
-		skills: worker.skills,
-		task,
-		exitCode: 0,
-		messages: [],
-		stderr: "",
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			cost: 0,
-			contextTokens: 0,
-			turns: 0,
-		},
-		model: agentModel,
-		step,
-		sessionMode: preparedStep.session.mode,
-		sessionPersist: preparedStep.session.persist,
-		sessionFile: preparedStep.session.sessionFile,
-		childSession: initialChildSession ? { ...initialChildSession } : undefined,
-		uiNotices: [],
-	};
-
-	const emitUpdate = () => {
-		if (onUpdate) {
-			onUpdate({
-				content: [
-					{
-						type: "text",
-						text: getFinalOutput(currentResult.messages) || "(running...)",
-					},
-				],
-				details: makeDetails([currentResult]),
-			});
-		}
-	};
-
-	try {
-		const promptFile = await appendWorkerPromptFlags(
-			args,
-			worker,
-			preparedStep.launchCwd,
-			preparedStep.projectTrusted,
-		);
-		tmpPromptDir = promptFile.dir;
-		tmpPromptPath = promptFile.filePath;
-
-		args.push(`Task: ${task}`);
-		let wasAborted = false;
-
-		const exitCode = await new Promise<number>((resolve) => {
-			const invocation = getPiInvocation(args);
-			const proc = spawn(invocation.command, invocation.args, {
-				cwd: preparedStep.launchCwd,
-				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
-				env: getWorkerProcessEnv(worker),
-			});
-			const eventLines = createBoundedEventLineAccumulator(MAX_CHILD_EVENT_LINE_BYTES);
-			const stdoutDecoder = new StringDecoder("utf8");
-			const stderrDecoder = createUtf8StreamDecoder((text) => {
-				currentResult.stderr = appendBoundedText(currentResult.stderr, text, MAX_CHILD_STDERR_BYTES);
-			});
-			let procClosed = false;
-			let oversizedEventLine = false;
-
-			const processLine = (line: string) => {
-				if (!line.trim()) return;
-				let event: any;
-				try {
-					event = JSON.parse(line);
-				} catch {
-					return;
-				}
-
-				if (event.type === "message_end" && event.message) {
-					const msg = event.message as Message;
-					if (!pushBoundedMessage(currentResult.messages, msg)) {
-						currentResult.errorMessage ??= "Child message output exceeded the parent memory limit.";
-					}
-
-					if (msg.role === "assistant") {
-						currentResult.usage.turns++;
-						const usage = msg.usage;
-						if (usage) {
-							currentResult.usage.input += usage.input || 0;
-							currentResult.usage.output += usage.output || 0;
-							currentResult.usage.cacheRead += usage.cacheRead || 0;
-							currentResult.usage.cacheWrite += usage.cacheWrite || 0;
-							currentResult.usage.cost += usage.cost?.total || 0;
-							currentResult.usage.contextTokens = usage.totalTokens || 0;
-						}
-						if (!currentResult.model && msg.model) currentResult.model = msg.model;
-						if (msg.stopReason) currentResult.stopReason = msg.stopReason;
-						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
-					}
-					emitUpdate();
-				}
-
-				if (event.type === "tool_result_end" && event.message) {
-					if (!pushBoundedMessage(currentResult.messages, event.message as Message)) {
-						currentResult.errorMessage ??= "Child message output exceeded the parent memory limit.";
-					}
-					emitUpdate();
-				}
-			};
-
-			proc.stdout.on("data", (data) => {
-				const result = eventLines.push(stdoutDecoder.write(data), () => {
-					oversizedEventLine = true;
-					currentResult.errorMessage = "Child emitted an oversized unterminated JSON event line.";
-					wasAborted = true;
-					terminateProcessWithEscalation(proc, { isExited: () => procClosed });
-				});
-				if (!oversizedEventLine) for (const line of result.lines) processLine(line);
-			});
-
-			proc.stderr.on("data", (data) => {
-				stderrDecoder.write(data);
-			});
-
-			proc.on("close", (code, closeSignal) => {
-				procClosed = true;
-				const result = eventLines.flush();
-				stderrDecoder.flush();
-				if (!oversizedEventLine) for (const line of result.lines) processLine(line);
-				const outcome = mapTransportClose(code, closeSignal, {
-					aborted: wasAborted,
-					transportLabel: "Task process",
-				});
-				if (outcome.signalMessage) {
-					currentResult.stderr += currentResult.stderr ? `\n${outcome.signalMessage}` : outcome.signalMessage;
-				}
-				resolve(outcome.exitCode);
-			});
-
-			proc.on("error", () => {
-				procClosed = true;
-				resolve(1);
-			});
-
-			if (signal) {
-				const killProc = () => {
-					if (wasAborted) return;
-					wasAborted = true;
-					terminateProcessWithEscalation(proc, { isExited: () => procClosed });
-				};
-				if (signal.aborted) killProc();
-				else signal.addEventListener("abort", killProc, { once: true });
-			}
-		});
-
-		currentResult.exitCode = exitCode;
-		if (wasAborted) {
-			currentResult.stopReason = "aborted";
-			if (!currentResult.errorMessage) currentResult.errorMessage = "Task was aborted";
-			if (currentResult.exitCode === 0) currentResult.exitCode = 130;
-		}
-		return currentResult;
-	} finally {
-		if (tmpPromptPath)
-			try {
-				fs.unlinkSync(tmpPromptPath);
-			} catch {
-				/* ignore */
-			}
-		if (tmpPromptDir)
-			try {
-				fs.rmdirSync(tmpPromptDir);
-			} catch {
-				/* ignore */
-			}
-	}
-}
-
-async function runSingleAgentViaRpc(
-	preparedStep: PreparedTaskStep,
-	task: string,
-	step: number | undefined,
-	signal: AbortSignal | undefined,
-	onUpdate: OnUpdateCallback | undefined,
-	makeDetails: (results: SingleResult[]) => TaskDetails,
-	initialChildSession: ChildSessionSnapshot,
-	toolCallId: string,
-	parentUiContext?: TaskRpcUiContext,
-): Promise<SingleResult> {
-	const worker = preparedStep.worker;
-	const agent = worker.agent;
-	const args: string[] = ["--mode", "rpc"];
-	if (!preparedStep.session.sessionFile) {
-		return {
-			agent: worker.displayAgentName,
-			agentSource: agent?.source ?? "unknown",
-			profile: worker.profile?.name,
-			effort: worker.effort?.name,
-			skills: worker.skills,
-			task,
-			exitCode: 1,
-			messages: [],
-			stderr: "Missing child session file for persisted RPC task step.",
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				cost: 0,
-				contextTokens: 0,
-				turns: 0,
-			},
-			model: worker.model,
-			step,
-			sessionMode: preparedStep.session.mode,
-			sessionPersist: preparedStep.session.persist,
-			sessionFile: preparedStep.session.sessionFile,
-			childSession: { ...initialChildSession },
-		};
-	}
-	args.push("--session", preparedStep.session.sessionFile);
-
-	const agentModel = worker.model;
-	if (agentModel) args.push("--model", agentModel);
-	if (worker.effort?.thinkingLevel) args.push("--thinking", worker.effort.thinkingLevel);
-	appendWorkerToolFlags(args, worker);
-	appendProjectTrustFlags(args, worker, preparedStep.projectTrusted);
-	if (!worker.inheritProjectContext) args.push("--no-context-files");
-	const skillError = appendWorkerSkillFlags(args, worker, preparedStep.launchCwd, preparedStep.projectTrusted);
-	if (skillError) {
-		return {
-			agent: worker.displayAgentName,
-			agentSource: agent?.source ?? "unknown",
-			profile: worker.profile?.name,
-			effort: worker.effort?.name,
-			skills: worker.skills,
-			task,
-			exitCode: 1,
-			messages: [],
-			stderr: skillError,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				cost: 0,
-				contextTokens: 0,
-				turns: 0,
-			},
-			model: agentModel,
-			step,
-			sessionMode: preparedStep.session.mode,
-			sessionPersist: preparedStep.session.persist,
-			sessionFile: preparedStep.session.sessionFile,
-			childSession: { ...initialChildSession },
-		};
-	}
-
-	let tmpPromptDir: string | null = null;
-	let tmpPromptPath: string | null = null;
 	let killProc: (() => void) | undefined;
 	const currentResult: SingleResult = {
 		agent: worker.displayAgentName,
@@ -2664,7 +2380,7 @@ async function runSingleAgentViaRpc(
 		sessionMode: preparedStep.session.mode,
 		sessionPersist: preparedStep.session.persist,
 		sessionFile: preparedStep.session.sessionFile,
-		childSession: { ...initialChildSession },
+		childSession: initialChildSession ? { ...initialChildSession } : undefined,
 		uiNotices: [],
 	};
 	const emitUpdate = () => {
@@ -2697,21 +2413,25 @@ async function runSingleAgentViaRpc(
 			stdio: ["pipe", "pipe", "pipe"],
 			env: getWorkerProcessEnv(worker),
 		});
-		const controllerKey = makeTaskRunStepKey(initialChildSession.runId, step ?? initialChildSession.step);
+		const controllerKey = makeTaskRunStepKey(
+			initialChildSession?.runId ?? `${toolCallId}-run`,
+			step ?? initialChildSession?.step ?? 0,
+		);
 		const relayedStatusKeys = new Set<string>();
 		const relayedWidgetKeys = new Set<string>();
 		const uiRelayAbortController = new AbortController();
 		const controller: LiveTaskController = {
 			key: controllerKey,
 			toolCallId,
-			runId: initialChildSession.runId,
-			step: step ?? initialChildSession.step,
-			childSessionId: initialChildSession.childSessionId,
-			childSessionPath: initialChildSession.childSessionPath,
-			parentSessionPath: initialChildSession.parentSessionPath,
+			runId: initialChildSession?.runId ?? `${toolCallId}-run`,
+			step: step ?? initialChildSession?.step ?? 0,
+			childSessionId: initialChildSession?.childSessionId ?? `${toolCallId}-ephemeral`,
+			childSessionPath: initialChildSession?.childSessionPath ?? "",
+			parentSessionPath: initialChildSession?.parentSessionPath,
 			task,
 			agent: worker.displayAgentName,
-			transport: "rpc",
+			cwd: preparedStep.launchCwd,
+			events: createTaskEventHub(),
 			proc,
 			pendingResponses: new Map<string, any>(),
 			status: "running",
@@ -2797,6 +2517,7 @@ async function runSingleAgentViaRpc(
 				return;
 			}
 			if (!isRecord(event)) return;
+			controller.events.dispatch(event);
 			if (event.type === "response") {
 				const response = event as unknown as RpcResponseEnvelope;
 				if (typeof response.id === "string") {
@@ -3046,30 +2767,20 @@ async function runSingleAgent(
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => TaskDetails,
 	initialChildSession?: ChildSessionSnapshot,
-	enableRpcControl = false,
 	toolCallId?: string,
 	parentUiContext?: TaskRpcUiContext,
 ): Promise<SingleResult> {
-	if (
-		enableRpcControl &&
-		initialChildSession &&
-		preparedStep.session.persist &&
-		preparedStep.session.sessionFile &&
-		toolCallId
-	) {
-		return runSingleAgentViaRpc(
-			preparedStep,
-			task,
-			step,
-			signal,
-			onUpdate,
-			makeDetails,
-			initialChildSession,
-			toolCallId,
-			parentUiContext,
-		);
-	}
-	return runSingleAgentViaJson(preparedStep, task, step, signal, onUpdate, makeDetails, initialChildSession);
+	return runSingleAgentViaRpc(
+		preparedStep,
+		task,
+		step,
+		signal,
+		onUpdate,
+		makeDetails,
+		initialChildSession,
+		toolCallId,
+		parentUiContext,
+	);
 }
 
 function appendTaskChildSessionMetadata(
@@ -3105,7 +2816,7 @@ async function runTaskStepWithMetadata(options: {
 	};
 	origin?: TaskOriginSnapshot;
 	refreshUi?: () => Promise<void> | void;
-	enableRpcControl?: boolean;
+
 	parentUiContext?: TaskRpcUiContext;
 	runAgent?: typeof runSingleAgent;
 }): Promise<SingleResult> {
@@ -3122,7 +2833,7 @@ async function runTaskStepWithMetadata(options: {
 		sessionManager,
 		origin,
 		refreshUi,
-		enableRpcControl,
+
 		parentUiContext,
 		runAgent = runSingleAgent,
 	} = options;
@@ -3256,7 +2967,6 @@ async function runTaskStepWithMetadata(options: {
 			onUpdate,
 			makeDetails,
 			createdSnapshot,
-			enableRpcControl === true,
 			toolCallId,
 			parentUiContext,
 		);
@@ -3481,7 +3191,7 @@ async function formatTaskRunDetails(
 	if (liveControllerResolution.controller) {
 		const liveInfo = await readLiveTaskRuntimeInfo(liveControllerResolution.controller);
 		lines.push(
-			`Live controller: ${liveInfo.transport} · ${liveInfo.status} · streaming:${liveInfo.isStreaming ? "yes" : "no"} · queued:${liveInfo.pendingSteeringCount}/${liveInfo.pendingFollowUpCount}`,
+			`Live controller: ${liveInfo.status} · streaming:${liveInfo.isStreaming ? "yes" : "no"} · queued:${liveInfo.pendingSteeringCount}/${liveInfo.pendingFollowUpCount}`,
 		);
 		if (liveInfo.sessionName) lines.push(`Live session: ${liveInfo.sessionName}`);
 		if (liveInfo.lastActivity) lines.push(`Live activity: ${liveInfo.lastActivity}`);
@@ -3588,7 +3298,7 @@ async function readTaskTranscriptPreview(
 		};
 	}
 	const controller = getLiveTaskController(makeTaskRunStepKey(run.runId, inspectStep.step));
-	if (controller?.status === "running" && controller.transport === "rpc") {
+	if (controller?.status === "running") {
 		try {
 			const response = await sendLiveTaskRpcCommand(
 				controller,
@@ -4108,6 +3818,18 @@ async function openTaskRunSession(
 			level: "error",
 			message: `Run ${run.runId} has no persisted child session to open.`,
 		};
+	}
+	// A still-running worker must never be opened as a second session on its own session
+	// file -- the worker's RPC child is actively writing that file, and a second writer is
+	// corruption, not a UX gap. Route to the terminal attach flow instead, which either
+	// focuses the worker's existing terminal workspace or reports how to reach it. Only a
+	// finished worker is safe to open as a real persisted session here.
+	if (getLiveTaskController(makeTaskRunStepKey(run.runId, targetStep.step))?.status === "running") {
+		return await attachTaskRunInTerminalInternal(
+			ctx as Parameters<typeof attachTaskRunInTerminalInternal>[0],
+			run,
+			preferredStep,
+		);
 	}
 	if (!targetStep.snapshot.persist) {
 		return {
@@ -5066,7 +4788,11 @@ export default function (pi: ExtensionAPI) {
 		getArgumentCompletions: (prefix: string) => TASKS_COMPLETIONS.filter((s) => s.value.startsWith(prefix.trim())),
 		handler: async (args, ctx) => {
 			const parsed = parseTasksCommand(args);
-			if (parsed.action === "open" || parsed.action === "parent" || parsed.action === "origin") {
+			// Only structural session-replacement commands wait for the main session to settle
+			// here. `open` deliberately does not: a still-running step attaches to the live
+			// worker instead (which must work *while* the task runs), and only the finished-
+			// session-replace branch waits for idle on its own, inside tryOpenTaskSession.
+			if (parsed.action === "parent" || parsed.action === "origin") {
 				await ctx.waitForIdle();
 			}
 			if (parsed.error) {
@@ -5435,7 +5161,7 @@ export default function (pi: ExtensionAPI) {
 						sessionManager: ctx.sessionManager,
 						origin: taskOrigin,
 						refreshUi: () => syncTaskUiChrome(ctx),
-						enableRpcControl: ctx.hasUI === true,
+
 						parentUiContext: {
 							hasUI: ctx.hasUI,
 							ui: ctx.ui,
@@ -5535,7 +5261,7 @@ export default function (pi: ExtensionAPI) {
 							sessionManager: ctx.sessionManager,
 							origin: taskOrigin,
 							refreshUi: () => syncTaskUiChrome(ctx),
-							enableRpcControl: ctx.hasUI === true,
+
 							parentUiContext: {
 								hasUI: ctx.hasUI,
 								ui: ctx.ui,
@@ -5594,7 +5320,7 @@ export default function (pi: ExtensionAPI) {
 					sessionManager: ctx.sessionManager,
 					origin: taskOrigin,
 					refreshUi: () => syncTaskUiChrome(ctx),
-					enableRpcControl: ctx.hasUI === true,
+
 					parentUiContext: {
 						hasUI: ctx.hasUI,
 						ui: ctx.ui,

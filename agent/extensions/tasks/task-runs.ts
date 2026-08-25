@@ -298,29 +298,6 @@ export function formatTimestampCompact(value: string): string {
 		.replace(/\.\d{3}Z$/, "Z");
 }
 
-async function listSessionFiles(rootDir: string): Promise<string[]> {
-	const files: string[] = [];
-	let currentLayer: string[] = [rootDir];
-	while (currentLayer.length > 0) {
-		const nextLayer: string[] = [];
-		for (const dir of currentLayer) {
-			let entries: fs.Dirent[];
-			try {
-				entries = await fs.promises.readdir(dir, { withFileTypes: true });
-			} catch {
-				continue;
-			}
-			for (const entry of entries) {
-				const fullPath = path.join(dir, entry.name);
-				if (entry.isDirectory()) nextLayer.push(fullPath);
-				else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(fullPath);
-			}
-		}
-		currentLayer = nextLayer;
-	}
-	return files;
-}
-
 async function collectTaskMetadataRecordsFromSessionFile(
 	sessionFile: string,
 	customType: string,
@@ -483,31 +460,6 @@ export function buildTaskRunViews(records: TaskChildSessionRecord[], liveStepKey
 		if (updatedDiff !== 0) return updatedDiff;
 		return right.latestSourceOrder - left.latestSourceOrder;
 	});
-}
-
-export async function reconstructRecentTaskRuns(options: {
-	rootDir: string;
-	maxConcurrency: number;
-	customType: string;
-	metadataVersion: number;
-	mapWithConcurrencyLimit: <T, U>(
-		items: readonly T[],
-		concurrency: number,
-		fn: (item: T, index: number) => Promise<U>,
-	) => Promise<U[]>;
-}): Promise<TaskRunView[]> {
-	if (!fs.existsSync(options.rootDir)) return [];
-	const sessionFiles = await listSessionFiles(options.rootDir);
-	const fileRecords = await options.mapWithConcurrencyLimit<string, TaskChildSessionRecord[]>(
-		sessionFiles,
-		options.maxConcurrency,
-		async (sessionFile) => {
-			return collectTaskMetadataRecordsFromSessionFile(sessionFile, options.customType, options.metadataVersion);
-		},
-	);
-	const records = fileRecords.flat();
-	const runs = buildTaskRunViews(records, new Set<string>());
-	return runs.filter((run) => run.persistedStepCount > 0);
 }
 
 export function reconstructCurrentTaskRuns(options: {
