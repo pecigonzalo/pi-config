@@ -3,8 +3,6 @@ import { type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { Message } from "@earendil-works/pi-ai";
 
-export type TaskTransport = "rpc";
-
 export interface RpcResponseEnvelope {
 	type: "response";
 	id?: string;
@@ -55,7 +53,6 @@ export interface LiveTaskController {
 	parentSessionPath?: string;
 	task: string;
 	agent: string;
-	transport: TaskTransport;
 	proc: ChildProcessWithoutNullStreams;
 	/** Working directory the worker was launched in (for tool-render display). */
 	cwd: string;
@@ -75,7 +72,6 @@ export interface LiveTaskController {
 }
 
 export interface LiveTaskRuntimeInfo {
-	transport: TaskTransport;
 	status: LiveTaskController["status"];
 	lastActivity?: string;
 	isStreaming: boolean;
@@ -223,7 +219,6 @@ export async function readLiveTaskMessages(controller: LiveTaskController): Prom
 
 export async function readLiveTaskRuntimeInfo(controller: LiveTaskController): Promise<LiveTaskRuntimeInfo> {
 	const info: LiveTaskRuntimeInfo = {
-		transport: controller.transport,
 		status: controller.status,
 		lastActivity: controller.lastActivity,
 		isStreaming: controller.isStreaming,

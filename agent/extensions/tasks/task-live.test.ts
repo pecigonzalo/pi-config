@@ -17,7 +17,6 @@ function createController(write: (data: string, callback: (error?: Error | null)
 		childSessionPath: "session.jsonl",
 		task: "task",
 		agent: "agent",
-		transport: "rpc",
 		cwd: "/tmp/worker",
 		events: createTaskEventHub(),
 		proc: { stdin: { destroyed: false, writable: true, write } } as unknown as LiveTaskController["proc"],

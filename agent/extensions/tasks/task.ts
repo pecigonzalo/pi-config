@@ -218,7 +218,6 @@ function terminateProcessWithEscalation(
 	});
 }
 
-const MAX_CHILD_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_CHILD_STDERR_BYTES = 256 * 1024;
 // A single RPC event line can legitimately be very large: tool results that embed
 // screenshots/images arrive as one base64 blob inside a single JSON line. The old 1 MiB cap
@@ -2431,7 +2430,6 @@ async function runSingleAgentViaRpc(
 			parentSessionPath: initialChildSession?.parentSessionPath,
 			task,
 			agent: worker.displayAgentName,
-			transport: "rpc",
 			cwd: preparedStep.launchCwd,
 			events: createTaskEventHub(),
 			proc,
@@ -3193,7 +3191,7 @@ async function formatTaskRunDetails(
 	if (liveControllerResolution.controller) {
 		const liveInfo = await readLiveTaskRuntimeInfo(liveControllerResolution.controller);
 		lines.push(
-			`Live controller: ${liveInfo.transport} · ${liveInfo.status} · streaming:${liveInfo.isStreaming ? "yes" : "no"} · queued:${liveInfo.pendingSteeringCount}/${liveInfo.pendingFollowUpCount}`,
+			`Live controller: ${liveInfo.status} · streaming:${liveInfo.isStreaming ? "yes" : "no"} · queued:${liveInfo.pendingSteeringCount}/${liveInfo.pendingFollowUpCount}`,
 		);
 		if (liveInfo.sessionName) lines.push(`Live session: ${liveInfo.sessionName}`);
 		if (liveInfo.lastActivity) lines.push(`Live activity: ${liveInfo.lastActivity}`);
@@ -3300,7 +3298,7 @@ async function readTaskTranscriptPreview(
 		};
 	}
 	const controller = getLiveTaskController(makeTaskRunStepKey(run.runId, inspectStep.step));
-	if (controller?.status === "running" && controller.transport === "rpc") {
+	if (controller?.status === "running") {
 		try {
 			const response = await sendLiveTaskRpcCommand(
 				controller,
