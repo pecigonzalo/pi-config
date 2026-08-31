@@ -76,6 +76,12 @@ lines up to `MAX_CHILD_EVENT_LINE_BYTES` before parsing. That cap was once 1 MiB
 image-bearing tasks with "Child emitted an oversized unterminated JSON event line"; it is now
 64 MiB. Do not lower it without accounting for image payloads.
 
+The parent's per-step result keeps only a rolling window of the worker's recent activity
+(last `MAX_STREAM_MESSAGES` = 25 messages/tools, each capped at `MAX_FINAL_MESSAGE_BYTES`) so
+an attached user still sees the task stream in the UI. The worker's full transcript is never
+copied into the parent context -- it stays in the child session, reachable via the session id
+in the result (or `/tasks open`).
+
 ## Nested delegation
 
 Child workers cannot delegate with `task` by default. To allow a specific agent

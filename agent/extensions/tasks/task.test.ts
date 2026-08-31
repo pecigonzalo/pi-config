@@ -3609,29 +3609,35 @@ describe("task output capture", () => {
 		expect(output).toContain("[output truncated;");
 	});
 
-	it("selectFinalMessage returns the last assistant message carrying text", () => {
-		// The parent only keeps the worker's final answer; earlier turns and tool results stay in
-		// the child session. The last assistant message without text (tool-call-only) is skipped.
-		const messages: unknown[] = [
-			{ role: "user", content: [{ type: "text", text: "task" }] },
-			{ role: "toolResult", content: [{ type: "text", text: "b".repeat(1000) }] },
-			{ role: "assistant", content: [{ type: "text", text: "interim" }] },
-			{ role: "assistant", content: [{ type: "toolCall", name: "read", arguments: {} }] },
-			{ role: "assistant", content: [{ type: "text", text: "the final answer" }] },
-		];
-		const selected = __test__.selectFinalMessage(messages as never);
-		expect(selected).toBeDefined();
-		const content = selected?.content as { type: string; text: string }[];
-		expect(content[0]?.text).toBe("the final answer");
+	it("pushRecentMessage keeps the rolling window of the last 25 messages", () => {
+		// The parent shows the worker's streaming activity (last 25 messages/tools) but never
+		// receives the full child transcript; the rest stays in the child session.
+		const messages: unknown[] = [];
+		for (let i = 0; i < 40; i++) {
+			__test__.pushRecentMessage(messages as never, {
+				role: i % 2 === 0 ? "assistant" : "toolResult",
+				content: [{ type: "text", text: `msg-${i}` }],
+			});
+		}
+		expect(messages.length).toBe(25);
+		const first = (messages[0] as { content: { text: string }[] }).content[0]?.text;
+		const last = (messages[messages.length - 1] as { content: { text: string }[] }).content[0]?.text;
+		expect(first).toBe("msg-15");
+		expect(last).toBe("msg-39");
 	});
 
-	it("selectFinalMessage returns undefined when no assistant message has text", () => {
-		const messages: unknown[] = [
-			{ role: "user", content: [{ type: "text", text: "task" }] },
-			{ role: "toolResult", content: [{ type: "text", text: "ok" }] },
-			{ role: "assistant", content: [{ type: "toolCall", name: "read", arguments: {} }] },
-		];
-		expect(__test__.selectFinalMessage(messages as never)).toBeUndefined();
+	it("pushRecentMessage bounds each message but keeps the window at 25", () => {
+		const messages: unknown[] = [];
+		for (let i = 0; i < 30; i++) {
+			__test__.pushRecentMessage(messages as never, {
+				role: "toolResult",
+				content: [{ type: "text", text: "b".repeat(4_000_000) }],
+			});
+		}
+		expect(messages.length).toBe(25);
+		const text = (messages[messages.length - 1] as { content: { text: string }[] }).content[0]?.text ?? "";
+		expect(Buffer.byteLength(text, "utf8")).toBeLessThan(300 * 1024);
+		expect(text).toContain("TRUNCATED");
 	});
 
 	it("boundFinalMessage leaves small answers intact and truncates huge ones", () => {

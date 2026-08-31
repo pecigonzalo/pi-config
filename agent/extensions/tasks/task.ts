@@ -225,12 +225,14 @@ const MAX_CHILD_STDERR_BYTES = 256 * 1024;
 // image-bearing step. 64 MiB comfortably covers real image payloads while still bounding
 // memory against a genuinely runaway child.
 const MAX_CHILD_EVENT_LINE_BYTES = 64 * 1024 * 1024;
-// The parent only keeps the worker's FINAL assistant message in the result; the full
-// transcript lives in the child session (reached via result.childSession). This keeps the
-// delegating agent's context free of the worker's whole tool-result history (base64
-// screenshots inflate bytes ~33%). The only bound needed is on the final message itself in
-// case it is huge: beyond this we show a head/tail truncation.
+// The parent keeps a rolling window of the worker's recent activity (last
+// MAX_STREAM_MESSAGES messages/tools) so the user attached to the parent still sees the
+// task streaming in the UI -- it never receives the worker's full transcript on task end;
+// the whole context stays in the child session (reached via result.childSession). Each
+// message in the window is individually capped (see boundFinalMessage) so a huge tool
+// result (base64 screenshots inflate bytes ~33%) cannot bloat the parent.
 const MAX_FINAL_MESSAGE_BYTES = 256 * 1024;
+const MAX_STREAM_MESSAGES = 25;
 const TRUNCATION_MARKER = "\n[output truncated; full output is in the child session]\n";
 
 function truncateUtf8ToBytes(text: string, maxBytes: number): string {
@@ -254,9 +256,10 @@ function appendBoundedText(current: string, text: string, maxBytes: number): str
 }
 
 /**
- * Returns the last assistant message that carries actual text (the final answer), bounded to
- * MAX_FINAL_MESSAGE_BYTES. Tool results and earlier turns are not kept in the parent result --
- * read the child session for the full transcript.
+ * Caps a single message's text parts to MAX_FINAL_MESSAGE_BYTES (head/tail truncation via
+ * truncateOutput). Messages under the cap pass through unchanged. Used for both the live
+ * streaming window and the returned final answer, so one giant event line or base64 blob
+ * cannot bloat the parent.
  */
 function boundFinalMessage(message: Message): Message {
 	let totalBytes = 0;
@@ -274,22 +277,14 @@ function boundFinalMessage(message: Message): Message {
 	return { ...message, content } as unknown as Message;
 }
 
-function selectFinalMessage(messages: readonly Message[]): Message | undefined {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const message = messages[i];
-		if (!message || message.role !== "assistant" || !Array.isArray(message.content)) continue;
-		const hasText = message.content.some(
-			(part) =>
-				typeof part === "object" &&
-				part !== null &&
-				part.type === "text" &&
-				typeof part.text === "string" &&
-				part.text.length > 0,
-		);
-		if (!hasText) continue;
-		return boundFinalMessage(message);
-	}
-	return undefined;
+/**
+ * Maintains the parent's rolling window of worker activity: appends a bounded message and
+ * evicts the OLDEST when the window exceeds MAX_STREAM_MESSAGES. Count-based only -- no byte
+ * accounting; the full transcript is deliberately kept in the child session.
+ */
+function pushRecentMessage(messages: Message[], message: Message): void {
+	messages.push(boundFinalMessage(message));
+	if (messages.length > MAX_STREAM_MESSAGES) messages.shift();
 }
 
 interface BoundedEventLineAccumulator {
@@ -2546,8 +2541,8 @@ async function runSingleAgentViaRpc(
 				controller.lastActivity = "agent_end";
 				const maybeMessages = Array.isArray(event.messages) ? (event.messages as Message[]) : undefined;
 				if (maybeMessages) {
-					const finalMessage = selectFinalMessage(maybeMessages);
-					currentResult.messages = finalMessage ? [finalMessage] : [];
+					// Settle the parent's window on the authoritative tail of the worker's history.
+					currentResult.messages = maybeMessages.slice(-MAX_STREAM_MESSAGES).map(boundFinalMessage);
 					controller.lastMessageCount = maybeMessages.length;
 				}
 				emitUpdate();
@@ -2563,8 +2558,8 @@ async function runSingleAgentViaRpc(
 			}
 			if (event.type === "message_end" && event.message) {
 				const msg = event.message as Message;
-				if (msg.role === "assistant") {
-					currentResult.messages = [boundFinalMessage(msg)];
+				if (msg.role === "assistant" || msg.role === "toolResult") {
+					pushRecentMessage(currentResult.messages, msg);
 				}
 				controller.lastMessageCount = currentResult.messages.length;
 				controller.lastActivity = msg.role;
@@ -5757,7 +5752,7 @@ export const __test__ = {
 	createBoundedEventLineAccumulator,
 	consumeBoundedEventChunk,
 	appendBoundedText,
-	selectFinalMessage,
+	pushRecentMessage,
 	boundFinalMessage,
 	mapTransportClose,
 	createRpcCompletionCoordinator,
