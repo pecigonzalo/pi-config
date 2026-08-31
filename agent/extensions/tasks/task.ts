@@ -225,8 +225,13 @@ const MAX_CHILD_STDERR_BYTES = 256 * 1024;
 // image-bearing step. 64 MiB comfortably covers real image payloads while still bounding
 // memory against a genuinely runaway child.
 const MAX_CHILD_EVENT_LINE_BYTES = 64 * 1024 * 1024;
-const MAX_PARENT_MESSAGES = 512;
-const MAX_PARENT_MESSAGE_BYTES = 4 * 1024 * 1024;
+// Parent-side capture budget for worker messages. These feed the tool result shown to
+// the delegating agent, so the FINAL assistant message must survive even when the worker
+// streamed a lot of large tool results (base64 images inflate bytes ~33%). 16 MiB covers
+// a screenshot-heavy review; when the budget is exceeded we evict OLDEST messages (see
+// pushBoundedMessageKeepLatest), never the tail.
+const MAX_PARENT_MESSAGES = 1000;
+const MAX_PARENT_MESSAGE_BYTES = 16 * 1024 * 1024;
 const TRUNCATION_MARKER = "\n[output truncated; full output is in the child session]\n";
 
 function truncateUtf8ToBytes(text: string, maxBytes: number): string {
@@ -291,6 +296,32 @@ function pushBoundedMessage(messages: Message[], message: Message): boolean {
 	state.totalBytes += bytes;
 	messages.push(message);
 	return true;
+}
+
+function releaseBoundedMessage(messages: Message[], message: Message): void {
+	const state = messageByteStates.get(messages);
+	if (!state) return;
+	const messageObject = message as unknown as object;
+	const bytes = state.sizes.get(messageObject);
+	if (bytes !== undefined) {
+		state.totalBytes -= bytes;
+		state.sizes.delete(messageObject);
+	}
+}
+
+/**
+ * Appends a message to a bounded list, evicting the OLDEST messages when the byte or
+ * count budget is exceeded, so the most recent messages (including the final assistant
+ * answer) always survive. Returns false only when the message alone exceeds the budget.
+ */
+function pushBoundedMessageKeepLatest(messages: Message[], message: Message): boolean {
+	if (pushBoundedMessage(messages, message)) return true;
+	while (messages.length > 0) {
+		const evicted = messages.shift();
+		if (evicted) releaseBoundedMessage(messages, evicted);
+		if (pushBoundedMessage(messages, message)) return true;
+	}
+	return false;
 }
 
 interface BoundedEventLineAccumulator {
@@ -2550,13 +2581,10 @@ async function runSingleAgentViaRpc(
 					const boundedMessages: Message[] = [];
 					let rejected = false;
 					for (const message of maybeMessages) {
-						if (!pushBoundedMessage(boundedMessages, message)) {
-							rejected = true;
-							break;
-						}
+						if (!pushBoundedMessageKeepLatest(boundedMessages, message)) rejected = true;
 					}
 					currentResult.messages = boundedMessages;
-					if (rejected || boundedMessages.length < maybeMessages.length) {
+					if (rejected) {
 						currentResult.errorMessage ??= "Child message output exceeded the parent memory limit.";
 					}
 					controller.lastMessageCount = boundedMessages.length;
@@ -2781,6 +2809,15 @@ async function runSingleAgent(
 		toolCallId,
 		parentUiContext,
 	);
+}
+
+function formatTaskResultText(result: SingleResult): string {
+	const output = getFinalOutput(result.messages)?.trim();
+	if (output) return truncateOutput(output);
+	if (result.childSession) {
+		return `[no text output; session ${result.childSession.childSessionId} (open with /tasks open ${result.childSession.childSessionId})]`;
+	}
+	return "(no output)";
 }
 
 function appendTaskChildSessionMetadata(
@@ -5353,7 +5390,7 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: truncateOutput(getFinalOutput(result.messages)) || "(no output)",
+							text: formatTaskResultText(result),
 						},
 					],
 					details: makeDetails("single")([result]),
@@ -5761,6 +5798,7 @@ export const __test__ = {
 	appendBoundedText,
 	estimateBytes,
 	pushBoundedMessage,
+	pushBoundedMessageKeepLatest,
 	mapTransportClose,
 	createRpcCompletionCoordinator,
 	runTaskStepWithMetadata,

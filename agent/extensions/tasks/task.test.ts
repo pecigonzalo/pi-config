@@ -3611,7 +3611,7 @@ describe("task output capture", () => {
 
 	it("rejects oversized and cyclic messages without mutation", () => {
 		const messages: unknown[] = [];
-		const giant = { role: "user", content: [{ type: "text", text: "x".repeat(5_000_000) }] };
+		const giant = { role: "user", content: [{ type: "text", text: "x".repeat(20_000_000) }] }; // > MAX_PARENT_MESSAGE_BYTES (16 MiB)
 		const before = JSON.stringify(giant);
 		expect(__test__.pushBoundedMessage(messages, giant)).toBe(false);
 		expect(JSON.stringify(giant)).toBe(before);
@@ -3622,8 +3622,26 @@ describe("task output capture", () => {
 
 	it("keeps accepted messages bounded by count", () => {
 		const messages: unknown[] = [];
-		for (let i = 0; i < 600; i++) expect(__test__.pushBoundedMessage(messages, { i })).toBe(i < 512);
-		expect(messages.length).toBe(512);
+		for (let i = 0; i < 1200; i++) expect(__test__.pushBoundedMessage(messages, { i })).toBe(i < 1000);
+		expect(messages.length).toBe(1000);
+	});
+
+	it("keep-latest eviction preserves the final message when the byte budget is exceeded", () => {
+		// Regression: agent_end used to hard-break on first budget rejection, dropping the
+		// tail, so a worker that streamed large tool results lost its final answer and the
+		// caller got "(no output)" with no way to resume. Eviction must drop OLDEST first.
+		const messages: unknown[] = [];
+		const bigToolResult = {
+			role: "toolResult",
+			content: [{ type: "text", text: "b".repeat(6_000_000) }],
+		};
+		const finalAnswer = { role: "assistant", content: [{ type: "text", text: "the answer" }] };
+		expect(__test__.pushBoundedMessage(messages, bigToolResult)).toBe(true);
+		// drain the 16 MiB budget with more big results
+		for (let i = 0; i < 3; i++) __test__.pushBoundedMessage(messages, bigToolResult);
+		expect(messages.length).toBeGreaterThan(0);
+		expect(__test__.pushBoundedMessageKeepLatest(messages, finalAnswer)).toBe(true);
+		expect(messages[messages.length - 1]).toEqual(finalAnswer);
 	});
 
 	it("caps terminal output across sustained UTF-8 chunks", () => {
