@@ -225,13 +225,12 @@ const MAX_CHILD_STDERR_BYTES = 256 * 1024;
 // image-bearing step. 64 MiB comfortably covers real image payloads while still bounding
 // memory against a genuinely runaway child.
 const MAX_CHILD_EVENT_LINE_BYTES = 64 * 1024 * 1024;
-// Parent-side capture budget for worker messages. These feed the tool result shown to
-// the delegating agent, so the FINAL assistant message must survive even when the worker
-// streamed a lot of large tool results (base64 images inflate bytes ~33%). 16 MiB covers
-// a screenshot-heavy review; when the budget is exceeded we evict OLDEST messages (see
-// pushBoundedMessageKeepLatest), never the tail.
-const MAX_PARENT_MESSAGES = 1000;
-const MAX_PARENT_MESSAGE_BYTES = 16 * 1024 * 1024;
+// The parent only keeps the worker's FINAL assistant message in the result; the full
+// transcript lives in the child session (reached via result.childSession). This keeps the
+// delegating agent's context free of the worker's whole tool-result history (base64
+// screenshots inflate bytes ~33%). The only bound needed is on the final message itself in
+// case it is huge: beyond this we show a head/tail truncation.
+const MAX_FINAL_MESSAGE_BYTES = 256 * 1024;
 const TRUNCATION_MARKER = "\n[output truncated; full output is in the child session]\n";
 
 function truncateUtf8ToBytes(text: string, maxBytes: number): string {
@@ -254,74 +253,43 @@ function appendBoundedText(current: string, text: string, maxBytes: number): str
 	return truncateUtf8ToBytes(current + body, Math.max(0, maxBytes - Buffer.byteLength(marker))) + marker;
 }
 
-interface MessageByteState {
-	totalBytes: number;
-	sizes: WeakMap<object, number>;
-}
-const messageByteStates = new WeakMap<Message[], MessageByteState>();
-
-function estimateBytes(value: unknown, limit: number, seen = new WeakSet<object>(), depth = 0): number {
-	if (limit <= 0) return 0;
-	if (value === null || typeof value !== "object") return Buffer.byteLength(String(value), "utf8");
-	if (seen.has(value) || depth > 32) return 8;
-	seen.add(value);
-	let total = Array.isArray(value) ? 2 : 2;
-	if (Array.isArray(value))
-		for (const item of value) {
-			total += estimateBytes(item, limit - total, seen, depth + 1);
-			if (total > limit) return limit + 1;
-		}
-	else
-		for (const [key, item] of Object.entries(value)) {
-			total +=
-				Buffer.byteLength(JSON.stringify(key), "utf8") +
-				1 +
-				estimateBytes(item, limit - total, seen, depth + 1);
-			if (total > limit) return limit + 1;
-		}
-	return total;
-}
-
-function pushBoundedMessage(messages: Message[], message: Message): boolean {
-	if (messages.length >= MAX_PARENT_MESSAGES) return false;
-	let state = messageByteStates.get(messages);
-	if (!state) {
-		state = { totalBytes: 0, sizes: new WeakMap() };
-		messageByteStates.set(messages, state);
-	}
-	const messageObject = message as unknown as object;
-	const bytes = state.sizes.get(messageObject) ?? estimateBytes(message, MAX_PARENT_MESSAGE_BYTES + 1);
-	if (state.totalBytes + bytes > MAX_PARENT_MESSAGE_BYTES) return false;
-	state.sizes.set(messageObject, bytes);
-	state.totalBytes += bytes;
-	messages.push(message);
-	return true;
-}
-
-function releaseBoundedMessage(messages: Message[], message: Message): void {
-	const state = messageByteStates.get(messages);
-	if (!state) return;
-	const messageObject = message as unknown as object;
-	const bytes = state.sizes.get(messageObject);
-	if (bytes !== undefined) {
-		state.totalBytes -= bytes;
-		state.sizes.delete(messageObject);
-	}
-}
-
 /**
- * Appends a message to a bounded list, evicting the OLDEST messages when the byte or
- * count budget is exceeded, so the most recent messages (including the final assistant
- * answer) always survive. Returns false only when the message alone exceeds the budget.
+ * Returns the last assistant message that carries actual text (the final answer), bounded to
+ * MAX_FINAL_MESSAGE_BYTES. Tool results and earlier turns are not kept in the parent result --
+ * read the child session for the full transcript.
  */
-function pushBoundedMessageKeepLatest(messages: Message[], message: Message): boolean {
-	if (pushBoundedMessage(messages, message)) return true;
-	while (messages.length > 0) {
-		const evicted = messages.shift();
-		if (evicted) releaseBoundedMessage(messages, evicted);
-		if (pushBoundedMessage(messages, message)) return true;
+function boundFinalMessage(message: Message): Message {
+	let totalBytes = 0;
+	for (const part of Array.isArray(message.content) ? message.content : []) {
+		if (typeof part === "object" && part !== null && part.type === "text" && typeof part.text === "string") {
+			totalBytes += Buffer.byteLength(part.text, "utf8");
+		}
 	}
-	return false;
+	if (totalBytes <= MAX_FINAL_MESSAGE_BYTES) return message;
+	const content = (Array.isArray(message.content) ? message.content : []).map((part) =>
+		typeof part === "object" && part !== null && part.type === "text" && typeof part.text === "string"
+			? { ...part, text: truncateOutput(part.text) }
+			: part,
+	);
+	return { ...message, content } as unknown as Message;
+}
+
+function selectFinalMessage(messages: readonly Message[]): Message | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (!message || message.role !== "assistant" || !Array.isArray(message.content)) continue;
+		const hasText = message.content.some(
+			(part) =>
+				typeof part === "object" &&
+				part !== null &&
+				part.type === "text" &&
+				typeof part.text === "string" &&
+				part.text.length > 0,
+		);
+		if (!hasText) continue;
+		return boundFinalMessage(message);
+	}
+	return undefined;
 }
 
 interface BoundedEventLineAccumulator {
@@ -2578,16 +2546,9 @@ async function runSingleAgentViaRpc(
 				controller.lastActivity = "agent_end";
 				const maybeMessages = Array.isArray(event.messages) ? (event.messages as Message[]) : undefined;
 				if (maybeMessages) {
-					const boundedMessages: Message[] = [];
-					let rejected = false;
-					for (const message of maybeMessages) {
-						if (!pushBoundedMessageKeepLatest(boundedMessages, message)) rejected = true;
-					}
-					currentResult.messages = boundedMessages;
-					if (rejected) {
-						currentResult.errorMessage ??= "Child message output exceeded the parent memory limit.";
-					}
-					controller.lastMessageCount = boundedMessages.length;
+					const finalMessage = selectFinalMessage(maybeMessages);
+					currentResult.messages = finalMessage ? [finalMessage] : [];
+					controller.lastMessageCount = maybeMessages.length;
 				}
 				emitUpdate();
 				completionCoordinator.onAgentEnd();
@@ -2602,8 +2563,8 @@ async function runSingleAgentViaRpc(
 			}
 			if (event.type === "message_end" && event.message) {
 				const msg = event.message as Message;
-				if (!pushBoundedMessage(currentResult.messages, msg)) {
-					currentResult.errorMessage ??= "Child message output exceeded the parent memory limit.";
+				if (msg.role === "assistant") {
+					currentResult.messages = [boundFinalMessage(msg)];
 				}
 				controller.lastMessageCount = currentResult.messages.length;
 				controller.lastActivity = msg.role;
@@ -5796,9 +5757,8 @@ export const __test__ = {
 	createBoundedEventLineAccumulator,
 	consumeBoundedEventChunk,
 	appendBoundedText,
-	estimateBytes,
-	pushBoundedMessage,
-	pushBoundedMessageKeepLatest,
+	selectFinalMessage,
+	boundFinalMessage,
 	mapTransportClose,
 	createRpcCompletionCoordinator,
 	runTaskStepWithMetadata,

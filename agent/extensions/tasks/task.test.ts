@@ -3609,39 +3609,40 @@ describe("task output capture", () => {
 		expect(output).toContain("[output truncated;");
 	});
 
-	it("rejects oversized and cyclic messages without mutation", () => {
-		const messages: unknown[] = [];
-		const giant = { role: "user", content: [{ type: "text", text: "x".repeat(20_000_000) }] }; // > MAX_PARENT_MESSAGE_BYTES (16 MiB)
-		const before = JSON.stringify(giant);
-		expect(__test__.pushBoundedMessage(messages, giant)).toBe(false);
-		expect(JSON.stringify(giant)).toBe(before);
-		const cyclic: Record<string, unknown> = {};
-		cyclic.self = cyclic;
-		expect(__test__.pushBoundedMessage(messages, cyclic)).toBe(true);
+	it("selectFinalMessage returns the last assistant message carrying text", () => {
+		// The parent only keeps the worker's final answer; earlier turns and tool results stay in
+		// the child session. The last assistant message without text (tool-call-only) is skipped.
+		const messages: unknown[] = [
+			{ role: "user", content: [{ type: "text", text: "task" }] },
+			{ role: "toolResult", content: [{ type: "text", text: "b".repeat(1000) }] },
+			{ role: "assistant", content: [{ type: "text", text: "interim" }] },
+			{ role: "assistant", content: [{ type: "toolCall", name: "read", arguments: {} }] },
+			{ role: "assistant", content: [{ type: "text", text: "the final answer" }] },
+		];
+		const selected = __test__.selectFinalMessage(messages as never);
+		expect(selected).toBeDefined();
+		const content = selected?.content as { type: string; text: string }[];
+		expect(content[0]?.text).toBe("the final answer");
 	});
 
-	it("keeps accepted messages bounded by count", () => {
-		const messages: unknown[] = [];
-		for (let i = 0; i < 1200; i++) expect(__test__.pushBoundedMessage(messages, { i })).toBe(i < 1000);
-		expect(messages.length).toBe(1000);
+	it("selectFinalMessage returns undefined when no assistant message has text", () => {
+		const messages: unknown[] = [
+			{ role: "user", content: [{ type: "text", text: "task" }] },
+			{ role: "toolResult", content: [{ type: "text", text: "ok" }] },
+			{ role: "assistant", content: [{ type: "toolCall", name: "read", arguments: {} }] },
+		];
+		expect(__test__.selectFinalMessage(messages as never)).toBeUndefined();
 	});
 
-	it("keep-latest eviction preserves the final message when the byte budget is exceeded", () => {
-		// Regression: agent_end used to hard-break on first budget rejection, dropping the
-		// tail, so a worker that streamed large tool results lost its final answer and the
-		// caller got "(no output)" with no way to resume. Eviction must drop OLDEST first.
-		const messages: unknown[] = [];
-		const bigToolResult = {
-			role: "toolResult",
-			content: [{ type: "text", text: "b".repeat(6_000_000) }],
-		};
-		const finalAnswer = { role: "assistant", content: [{ type: "text", text: "the answer" }] };
-		expect(__test__.pushBoundedMessage(messages, bigToolResult)).toBe(true);
-		// drain the 16 MiB budget with more big results
-		for (let i = 0; i < 3; i++) __test__.pushBoundedMessage(messages, bigToolResult);
-		expect(messages.length).toBeGreaterThan(0);
-		expect(__test__.pushBoundedMessageKeepLatest(messages, finalAnswer)).toBe(true);
-		expect(messages[messages.length - 1]).toEqual(finalAnswer);
+	it("boundFinalMessage leaves small answers intact and truncates huge ones", () => {
+		const small = { role: "assistant", content: [{ type: "text", text: "ok" }] };
+		expect(__test__.boundFinalMessage(small as never)).toBe(small);
+
+		const huge = { role: "assistant", content: [{ type: "text", text: "x".repeat(4_000_000) }] };
+		const bounded = __test__.boundFinalMessage(huge as never) as { content: { text: string }[] };
+		const text = bounded.content[0]?.text ?? "";
+		expect(Buffer.byteLength(text, "utf8")).toBeLessThan(300 * 1024);
+		expect(text).toContain("TRUNCATED");
 	});
 
 	it("caps terminal output across sustained UTF-8 chunks", () => {
