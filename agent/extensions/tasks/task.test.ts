@@ -3609,21 +3609,46 @@ describe("task output capture", () => {
 		expect(output).toContain("[output truncated;");
 	});
 
-	it("rejects oversized and cyclic messages without mutation", () => {
+	it("pushRecentMessage keeps the rolling window of the last 25 messages", () => {
+		// The parent shows the worker's streaming activity (last 25 messages/tools) but never
+		// receives the full child transcript; the rest stays in the child session.
 		const messages: unknown[] = [];
-		const giant = { role: "user", content: [{ type: "text", text: "x".repeat(5_000_000) }] };
-		const before = JSON.stringify(giant);
-		expect(__test__.pushBoundedMessage(messages, giant)).toBe(false);
-		expect(JSON.stringify(giant)).toBe(before);
-		const cyclic: Record<string, unknown> = {};
-		cyclic.self = cyclic;
-		expect(__test__.pushBoundedMessage(messages, cyclic)).toBe(true);
+		for (let i = 0; i < 40; i++) {
+			__test__.pushRecentMessage(messages as never, {
+				role: i % 2 === 0 ? "assistant" : "toolResult",
+				content: [{ type: "text", text: `msg-${i}` }],
+			});
+		}
+		expect(messages.length).toBe(25);
+		const first = (messages[0] as { content: { text: string }[] }).content[0]?.text;
+		const last = (messages[messages.length - 1] as { content: { text: string }[] }).content[0]?.text;
+		expect(first).toBe("msg-15");
+		expect(last).toBe("msg-39");
 	});
 
-	it("keeps accepted messages bounded by count", () => {
+	it("pushRecentMessage bounds each message but keeps the window at 25", () => {
 		const messages: unknown[] = [];
-		for (let i = 0; i < 600; i++) expect(__test__.pushBoundedMessage(messages, { i })).toBe(i < 512);
-		expect(messages.length).toBe(512);
+		for (let i = 0; i < 30; i++) {
+			__test__.pushRecentMessage(messages as never, {
+				role: "toolResult",
+				content: [{ type: "text", text: "b".repeat(4_000_000) }],
+			});
+		}
+		expect(messages.length).toBe(25);
+		const text = (messages[messages.length - 1] as { content: { text: string }[] }).content[0]?.text ?? "";
+		expect(Buffer.byteLength(text, "utf8")).toBeLessThan(300 * 1024);
+		expect(text).toContain("TRUNCATED");
+	});
+
+	it("boundFinalMessage leaves small answers intact and truncates huge ones", () => {
+		const small = { role: "assistant", content: [{ type: "text", text: "ok" }] };
+		expect(__test__.boundFinalMessage(small as never)).toBe(small);
+
+		const huge = { role: "assistant", content: [{ type: "text", text: "x".repeat(4_000_000) }] };
+		const bounded = __test__.boundFinalMessage(huge as never) as { content: { text: string }[] };
+		const text = bounded.content[0]?.text ?? "";
+		expect(Buffer.byteLength(text, "utf8")).toBeLessThan(300 * 1024);
+		expect(text).toContain("TRUNCATED");
 	});
 
 	it("caps terminal output across sustained UTF-8 chunks", () => {

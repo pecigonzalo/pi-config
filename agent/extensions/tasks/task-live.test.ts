@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	createIdempotentControllerClose,
+	createTaskEventHub,
 	DEFAULT_LIVE_TASK_RPC_TIMEOUT_MS,
 	sendLiveTaskRpcCommand,
 	type LiveTaskController,
@@ -16,7 +17,8 @@ function createController(write: (data: string, callback: (error?: Error | null)
 		childSessionPath: "session.jsonl",
 		task: "task",
 		agent: "agent",
-		transport: "rpc",
+		cwd: "/tmp/worker",
+		events: createTaskEventHub(),
 		proc: { stdin: { destroyed: false, writable: true, write } } as unknown as LiveTaskController["proc"],
 		pendingResponses: new Map(),
 		status: "running",
