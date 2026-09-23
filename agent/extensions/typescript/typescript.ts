@@ -9,6 +9,7 @@ import {
 	DEFAULT_MAX_LINES,
 	formatSize,
 	type ExtensionAPI,
+	type ExtensionContext,
 	type TruncationResult,
 	truncateHead,
 } from "@earendil-works/pi-coding-agent";
@@ -20,6 +21,7 @@ import { constrainCodemodePolicy, resolveCodemodePolicy } from "../permissions/c
 import { matchRule } from "../permissions/matching";
 import { getEffectiveSandboxTmpDir, SandboxRuntimeAdapter } from "../permissions/sandbox";
 import type { CodemodeCapability, CodemodeMode, EffectivePolicy, SandboxManagerLike } from "../permissions/shared";
+import type { CodeIntelParams } from "../code-intel/src/types";
 import * as taskAgents from "../tasks/agents.js";
 import type { AgentScope } from "../tasks/agents.js";
 
@@ -162,6 +164,8 @@ interface BridgeRuntimeState {
 	policies: EffectivePolicy[];
 	sessionId?: string;
 	mcpService?: McpService;
+	pi: ExtensionAPI;
+	ctx: ExtensionContext;
 }
 
 function describeAvailableCapabilityProfiles(): string {
@@ -182,7 +186,7 @@ const CodemodeParams = Type.Object(
 		mode: Type.Optional(
 			StringEnum(["analysis", "orchestrator"] as const, {
 				description:
-					'CodeMode capability mode. "analysis" exposes message/artifact/MCP bridges. "orchestrator" additionally exposes task/todo bridges.',
+					'CodeMode capability mode. "analysis" exposes message/artifact/MCP/code-intel bridges. "orchestrator" additionally exposes task/todo bridges.',
 			}),
 		),
 		profile: Type.Optional(
@@ -564,6 +568,11 @@ const host = {
       return await callHost("artifact.write", { name, content });
     },
   },
+  codeIntel: {
+    async run(params) {
+      return await callHost("codeIntel.run", params);
+    },
+  },
   task: {
     async run(params) {
       return await callHost("task.run", params);
@@ -899,6 +908,18 @@ function requireMcpCapability(state: BridgeRuntimeState): void {
 	if (!state.capabilities.includes("mcp")) throw new Error("host.mcp is not available for this profile");
 }
 
+function requireCodeIntelCapability(state: BridgeRuntimeState): void {
+	if (!state.capabilities.includes("codeintel")) throw new Error("host.codeIntel is not available for this profile");
+}
+
+async function containCodeIntelPath(state: BridgeRuntimeState, value: string, field: string): Promise<string> {
+	try {
+		return await resolveContainedCwd(state.policyCwd, value);
+	} catch (error) {
+		throw new Error(`host.codeIntel.run ${field} ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
 function asRecord(value: unknown, method: string): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value))
 		throw new Error(`${method} expects an object argument`);
@@ -1041,6 +1062,20 @@ async function executeBridgeRequest(state: BridgeRuntimeState, request: BridgeRe
 				disableOAuth: optionalBooleanField(input, "disableOAuth"),
 			});
 		}
+		case "codeIntel.run": {
+			requireCodeIntelCapability(state);
+			const input = asRecord(request.args, "host.codeIntel.run");
+			const action = requireStringField(input, "action", "host.codeIntel.run");
+			const { normalizeCodeIntelParams } = await import("../code-intel/src/helpers");
+			const { runCodeIntelAction } = await import("../code-intel/src/actions");
+			const params = normalizeCodeIntelParams({
+				...input,
+				action,
+			} as unknown as CodeIntelParams);
+			if (params.root !== undefined) params.root = await containCodeIntelPath(state, params.root, "root");
+			if (params.path !== undefined) params.path = await containCodeIntelPath(state, params.path, "path");
+			return await runCodeIntelAction(state.pi, state.ctx, params, state.signal);
+		}
 		default:
 			throw new Error(`Unknown bridge method: ${request.method}`);
 	}
@@ -1115,7 +1150,7 @@ export default function (pi: ExtensionAPI) {
 		name: "typescript",
 		label: "TypeScript",
 		description:
-			"Execute one-shot TypeScript in a sandboxed Bun runtime. Best for batched analysis, local data processing, and programmatic MCP workflows. Includes an MVP host bridge for message, artifact, MCP, and task operations.",
+			"Execute one-shot TypeScript in a sandboxed Bun runtime. Best for batched analysis, local data processing, and programmatic MCP workflows. Includes a host bridge for message, artifact, MCP, task, and code-intel operations.",
 		promptSnippet:
 			"Execute one-shot TypeScript in a sandboxed runtime for batched analysis, local data processing, MCP workflows, artifact generation, and limited host-orchestrated workflows.",
 		promptGuidelines: [
@@ -1125,6 +1160,7 @@ export default function (pi: ExtensionAPI) {
 			'Use the typescript tool with mode "analysis" for read/analyze/report tasks and mode "orchestrator" only when task/todo host bridges are needed.',
 			"Use the typescript tool's profile parameter to select an existing capability profile as an additional permission constraint; it cannot grant access beyond the current session profile. Omit profile to inherit the current session permissions profile.",
 			"Use the typescript tool's host.mcp methods for batched programmatic MCP workflows once the relevant server or tool is known.",
+			'Use the typescript tool\'s host.codeIntel bridge for structural code intelligence from scripts: pass { action: "repo_map" | "symbols" | "slice" | "definition" | "references" | "hover" | "outline" | "enclosing_symbol" | "status", ...params }; it operates on the session workspace like the code_intel tool and returns the raw text output.',
 			"When using the typescript tool, return a compact result and use artifact writing for larger outputs.",
 		],
 		parameters: CodemodeParams,
@@ -1308,6 +1344,8 @@ export default function (pi: ExtensionAPI) {
 				allowProjectAgents: resolvedPolicy.allowProjectAgents,
 				policies: params.profile ? [inheritedPolicy, selectedPolicy] : [inheritedPolicy],
 				sessionId: ctx.sessionManager.getSessionId(),
+				pi,
+				ctx,
 			};
 
 			const handleProtocolLine = (line: string) => {
@@ -1523,4 +1561,6 @@ export const __test__ = {
 	clampTimeout,
 	sanitizeArtifactName,
 	terminateProcessWithEscalation,
+	executeBridgeRequest,
+	containCodeIntelPath,
 };

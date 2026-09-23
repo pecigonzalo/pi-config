@@ -13,6 +13,7 @@ import {
 	generateOutline,
 	generateRepoMap,
 	renderTextMatchFallback,
+	runCodeIntelAction,
 	sliceSymbol,
 } from "./src/actions";
 import { __analysisTest } from "./src/analysis";
@@ -93,39 +94,7 @@ export default function codeIntelExtension(pi: ExtensionAPI) {
 		},
 		async execute(_toolCallId, params: CodeIntelParams, signal, _onUpdate, ctx) {
 			params = normalizeCodeIntelParams(params);
-			let output: string;
-			switch (params.action) {
-				case "status":
-					output = await buildStatus(pi, ctx, signal);
-					break;
-				case "repo_map":
-					output = await generateRepoMap(pi, ctx, params, signal);
-					break;
-				case "outline":
-					output = await generateOutline(pi, ctx, params, signal);
-					break;
-				case "symbols":
-					output = await findSymbols(pi, ctx, params, signal);
-					break;
-				case "slice":
-					output = await sliceSymbol(pi, ctx, params, signal);
-					break;
-				case "enclosing_symbol":
-					output = await findEnclosingSymbol(pi, ctx, params, signal);
-					break;
-				case "definition":
-					output = await findDefinitionWithLsp(pi, ctx, params, signal);
-					break;
-				case "references":
-					output = await findReferencesWithLsp(pi, ctx, params, signal);
-					break;
-				case "hover":
-					output = await findHoverWithLsp(pi, ctx, params, signal);
-					break;
-				default:
-					output = `Unknown code_intel action: ${(params as { action?: string }).action}`;
-			}
-			const text = truncateForTool(output);
+			const text = truncateForTool(await runCodeIntelAction(pi, ctx, params, signal));
 			return textResult(text, buildDetails(params, text));
 		},
 	});
@@ -169,6 +138,7 @@ export const __test = {
 	rankDefinitions: __analysisTest.rankDefinitions,
 	renderRepoMap: __analysisTest.renderRepoMap,
 	renderScanDiagnostics: __analysisTest.renderScanDiagnostics,
+	defaultMapTokensFor: __analysisTest.defaultMapTokensFor,
 	languageForPath,
 	findDefinitionEnd,
 	extractImportLines,
@@ -178,6 +148,7 @@ export const __test = {
 	identifierAtPosition,
 	mergeDefinitions,
 	normalizeCodeIntelParams,
+	runCodeIntelAction,
 	renderTextMatchFallback,
 	findIdentifierLineMatches,
 	getDefinitionEnd,

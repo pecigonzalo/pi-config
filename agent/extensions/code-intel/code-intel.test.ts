@@ -495,6 +495,66 @@ describe("code-intel workflow guidance", () => {
 
 		expect(output).toContain("Next: locate candidates with symbols, then use slice; avoid broad file reads.");
 	});
+
+	test("repo map shows every file's top symbol before deepening any file", () => {
+		const defs = ["alpha", "beta", "gamma"].flatMap((prefix) =>
+			[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(
+				(index): Definition =>
+					definition({
+						name: `${prefix}Symbol${index}`,
+						kind: "class",
+						file: `src/${prefix}.ts`,
+					}),
+			),
+		);
+		const output = __test.renderRepoMap({
+			root: "/repo",
+			files: [sourceFile],
+			diagnostics: { unsupportedExtensions: new Map(), fallbackPatternLanguages: new Map() },
+			rankedDefinitions: defs,
+			mapTokens: 200,
+		});
+
+		expect(output).toContain("src/alpha.ts:");
+		expect(output).toContain("src/beta.ts:");
+		expect(output).toContain("src/gamma.ts:");
+		expect(output).toContain("[Map truncated");
+	});
+
+	test("default repo map budget scales with repo size and caps out", () => {
+		expect(__test.defaultMapTokensFor(50, 5)).toBe(1600);
+		expect(__test.defaultMapTokensFor(500, 50)).toBe(500 * 14 + 50 * 48);
+		expect(__test.defaultMapTokensFor(100_000, 1_000)).toBe(20_000);
+	});
+
+	test("repo map ranking deprioritises test files without a query", () => {
+		const prodDef = definition({ name: "AuthService", kind: "class", file: "src/auth.ts" });
+		const testDef = definition({ name: "AuthServiceSpec", kind: "class", file: "src/auth.test.ts" });
+		const refs = new Map([
+			["AuthService", new Map([["src/routes.ts", 1]])],
+			["AuthServiceSpec", new Map([["src/auth.test.ts", 100]])],
+		]);
+		const ranked = __test.rankDefinitions(
+			new Map([
+				["AuthService", [prodDef]],
+				["AuthServiceSpec", [testDef]],
+			]),
+			refs,
+			new Set(),
+		);
+
+		expect(ranked[0]?.file).toBe("src/auth.ts");
+	});
+
+	test("runCodeIntelAction reports unknown actions without throwing", async () => {
+		const output = await __test.runCodeIntelAction(
+			{} as Parameters<typeof __test.runCodeIntelAction>[0],
+			{ cwd: "/repo" } as Parameters<typeof __test.runCodeIntelAction>[1],
+			{ action: "bogus" } as unknown as Parameters<typeof __test.runCodeIntelAction>[2],
+		);
+
+		expect(output).toContain("Unknown code_intel action: bogus");
+	});
 });
 
 test("code-intel completions list all accepted subcommands", () => {

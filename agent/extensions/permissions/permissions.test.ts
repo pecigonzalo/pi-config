@@ -976,7 +976,7 @@ describe("codemode policy", () => {
 		);
 		expect(resolved.codeMode).toBe("analysis");
 		expect(resolved.mode).toBe("workspace-write");
-		expect(resolved.capabilities).toEqual(["message", "artifact", "mcp"]);
+		expect(resolved.capabilities).toEqual(["message", "artifact", "mcp", "codeintel"]);
 		expect(resolved.allowProjectAgents).toBe(false);
 		expect(resolved.sandbox.enabled).toBe(true);
 		expect(resolved.sandbox.config.network?.allowedDomains).toEqual(["api.example.com"]);
@@ -1022,7 +1022,7 @@ describe("codemode policy", () => {
 		);
 		expect(resolved.codeMode).toBe("orchestrator");
 		expect(resolved.mode).toBe("full-access");
-		expect(resolved.capabilities).toEqual(["message", "artifact", "task", "todo", "mcp"]);
+		expect(resolved.capabilities).toEqual(["message", "artifact", "task", "todo", "mcp", "codeintel"]);
 		expect(resolved.sandbox.enabled).toBe(true);
 	});
 });

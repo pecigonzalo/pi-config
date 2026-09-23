@@ -123,6 +123,46 @@ describe("typescript tool helpers", () => {
 		);
 	});
 
+	it("exposes the host.codeIntel bridge in the runner source", () => {
+		const source = __test__.buildRunnerSource(["message", "artifact", "mcp", "codeintel"]);
+
+		expect(source).toContain("codeIntel");
+		expect(source).toContain('callHost("codeIntel.run"');
+	});
+
+	it("rejects host.codeIntel without the codeintel capability", async () => {
+		const state = {
+			capabilities: ["message", "artifact", "mcp"],
+			artifactsDir: "/tmp",
+			artifacts: [],
+			bridgeCalls: [],
+			cwd: "/repo",
+			policyCwd: "/repo",
+			allowProjectAgents: false,
+			policies: [],
+			pi: {},
+			ctx: { cwd: "/repo" },
+		} as unknown as Parameters<typeof __test__.executeBridgeRequest>[0];
+
+		await expect(
+			__test__.executeBridgeRequest(state, {
+				id: 1,
+				method: "codeIntel.run",
+				args: { action: "status" },
+			}),
+		).rejects.toThrow("host.codeIntel is not available for this profile");
+	});
+
+	it("contains codeIntel paths within the session workspace", async () => {
+		const state = {
+			policyCwd: process.cwd(),
+		} as unknown as Parameters<typeof __test__.containCodeIntelPath>[0];
+
+		await expect(__test__.containCodeIntelPath(state, os.tmpdir(), "root")).rejects.toThrow(
+			"host.codeIntel.run root",
+		);
+	});
+
 	it("resolves requested capability profiles to permissions profiles", () => {
 		const profiles = [
 			{ name: "read-write", enabled: true, permissionsProfile: "default" },

@@ -16,7 +16,7 @@ import {
 } from "./lsp";
 import { findProjectRoot, loadRequestedSourceFile } from "./source-files";
 import { commandVersion, extractDefinitionsForLoadedSource } from "./tree-sitter";
-import type { Definition, RepoMapOptions, SourceFile } from "./types";
+import type { CodeIntelParams, Definition, RepoMapOptions, SourceFile } from "./types";
 
 export const ACTION_NEXT_STEPS = {
 	symbols: "Next: use slice on the best match; do not read the whole file.",
@@ -363,6 +363,47 @@ export async function findReferencesWithLsp(
 	if (typeof request === "string") return request;
 	const locations = await request.service.references(request.path, request.position, { signal });
 	return formatReferencesOutput(ctx.cwd, `LSP references for ${formatLspLookupTarget(ctx.cwd, request)}`, locations);
+}
+
+export async function runCodeIntelAction(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	params: CodeIntelParams,
+	signal?: AbortSignal,
+): Promise<string> {
+	let output: string;
+	switch (params.action) {
+		case "status":
+			output = await buildStatus(pi, ctx, signal);
+			break;
+		case "repo_map":
+			output = await generateRepoMap(pi, ctx, params, signal);
+			break;
+		case "outline":
+			output = await generateOutline(pi, ctx, params, signal);
+			break;
+		case "symbols":
+			output = await findSymbols(pi, ctx, params, signal);
+			break;
+		case "slice":
+			output = await sliceSymbol(pi, ctx, params, signal);
+			break;
+		case "enclosing_symbol":
+			output = await findEnclosingSymbol(pi, ctx, params, signal);
+			break;
+		case "definition":
+			output = await findDefinitionWithLsp(pi, ctx, params, signal);
+			break;
+		case "references":
+			output = await findReferencesWithLsp(pi, ctx, params, signal);
+			break;
+		case "hover":
+			output = await findHoverWithLsp(pi, ctx, params, signal);
+			break;
+		default:
+			output = `Unknown code_intel action: ${(params as { action?: string }).action}`;
+	}
+	return output;
 }
 
 export function formatReferencesOutput(

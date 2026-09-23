@@ -9,8 +9,8 @@ import {
 } from "./shared";
 
 const MODE_CAPABILITIES: Record<CodemodeMode, CodemodeCapability[]> = {
-	analysis: ["message", "artifact", "mcp"],
-	orchestrator: ["message", "artifact", "task", "todo", "mcp"],
+	analysis: ["message", "artifact", "mcp", "codeintel"],
+	orchestrator: ["message", "artifact", "task", "todo", "mcp", "codeintel"],
 };
 
 // Keyed on the restriction-tier base mode (see baseRestrictionMode) — "auto" resolves to

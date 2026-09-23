@@ -74,6 +74,7 @@ Bridge capabilities:
 - `host.help()`
 - `host.artifact.write()`
 - `host.mcp.*`
+- `host.codeIntel.run()`
 
 Blocked:
 
@@ -156,6 +157,23 @@ Available methods:
 - `host.mcp.call({ server, tool, args?, timeoutMs?, disableOAuth? })`
 - `host.mcp.listResources({ server, disableOAuth? })`
 - `host.mcp.readResource({ server, uri, disableOAuth? })`
+
+### `host.codeIntel.run`
+
+Host-mediated code intelligence is available in `analysis` and `orchestrator` modes. It runs the same actions as the `code_intel` tool against the session workspace, so an isolated sandbox cannot inspect paths outside it via this bridge. Large outputs (like `repo_map`) are returned in full as strings.
+
+```ts
+const map = await host.codeIntel.run({ action: "repo_map", root: "." });
+const matches = await host.codeIntel.run({ action: "symbols", query: "optimizeProject" });
+const body = await host.codeIntel.run({ action: "slice", path: "src/index.ts", symbol: "optimizeProject" });
+```
+
+Actions:
+
+- `status`, `repo_map`, `outline`
+- `symbols` (query/symbol search)
+- `slice` (implementation/declaration body)
+- `enclosing_symbol`, `definition`, `references`, `hover` (require an LSP manager)
 
 ### `host.task.run`
 

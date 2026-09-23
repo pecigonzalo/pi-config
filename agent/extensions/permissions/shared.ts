@@ -102,7 +102,7 @@ export interface EffectivePolicy {
 }
 
 export type CodemodeMode = "analysis" | "orchestrator";
-export type CodemodeCapability = "message" | "artifact" | "task" | "todo" | "mcp";
+export type CodemodeCapability = "message" | "artifact" | "task" | "todo" | "mcp" | "codeintel";
 
 export interface CodemodeEffectivePolicy {
 	codeMode: CodemodeMode;
