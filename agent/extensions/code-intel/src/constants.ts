@@ -1,4 +1,5 @@
 import { formatSize } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 export const CODE_INTEL_CACHE_VERSION = 6;
 export const DEFAULT_MAP_TOKENS = 1600;
@@ -7,79 +8,100 @@ export const DEFAULT_MAX_FILE_BYTES = 512 * 1024;
 export const MAX_SIGNATURE_LINES = 12;
 export const IDENT_RE = /\b[A-Za-z_][A-Za-z0-9_]{2,}\b/g;
 
-export const CODE_INTEL_SCHEMA = {
-	type: "object",
-	properties: {
-		action: {
-			type: "string",
-			enum: [
-				"repo_map",
-				"status",
-				"outline",
-				"symbols",
-				"slice",
-				"enclosing_symbol",
-				"definition",
-				"references",
-				"hover",
-			],
-			description:
-				"Operation to run. Orient with repo_map, locate with symbols, inspect bodies with slice, find usages with LSP-backed references, convert usage locations to caller context with enclosing_symbol, then slice callers. Use outline for structure; definition/references/hover require LSP; status reports backend availability.",
-		},
-		root: {
-			type: "string",
-			description: "Optional project root. Defaults to current working directory or git root.",
-		},
-		mapTokens: {
-			type: "number",
-			description: `Approximate token budget for repo_map output. Default ${DEFAULT_MAP_TOKENS}.`,
-		},
-		maxFiles: { type: "number", description: `Maximum source files to scan. Default ${DEFAULT_MAX_FILES}.` },
-		maxFileBytes: {
-			type: "number",
-			description: `Maximum bytes per file to scan. Default ${formatSize(DEFAULT_MAX_FILE_BYTES)}.`,
-		},
-		include: { type: "array", items: { type: "string" }, description: "Optional substrings paths must include." },
-		exclude: {
-			type: "array",
-			items: { type: "string" },
-			description: "Optional substrings paths must not include.",
-		},
-		query: {
-			type: "string",
-			description:
-				"Identifier/file hint for repo_map, or locator query for symbols; follow symbol matches with slice.",
-		},
-		path: {
-			type: "string",
-			description:
-				"File path for outline, slice, enclosing_symbol, definition, references, or hover. Pass a reference location to enclosing_symbol to identify its caller.",
-		},
-		symbol: {
-			type: "string",
-			description:
-				"Symbol name. Prefer slice for its body and LSP-backed references for usages; symbols only locates candidates.",
-		},
-		line: {
-			type: "number",
-			description:
-				"1-based line for enclosing_symbol or LSP lookup. Use enclosing_symbol on a reference line, then slice the returned caller.",
-		},
-		column: { type: "number", description: "1-based column number for LSP-backed position lookups." },
-		limit: {
-			type: "number",
-			description:
-				"Maximum locator results for symbols. Default 50; use slice rather than reading matched files broadly.",
-		},
-		sliceMode: {
-			type: "string",
-			enum: ["implementation", "declaration", "any"],
-			description: 'Preferred body for slice: implementation, declaration, or any. Default "any".',
-		},
+const actionSchema = Type.Union(
+	[
+		Type.Literal("repo_map"),
+		Type.Literal("status"),
+		Type.Literal("outline"),
+		Type.Literal("symbols"),
+		Type.Literal("slice"),
+		Type.Literal("enclosing_symbol"),
+		Type.Literal("definition"),
+		Type.Literal("references"),
+		Type.Literal("hover"),
+	],
+	{
+		description:
+			"Operation to run. Orient with repo_map, locate with symbols, inspect bodies with slice, find usages with LSP-backed references, convert usage locations to caller context with enclosing_symbol, then slice callers. Use outline for structure; definition/references/hover require LSP; status reports backend availability.",
 	},
-	required: ["action"],
-	additionalProperties: false,
-};
+);
+
+export const CODE_INTEL_SCHEMA = Type.Object(
+	{
+		action: actionSchema,
+		root: Type.Optional(
+			Type.String({
+				description: "Optional project root. Defaults to current working directory or git root.",
+			}),
+		),
+		mapTokens: Type.Optional(
+			Type.Number({
+				description: `Approximate token budget for repo_map output. Default ${DEFAULT_MAP_TOKENS}.`,
+			}),
+		),
+		maxFiles: Type.Optional(
+			Type.Number({
+				description: `Maximum source files to scan. Default ${DEFAULT_MAX_FILES}.`,
+			}),
+		),
+		maxFileBytes: Type.Optional(
+			Type.Number({
+				description: `Maximum bytes per file to scan. Default ${formatSize(DEFAULT_MAX_FILE_BYTES)}.`,
+			}),
+		),
+		include: Type.Optional(
+			Type.Array(Type.String(), {
+				description: "Optional substrings paths must include.",
+			}),
+		),
+		exclude: Type.Optional(
+			Type.Array(Type.String(), {
+				description: "Optional substrings paths must not include.",
+			}),
+		),
+		query: Type.Optional(
+			Type.String({
+				description:
+					"Identifier/file hint for repo_map, or locator query for symbols; follow symbol matches with slice.",
+			}),
+		),
+		path: Type.Optional(
+			Type.String({
+				description:
+					"File path for outline, slice, enclosing_symbol, definition, references, or hover. Pass a reference location to enclosing_symbol to identify its caller.",
+			}),
+		),
+		symbol: Type.Optional(
+			Type.String({
+				description:
+					"Symbol name. Prefer slice for its body and LSP-backed references for usages; symbols only locates candidates.",
+			}),
+		),
+		line: Type.Optional(
+			Type.Number({
+				description:
+					"1-based line for enclosing_symbol or LSP lookup. Use enclosing_symbol on a reference line, then slice the returned caller.",
+			}),
+		),
+		column: Type.Optional(
+			Type.Number({
+				description: "1-based column number for LSP-backed position lookups.",
+			}),
+		),
+		limit: Type.Optional(
+			Type.Number({
+				description:
+					"Maximum locator results for symbols. Default 50; use slice rather than reading matched files broadly.",
+			}),
+		),
+		sliceMode: Type.Optional(
+			Type.Union([Type.Literal("implementation"), Type.Literal("declaration"), Type.Literal("any")], {
+				description: 'Preferred body for slice: implementation, declaration, or any. Default "any".',
+			}),
+		),
+	},
+	{ additionalProperties: false },
+);
 
 export const EXT_TO_LANGUAGE = new Map<string, string>([
 	[".ts", "typescript"],

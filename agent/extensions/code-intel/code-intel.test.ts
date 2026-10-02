@@ -1,6 +1,45 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { LSP_MANAGER_REQUEST_EVENT } from "../lsp-manager/contract";
 import { __test } from "./index";
 import type { Definition } from "./src/types";
+
+function fakePiWithLsp(service?: unknown) {
+	const handlers = new Map<string, Set<(payload: unknown) => void>>();
+	const events = {
+		emit(name: string, payload: unknown) {
+			for (const handler of handlers.get(name) ?? []) handler(payload);
+		},
+		on(name: string, handler: (payload: unknown) => void) {
+			const listeners = handlers.get(name) ?? new Set<(payload: unknown) => void>();
+			listeners.add(handler);
+			handlers.set(name, listeners);
+			return () => listeners.delete(handler);
+		},
+	};
+	if (service) {
+		events.on(LSP_MANAGER_REQUEST_EVENT, (request) => {
+			const req = request as { respond?: (value: unknown) => void } | undefined;
+			req?.respond?.(service);
+		});
+	}
+	return {
+		pi: {
+			events,
+			exec: async () => ({ code: 1, stdout: "", stderr: "" }),
+		} as never,
+	};
+}
+
+function makeCodeIntelProject() {
+	const base = join(tmpdir(), `pi-code-intel-test-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+	const session = join(base, "session");
+	mkdirSync(join(session, "src"), { recursive: true });
+	writeFileSync(join(session, "src", "index.ts"), "const value = 1;\n", "utf-8");
+	return { base, session };
+}
 
 const sourceFile = {
 	absPath: "/repo/src/auth.ts",
@@ -218,7 +257,14 @@ locals {
 
 	test("hydrates tree-sitter tags into definitions", () => {
 		const defs = __test.hydrateTreeSitterDefinitions(sourceFile, `export class AuthService {\n  login() {}\n}`, [
-			{ name: "AuthService", kind: "class", role: "def", file: "src/auth.ts", line: 0, column: 13 },
+			{
+				name: "AuthService",
+				kind: "class",
+				role: "def",
+				file: "src/auth.ts",
+				line: 0,
+				column: 13,
+			},
 		]);
 
 		expect(defs[0]?.backend).toBe("tree-sitter-tags");
@@ -227,7 +273,13 @@ locals {
 
 	test("hydrates LSP document symbols into preferred definitions", () => {
 		const defs = __test.hydrateLspDocumentSymbols(sourceFile, `export class AuthService {\n  login() {}\n}`, [
-			{ name: "AuthService", kind: "Class", file: "src/auth.ts", line: 1, column: 14 },
+			{
+				name: "AuthService",
+				kind: "Class",
+				file: "src/auth.ts",
+				line: 1,
+				column: 14,
+			},
 		]);
 
 		expect(defs[0]?.backend).toBe("lsp-document-symbol");
@@ -295,7 +347,10 @@ locals {
 			score: 0,
 			backend: "tree-sitter-tags" as const,
 		};
-		const duplicateSyntaxDef = { ...treeSitterDef, backend: "syntax-pattern" as const };
+		const duplicateSyntaxDef = {
+			...treeSitterDef,
+			backend: "syntax-pattern" as const,
+		};
 		const syntaxOnlyDef = {
 			...treeSitterDef,
 			name: "clusterState",
@@ -372,7 +427,12 @@ locals {
 	test("matches declaration/backend query filters", () => {
 		const parsed = __test.parseSymbolQuery("decl:true backend:syntax");
 		const decl = __test.matchesSymbolQuery(
-			definition({ name: "CreateTopic", kind: "interface_method", declaration: true, backend: "syntax-pattern" }),
+			definition({
+				name: "CreateTopic",
+				kind: "interface_method",
+				declaration: true,
+				backend: "syntax-pattern",
+			}),
 			parsed,
 		);
 		const impl = __test.matchesSymbolQuery(
@@ -416,7 +476,11 @@ locals {
 		const chosen = __test.chooseReferenceDeclaration(
 			[
 				definition({ name: "CreateTopic", kind: "method", declaration: false }),
-				definition({ name: "CreateTopic", kind: "interface_method", declaration: true }),
+				definition({
+					name: "CreateTopic",
+					kind: "interface_method",
+					declaration: true,
+				}),
 			],
 			"CreateTopic",
 		);
@@ -425,8 +489,18 @@ locals {
 
 	test("includes LSP backend counts in backend summaries", () => {
 		const summary = __test.formatBackendSummary([
-			{ name: "AuthService", kind: "class", file: "src/auth.ts", backend: "lsp-document-symbol" },
-			{ name: "buildAuth", kind: "function", file: "src/auth.ts", backend: "syntax-pattern" },
+			{
+				name: "AuthService",
+				kind: "class",
+				file: "src/auth.ts",
+				backend: "lsp-document-symbol",
+			},
+			{
+				name: "buildAuth",
+				kind: "function",
+				file: "src/auth.ts",
+				backend: "syntax-pattern",
+			},
 		] as any);
 
 		expect(summary).toContain("lsp=1");
@@ -435,7 +509,13 @@ locals {
 
 	test("formats LSP locations relative to cwd", () => {
 		const text = __test.formatLspLocations("/repo", "LSP references", [
-			{ file: "/repo/src/index.ts", line: 2, column: 4, endLine: 2, endColumn: 9 },
+			{
+				file: "/repo/src/index.ts",
+				line: 2,
+				column: 4,
+				endLine: 2,
+				endColumn: 9,
+			},
 		]);
 
 		expect(text).toContain("LSP references");
@@ -470,7 +550,13 @@ describe("code-intel workflow guidance", () => {
 
 	test("references output suggests caller drilldown when locations exist", () => {
 		const output = __test.formatReferencesOutput("/repo", "LSP references", [
-			{ file: "/repo/src/index.ts", line: 2, column: 4, endLine: 2, endColumn: 9 },
+			{
+				file: "/repo/src/index.ts",
+				line: 2,
+				column: 4,
+				endLine: 2,
+				endColumn: 9,
+			},
 		]);
 
 		expect(output).toContain("src/index.ts:2:4-2:9");
@@ -488,7 +574,10 @@ describe("code-intel workflow guidance", () => {
 		const output = __test.renderRepoMap({
 			root: "/repo",
 			files: [sourceFile],
-			diagnostics: { unsupportedExtensions: new Map(), fallbackPatternLanguages: new Map() },
+			diagnostics: {
+				unsupportedExtensions: new Map(),
+				fallbackPatternLanguages: new Map(),
+			},
 			rankedDefinitions: [definition({ name: "AuthService", kind: "class", file: "src/auth.ts" })],
 			mapTokens: 200,
 		});
@@ -510,7 +599,10 @@ describe("code-intel workflow guidance", () => {
 		const output = __test.renderRepoMap({
 			root: "/repo",
 			files: [sourceFile],
-			diagnostics: { unsupportedExtensions: new Map(), fallbackPatternLanguages: new Map() },
+			diagnostics: {
+				unsupportedExtensions: new Map(),
+				fallbackPatternLanguages: new Map(),
+			},
 			rankedDefinitions: defs,
 			mapTokens: 200,
 		});
@@ -528,8 +620,16 @@ describe("code-intel workflow guidance", () => {
 	});
 
 	test("repo map ranking deprioritises test files without a query", () => {
-		const prodDef = definition({ name: "AuthService", kind: "class", file: "src/auth.ts" });
-		const testDef = definition({ name: "AuthServiceSpec", kind: "class", file: "src/auth.test.ts" });
+		const prodDef = definition({
+			name: "AuthService",
+			kind: "class",
+			file: "src/auth.ts",
+		});
+		const testDef = definition({
+			name: "AuthServiceSpec",
+			kind: "class",
+			file: "src/auth.test.ts",
+		});
 		const refs = new Map([
 			["AuthService", new Map([["src/routes.ts", 1]])],
 			["AuthServiceSpec", new Map([["src/auth.test.ts", 100]])],
@@ -568,4 +668,91 @@ test("code-intel completions filter by prefix", () => {
 
 test("code-intel completions return nothing for unrecognised prefix", () => {
 	expect(__test.CODE_INTEL_COMPLETIONS.filter((s) => s.value.startsWith("xyz"))).toEqual([]);
+});
+
+describe("code-intel workspace boundaries", () => {
+	test("rejects paths outside the session workspace", async () => {
+		const { base, session } = makeCodeIntelProject();
+		try {
+			const { pi } = fakePiWithLsp();
+			const ctx = { cwd: session } as never;
+			const result = await __test.loadRequestedSourceFile(
+				pi,
+				ctx,
+				{ path: "../outside/src/index.ts" },
+				undefined,
+			);
+			expect(result).toContain("outside the session workspace");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
+	});
+
+	test("rejects roots outside the session workspace", async () => {
+		const { base, session } = makeCodeIntelProject();
+		try {
+			const { pi } = fakePiWithLsp();
+			const ctx = { cwd: session } as never;
+			const result = await __test.loadRequestedSourceFile(
+				pi,
+				ctx,
+				{ root: "..", path: "session/src/index.ts" },
+				undefined,
+			);
+			expect(result).toContain("outside the session workspace");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
+	});
+
+	test("rejects files over maxFileBytes", async () => {
+		const { base, session } = makeCodeIntelProject();
+		writeFileSync(join(session, "src", "big.ts"), "x".repeat(1500), "utf-8");
+		try {
+			const { pi } = fakePiWithLsp();
+			const ctx = { cwd: session } as never;
+			const result = await __test.loadRequestedSourceFile(
+				pi,
+				ctx,
+				{ path: "src/big.ts", maxFileBytes: 1000 },
+				undefined,
+			);
+			expect(result).toContain("too large");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
+	});
+
+	test("direct LSP lookups resolve against the request root", async () => {
+		const { base, session } = makeCodeIntelProject();
+		mkdirSync(join(session, "packages", "a", "src"), { recursive: true });
+		mkdirSync(join(session, "packages", "b", "src"), { recursive: true });
+		writeFileSync(join(session, "packages", "a", "src", "index.ts"), "const a = 1;\n", "utf-8");
+		writeFileSync(join(session, "packages", "b", "src", "index.ts"), "const b = 1;\n", "utf-8");
+		try {
+			const service = {
+				definition: async () => [],
+				references: async () => [],
+				hover: async () => undefined,
+			};
+			const { pi } = fakePiWithLsp(service);
+			const ctx = { cwd: session } as never;
+			const request = await __test.getLspLookupRequest(
+				pi,
+				ctx,
+				{ root: "packages/a", path: "src/index.ts", line: 1, column: 1 },
+				"definition",
+				undefined,
+			);
+			expect(typeof request).not.toBe("string");
+			const lookup = request as {
+				path: string;
+				position: { line: number; column: number };
+			};
+			expect(lookup.path).toBe(join(realpathSync.native(session), "packages", "a", "src", "index.ts"));
+			expect(lookup.position).toEqual({ line: 1, column: 1 });
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
+	});
 });

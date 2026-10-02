@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CODE_INTEL_CACHE_VERSION, DEFAULT_MAP_TOKENS, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_FILES } from "./constants";
 import { extractReferences, extractDefinitions, mergeDefinitions } from "./extractors";
-import { clampInt, looksBinary } from "./helpers";
+import { canonicalizePath, clampInt, isWithinRoot, looksBinary } from "./helpers";
 import { getLspService, hydrateLspDocumentSymbols, isMappableLspDocumentSymbol, type LspDocumentSymbol } from "./lsp";
-import { findProjectRoot, listSourceFiles } from "./source-files";
+import { findProjectRoot, findWorkspaceRoot, listSourceFiles } from "./source-files";
 import { commandVersion, extractTreeSitterTags, hydrateTreeSitterDefinitions } from "./tree-sitter";
 import type {
 	CachedAnalysisPayload,
@@ -19,6 +19,8 @@ import type {
 } from "./types";
 
 const MAX_LSP_DOCUMENT_SYMBOL_FILES = 250;
+const LSP_DOCUMENT_SYMBOL_CONCURRENCY = 6;
+const LSP_DOCUMENT_SYMBOL_TIMEOUT_MS = 1_500;
 
 const MIN_MAP_TOKENS = 200;
 const MAX_MAP_TOKENS = 20_000;
@@ -54,6 +56,10 @@ export async function buildRepoAnalysis(
 	signal?: AbortSignal,
 ): Promise<RepoAnalysis> {
 	const root = params.root ? resolve(ctx.cwd, params.root) : await findProjectRoot(pi, ctx.cwd, signal);
+	const workspace = await findWorkspaceRoot(pi, ctx.cwd, signal);
+	if (!isWithinRoot(workspace, canonicalizePath(root))) {
+		throw new Error(`code_intel root is outside the session workspace (${workspace}): ${params.root ?? root}`);
+	}
 	const maxFiles = clampInt(params.maxFiles ?? DEFAULT_MAX_FILES, 1, 25_000);
 	const maxFileBytes = clampInt(params.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, 1_000, 5 * 1024 * 1024);
 	const sourceDiscovery = await listSourceFiles(
@@ -169,19 +175,30 @@ async function extractLspDocumentSymbols(
 	const skippedFiles = Math.max(0, candidates.length - MAX_LSP_DOCUMENT_SYMBOL_FILES);
 	const byFile = new Map<string, LspDocumentSymbol[]>();
 	let definitionCount = 0;
+	const batch = candidates.slice(0, MAX_LSP_DOCUMENT_SYMBOL_FILES);
+	let nextIndex = 0;
 
-	for (const file of candidates.slice(0, MAX_LSP_DOCUMENT_SYMBOL_FILES)) {
-		if (signal?.aborted) throw new Error("code_intel analysis cancelled");
-		try {
-			const symbols = await service.documentSymbols(file.absPath, { signal });
-			const mappableSymbols = symbols.filter(isMappableLspDocumentSymbol);
-			if (mappableSymbols.length === 0) continue;
-			byFile.set(file.relPath, mappableSymbols);
-			definitionCount += mappableSymbols.length;
-		} catch {
-			// LSP document symbols are an enhancement; tree-sitter/syntax fallback remains available.
+	const worker = async () => {
+		for (;;) {
+			const file = batch[nextIndex++];
+			if (!file) return;
+			if (signal?.aborted) throw new Error("code_intel analysis cancelled");
+			try {
+				const symbols = await service.documentSymbols(file.absPath, {
+					signal,
+					timeoutMs: LSP_DOCUMENT_SYMBOL_TIMEOUT_MS,
+				});
+				const mappableSymbols = symbols.filter(isMappableLspDocumentSymbol);
+				if (mappableSymbols.length === 0) continue;
+				byFile.set(file.relPath, mappableSymbols);
+				definitionCount += mappableSymbols.length;
+			} catch {
+				// LSP document symbols are an enhancement; tree-sitter/syntax fallback remains available.
+			}
 		}
-	}
+	};
+
+	await Promise.all(Array.from({ length: Math.min(LSP_DOCUMENT_SYMBOL_CONCURRENCY, batch.length) }, worker));
 
 	return { byFile, definitionCount, skippedFiles };
 }
@@ -287,7 +304,14 @@ async function saveAnalysisCache(
 			references: Array.from(item.references),
 		})),
 	};
-	await writeFile(cachePath, JSON.stringify(payload), "utf8");
+	const tmpPath = `${cachePath}.tmp`;
+	try {
+		await writeFile(tmpPath, JSON.stringify(payload), "utf8");
+		await rename(tmpPath, cachePath);
+	} catch (error) {
+		await rm(tmpPath, { force: true }).catch(() => undefined);
+		throw error;
+	}
 }
 
 function getAnalysisCachePath(root: string): string {

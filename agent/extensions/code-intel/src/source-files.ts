@@ -1,14 +1,27 @@
 import { existsSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
-import { basename, extname, join, relative, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { EXT_TO_LANGUAGE, LANGUAGE_SPECIFIC_PATTERN_SUPPORT, SKIP_DIRS } from "./constants";
-import { looksBinary, normalizePath } from "./helpers";
+import { DEFAULT_MAX_FILE_BYTES, EXT_TO_LANGUAGE, LANGUAGE_SPECIFIC_PATTERN_SUPPORT, SKIP_DIRS } from "./constants";
+import { canonicalizePath, clampInt, isWithinRoot, looksBinary, normalizePath } from "./helpers";
 import type { RepoMapOptions, SourceDiscoveryResult, SourceFile } from "./types";
 
 const SOURCE_SUFFIXES = [...EXT_TO_LANGUAGE.keys()].sort((left, right) => right.length - left.length);
 
 export async function findProjectRoot(pi: ExtensionAPI, cwd: string, signal?: AbortSignal): Promise<string> {
+	return (await gitTopLevel(pi, cwd, signal)) ?? cwd;
+}
+
+/**
+ * Workspace boundary for root and path inputs: the git top level when cwd is
+ * inside a work tree, otherwise cwd. All requested roots and paths must resolve
+ * within it.
+ */
+export async function findWorkspaceRoot(pi: ExtensionAPI, cwd: string, signal?: AbortSignal): Promise<string> {
+	return canonicalizePath(await findProjectRoot(pi, cwd, signal));
+}
+
+async function gitTopLevel(pi: ExtensionAPI, cwd: string, signal?: AbortSignal): Promise<string | undefined> {
 	try {
 		const result = await pi.exec("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { signal, timeout: 5000 });
 		if (result.code === 0) {
@@ -16,9 +29,9 @@ export async function findProjectRoot(pi: ExtensionAPI, cwd: string, signal?: Ab
 			if (root) return root;
 		}
 	} catch {
-		// fall through
+		// Not a git work tree; fall back to cwd.
 	}
-	return cwd;
+	return undefined;
 }
 
 export async function loadRequestedSourceFile(
@@ -29,16 +42,32 @@ export async function loadRequestedSourceFile(
 ): Promise<{ root: string; file: SourceFile; text: string } | string> {
 	if (!params.path) return "This action requires path.";
 	const root = params.root ? resolve(ctx.cwd, params.root) : await findProjectRoot(pi, ctx.cwd, signal);
-	const absPath = resolve(root, params.path);
+	const workspace = await findWorkspaceRoot(pi, ctx.cwd, signal);
+	const canonicalRoot = canonicalizePath(root);
+	if (!isWithinRoot(workspace, canonicalRoot)) {
+		return `Requested root is outside the session workspace (${workspace}): ${params.root}`;
+	}
+	const absPath = canonicalizePath(resolve(root, params.path));
+	if (!isWithinRoot(workspace, absPath)) {
+		return `Path is outside the session workspace (${workspace}): ${params.path}`;
+	}
 	if (!existsSync(absPath)) return `File not found: ${params.path}`;
-	const relPath = normalizePath(relative(root, absPath));
+	const relPath = normalizePath(relative(canonicalRoot, absPath));
 	const language = languageForPath(relPath);
 	if (!language) return `Unsupported file extension for ${params.path}.`;
 	const fileStat = await stat(absPath);
 	if (!fileStat.isFile()) return `Not a regular file: ${params.path}`;
+	const maxFileBytes = clampInt(params.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, 1_000, 5 * 1024 * 1024);
+	if (fileStat.size > maxFileBytes) {
+		return `File is too large to analyze (limit ${maxFileBytes} bytes): ${params.path}`;
+	}
 	const text = await readFile(absPath, "utf8");
 	if (looksBinary(text)) return `Refusing to analyze binary-looking file: ${params.path}`;
-	return { root, file: { absPath, relPath, language, size: fileStat.size, mtimeMs: fileStat.mtimeMs }, text };
+	return {
+		root: canonicalRoot,
+		file: { absPath, relPath, language, size: fileStat.size, mtimeMs: fileStat.mtimeMs },
+		text,
+	};
 }
 
 export async function listSourceFiles(
@@ -47,8 +76,13 @@ export async function listSourceFiles(
 	options: { maxFiles: number; maxFileBytes: number; include?: string[]; exclude?: string[] },
 	signal?: AbortSignal,
 ): Promise<SourceDiscoveryResult> {
-	const gitFiles = await listGitFiles(pi, root, signal);
-	const relPaths = gitFiles.length > 0 ? gitFiles : await walkFiles(root, options.maxFiles * 2, signal);
+	const topLevel = await gitTopLevel(pi, root, signal);
+	// git ls-files paths are repo-root-relative; only use them when the requested
+	// root is the top level. Otherwise walk the root so subdirectory roots resolve.
+	const useGitFiles = !!topLevel && canonicalizePath(root) === topLevel;
+	const relPaths = useGitFiles
+		? await listGitFiles(pi, root, signal)
+		: await walkFiles(root, options.maxFiles * 2, signal);
 	const files: SourceFile[] = [];
 	const unsupportedExtensions = new Map<string, number>();
 	const fallbackPatternLanguages = new Map<string, number>();

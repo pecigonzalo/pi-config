@@ -458,9 +458,17 @@ async function getLspLookupRequest(
 		return `code_intel ${action} requires symbol or path with 1-based line and column.`;
 	}
 
-	const path = resolve(ctx.cwd, params.path);
+	// Route through the same root/path resolution as structural actions so a
+	// root parameter always applies, and the workspace boundary and byte cap hold.
+	const loaded = await loadRequestedSourceFile(pi, ctx, params, signal);
+	if (typeof loaded === "string") return loaded;
 	const position = { line: Math.floor(params.line), column: Math.floor(params.column) };
-	return { service, path, position, symbol: await readIdentifierAtPosition(path, position) };
+	return {
+		service,
+		path: loaded.file.absPath,
+		position,
+		symbol: identifierAtPosition(loaded.text, position.line, position.column),
+	};
 }
 
 async function resolveLspSymbolRequest(
@@ -526,14 +534,6 @@ function findSymbolColumn(line: string, symbol: string): number | undefined {
 	if (!symbol) return undefined;
 	const match = line.match(new RegExp(`\\b${escapeRegExp(symbol)}\\b`));
 	return match?.index == null ? undefined : match.index + 1;
-}
-
-async function readIdentifierAtPosition(path: string, position: LspPosition): Promise<string | undefined> {
-	try {
-		return identifierAtPosition(await readFile(path, "utf8"), position.line, position.column);
-	} catch {
-		return undefined;
-	}
 }
 
 function formatLspLookupTarget(cwd: string, request: LspLookupRequest): string {
@@ -812,6 +812,7 @@ export const __actionsTest = {
 	matchesSymbolQuery,
 	inferCallableArity,
 	chooseReferenceDeclaration,
+	getLspLookupRequest,
 	formatLspLocations,
 	formatReferencesOutput,
 };

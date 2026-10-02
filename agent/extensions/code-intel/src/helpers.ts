@@ -1,3 +1,5 @@
+import { realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import type { CodeIntelDetails, CodeIntelParams } from "./types";
 
@@ -105,6 +107,32 @@ export function clampInt(value: number, min: number, max: number): number {
 
 export function normalizePath(path: string): string {
 	return path.split(/[/\\]/).join("/");
+}
+
+/**
+ * Resolve symlinks, realpathing the deepest existing ancestor when the path
+ * itself does not exist, so nonexistent paths share the canonical prefix of
+ * existing ones (e.g. /var vs /private/var).
+ */
+export function canonicalizePath(inputPath: string): string {
+	let current = inputPath;
+	const remainder: string[] = [];
+	for (;;) {
+		try {
+			return join(realpathSync.native(current), ...remainder);
+		} catch {
+			const parent = dirname(current);
+			if (parent === current) return inputPath;
+			remainder.unshift(basename(current));
+			current = parent;
+		}
+	}
+}
+
+/** True when candidate is root itself or resolves beneath it. */
+export function isWithinRoot(root: string, candidate: string): boolean {
+	const rel = relative(root, candidate);
+	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 export function looksBinary(text: string): boolean {

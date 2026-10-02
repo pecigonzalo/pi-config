@@ -35,7 +35,7 @@ import {
 	truncateForTool,
 } from "./src/helpers";
 import { hydrateLspDocumentSymbols, identifierAtPosition } from "./src/lsp";
-import { languageForPath } from "./src/source-files";
+import { languageForPath, loadRequestedSourceFile } from "./src/source-files";
 import { hydrateTreeSitterDefinitions, parseTreeSitterTagsOutput } from "./src/tree-sitter";
 import type { CodeIntelParams } from "./src/types";
 
@@ -129,6 +129,8 @@ export default function codeIntelExtension(pi: ExtensionAPI) {
 
 export const __test = {
 	CODE_INTEL_COMPLETIONS,
+	loadRequestedSourceFile,
+	getLspLookupRequest: __actionsTest.getLspLookupRequest,
 	CODE_INTEL_DESCRIPTION,
 	CODE_INTEL_PROMPT_SNIPPET,
 	CODE_INTEL_PROMPT_GUIDELINES,
