@@ -70,6 +70,11 @@ The footer config is resolved in this order:
 1. `~/.pi/agent/footer.jsonc`
 1. `<project>/.pi/footer.jsonc`
 
+Project-local overrides (`<project>/.pi/footer.jsonc`) are applied only when
+the project is trusted. In an untrusted project the file is ignored and a
+one-time notice is shown, so a repository cannot change the layout or select
+the `starship` executable for your session.
+
 The shipped `footer.jsonc` intentionally spells out the shipped `default`
 and `minimal` layouts, including row separators and item placements.
 `compact` and `full` still exist as built-in layouts and fall back to the
@@ -213,7 +218,9 @@ Then place a custom item on `row: "extra"`.
 
 When Starship is enabled, the `starship` item renders the left side by
 calling `starship prompt`. Once Starship output is available, built-in `path`
-and `git` items are suppressed for that layout.
+and `git` items are suppressed for that layout. The subprocess timeout is
+capped at 10 seconds; a larger `starship.timeoutMs` is clamped, and running
+subprocesses are terminated when the session shuts down.
 
 If Starship is missing or fails, the footer falls back to the built-in
 `path` and `git` items.
@@ -231,6 +238,11 @@ If Starship is missing or fails, the footer falls back to the built-in
 - `cost`
 - `time_spent`
 - `extension-statuses`
+
+The `tokens` and `cost` items total usage from assistant and tool-result
+messages, cache-warming usage entries, compaction, and branch summaries.
+Cache reads and writes appear as `R` and `W` beside the in/out totals when
+nonzero.
 
 ## See also
 

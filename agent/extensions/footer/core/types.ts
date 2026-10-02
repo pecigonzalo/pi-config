@@ -38,7 +38,7 @@ export interface FooterItemRenderContext {
 
 export interface FooterToolResultEvent {
 	toolName: string;
-	input?: unknown;
+	input: Record<string, unknown>;
 }
 
 export interface FooterThinkingLevelEvent {

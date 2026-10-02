@@ -29,7 +29,7 @@ export default function footer(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_result", async (event) => {
-		footerManager.onToolResult(event as { toolName: string; input?: unknown });
+		footerManager.onToolResult(event);
 	});
 
 	pi.on("turn_start", async () => {
@@ -45,7 +45,7 @@ export default function footer(pi: ExtensionAPI) {
 	});
 
 	pi.on("thinking_level_select", async (event) => {
-		footerManager.onThinkingLevelSelect(event as { level: string; previousLevel?: string });
+		footerManager.onThinkingLevelSelect(event);
 	});
 
 	pi.registerCommand("footer", {

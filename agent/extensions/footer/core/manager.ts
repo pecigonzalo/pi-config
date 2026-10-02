@@ -19,6 +19,43 @@ import {
 	FOOTER_REGISTER_EVENT,
 	FOOTER_UNREGISTER_EVENT,
 } from "./types";
+import { FOOTER_LAYOUT_NAMES } from "../constants";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function isFooterItem(value: unknown): value is FooterItem {
+	if (!isRecord(value)) return false;
+	return (
+		typeof value.owner === "string" &&
+		typeof value.id === "string" &&
+		typeof value.getPlacement === "function" &&
+		typeof value.render === "function"
+	);
+}
+
+function isValidRegisterPayload(payload: unknown): payload is FooterRegisterEventPayload {
+	return isRecord(payload) && isFooterItem(payload.item);
+}
+
+function isValidUnregisterPayload(payload: unknown): payload is FooterUnregisterEventPayload {
+	if (!isRecord(payload)) return false;
+	return typeof payload.owner === "string" && (payload.id === undefined || typeof payload.id === "string");
+}
+
+function isValidInvalidatePayload(payload: unknown): payload is FooterInvalidateEventPayload {
+	if (!isRecord(payload)) return false;
+	return (
+		(payload.owner === undefined || typeof payload.owner === "string") &&
+		(payload.id === undefined || typeof payload.id === "string")
+	);
+}
+
+function isValidActivateLayoutPayload(payload: unknown): payload is FooterActivateLayoutEventPayload {
+	if (!isRecord(payload)) return false;
+	return FOOTER_LAYOUT_NAMES.includes(payload.layoutName as FooterLayoutName);
+}
 
 function getItemKey(owner: string, id: string): string {
 	return `${owner}:${id}`;
@@ -94,23 +131,23 @@ export class FooterManager {
 		private readonly config: FooterConfigController,
 	) {
 		this.pi.events.on(FOOTER_REGISTER_EVENT, (payload) => {
-			const { item } = payload as FooterRegisterEventPayload;
-			this.registerItem(item);
+			if (!isValidRegisterPayload(payload)) return;
+			this.registerItem(payload.item);
 		});
 
 		this.pi.events.on(FOOTER_UNREGISTER_EVENT, (payload) => {
-			const { owner, id } = payload as FooterUnregisterEventPayload;
-			this.unregisterItem(owner, id);
+			if (!isValidUnregisterPayload(payload)) return;
+			this.unregisterItem(payload.owner, payload.id);
 		});
 
 		this.pi.events.on(FOOTER_INVALIDATE_EVENT, (payload) => {
-			const { owner, id } = (payload ?? {}) as FooterInvalidateEventPayload;
-			this.invalidate(owner, id);
+			if (!isValidInvalidatePayload(payload)) return;
+			this.invalidate(payload.owner, payload.id);
 		});
 
 		this.pi.events.on(FOOTER_ACTIVATE_LAYOUT_EVENT, (payload) => {
-			const { layoutName } = payload as FooterActivateLayoutEventPayload;
-			this.activateLayout(layoutName);
+			if (!isValidActivateLayoutPayload(payload)) return;
+			this.activateLayout(payload.layoutName);
 		});
 	}
 
@@ -171,7 +208,7 @@ export class FooterManager {
 
 	mount(ctx: ExtensionContext): void {
 		this.currentCtx = ctx;
-		if (!ctx.hasUI) return;
+		if (ctx.mode !== "tui") return;
 
 		ctx.ui.setFooter((_tui, theme, footerData) => {
 			const nextRequestRender = () => _tui.requestRender();
@@ -201,7 +238,7 @@ export class FooterManager {
 	}
 
 	unmount(ctx: ExtensionContext): void {
-		if (ctx.hasUI) {
+		if (ctx.mode === "tui") {
 			ctx.ui.setFooter(undefined);
 		}
 		this.requestRender = undefined;
@@ -248,6 +285,11 @@ export class FooterManager {
 
 export const __test__ = {
 	formatExtensionStatuses,
+	isFooterItem,
+	isValidActivateLayoutPayload,
+	isValidInvalidatePayload,
+	isValidRegisterPayload,
+	isValidUnregisterPayload,
 	matchesStatusPattern,
 	sanitizeStatusText,
 	shouldRenderStatus,

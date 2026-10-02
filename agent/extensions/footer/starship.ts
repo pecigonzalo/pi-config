@@ -1,10 +1,9 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { execFile, type ChildProcess } from "node:child_process";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { FooterLayoutName } from "./core/types";
+import type { FooterLayoutName, FooterToolResultEvent } from "./core/types";
 import type { FooterConfigController } from "./config";
 
-const execFileAsync = promisify(execFile);
+const STARSHIP_MAX_TIMEOUT_MS = 10_000;
 
 interface PromptCacheEntry {
 	prompt: string | null;
@@ -14,6 +13,10 @@ function formatErrorMessage(error: unknown): string {
 	if (!error) return "unknown error";
 	if (error instanceof Error && error.message) return error.message;
 	return String(error);
+}
+
+function isMissingExecutable(error: unknown): boolean {
+	return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
 function normalizePromptLine(line: string): string | null {
@@ -27,7 +30,7 @@ export interface StarshipController {
 	setRequestRender(requestRender: (() => void) | undefined): void;
 	onSessionStart(): void;
 	onTurnEnd(): void;
-	onToolResult(event: { toolName: string; input?: unknown }): void;
+	onToolResult(event: FooterToolResultEvent): void;
 	onSessionShutdown(): void;
 	renderPrompt(ctx: ExtensionContext, width: number, layoutName: FooterLayoutName): string | null;
 	hasPrompt(ctx: ExtensionContext, width: number, layoutName: FooterLayoutName): boolean;
@@ -37,7 +40,10 @@ export function createStarshipController(config: FooterConfigController): Starsh
 	const cache = new Map<string, PromptCacheEntry>();
 	const pending = new Set<string>();
 	const reportedDiagnostics = new Set<string>();
+	const activeChildren = new Set<ChildProcess>();
+	const delayedRenderTimers = new Set<ReturnType<typeof setTimeout>>();
 	let requestRender: (() => void) | undefined;
+	let disposed = false;
 
 	const reportDiagnostic = (ctx: ExtensionContext, key: string, message: string): void => {
 		if (!ctx.hasUI || reportedDiagnostics.has(key)) return;
@@ -50,35 +56,38 @@ export function createStarshipController(config: FooterConfigController): Starsh
 		pending.clear();
 	};
 
+	const scheduleDelayedRender = (delayMs: number): void => {
+		const handle = setTimeout(() => {
+			delayedRenderTimers.delete(handle);
+			requestRender?.();
+		}, delayMs);
+		delayedRenderTimers.add(handle);
+	};
+
+	const abortAll = (): void => {
+		for (const child of activeChildren) {
+			try {
+				child.kill("SIGTERM");
+			} catch {
+				// already gone
+			}
+		}
+		activeChildren.clear();
+		for (const handle of delayedRenderTimers) clearTimeout(handle);
+		delayedRenderTimers.clear();
+	};
+
 	const isEnabled = (): boolean => config.getStarshipSettings().enabled;
 
 	const getCacheKey = (cwd: string, width: number): string => `${cwd}::${Math.max(20, width)}`;
 
-	const fetchPrompt = async (ctx: ExtensionContext, width: number, cacheKey: string): Promise<void> => {
+	const fetchPrompt = (ctx: ExtensionContext, width: number, cacheKey: string): void => {
 		const settings = config.getStarshipSettings();
-		try {
-			const { stdout } = await execFileAsync(
-				settings.command,
-				[
-					"prompt",
-					`--terminal-width=${Math.max(20, width)}`,
-					"--status=0",
-					"--keymap=",
-					"--pipestatus=0",
-					"--cmd-duration=0",
-					"--jobs=0",
-				],
-				{
-					cwd: ctx.cwd,
-					timeout: settings.timeoutMs,
-					env: { ...process.env, PWD: ctx.cwd, STARSHIP_SHELL: settings.shell },
-				},
-			);
-			const prompt = normalizePromptLine(stdout.split("\n")[0] ?? "");
-			cache.set(cacheKey, { prompt });
-		} catch (error) {
+		const timeoutMs = Math.min(settings.timeoutMs, STARSHIP_MAX_TIMEOUT_MS);
+
+		const handleFailure = (error: unknown): void => {
 			cache.set(cacheKey, { prompt: null });
-			if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+			if (isMissingExecutable(error)) {
 				reportDiagnostic(
 					ctx,
 					`starship-missing:${settings.command}`,
@@ -91,8 +100,44 @@ export function createStarshipController(config: FooterConfigController): Starsh
 					`Footer starship prompt failed (${settings.command}): ${formatErrorMessage(error)}`,
 				);
 			}
-		} finally {
+		};
+
+		let child: ChildProcess | undefined;
+		try {
+			child = execFile(
+				settings.command,
+				[
+					"prompt",
+					`--terminal-width=${Math.max(20, width)}`,
+					"--status=0",
+					"--keymap=",
+					"--pipestatus=0",
+					"--cmd-duration=0",
+					"--jobs=0",
+				],
+				{
+					cwd: ctx.cwd,
+					timeout: timeoutMs,
+					env: { ...process.env, PWD: ctx.cwd, STARSHIP_SHELL: settings.shell },
+				},
+				(error, stdout) => {
+					if (child) activeChildren.delete(child);
+					pending.delete(cacheKey);
+					if (disposed) return;
+					if (error) {
+						handleFailure(error);
+					} else {
+						const prompt = normalizePromptLine(String(stdout ?? "").split("\n")[0] ?? "");
+						cache.set(cacheKey, { prompt });
+					}
+					requestRender?.();
+				},
+			);
+			activeChildren.add(child);
+		} catch (error) {
 			pending.delete(cacheKey);
+			if (disposed) return;
+			handleFailure(error);
 			requestRender?.();
 		}
 	};
@@ -106,7 +151,7 @@ export function createStarshipController(config: FooterConfigController): Starsh
 
 		if (!pending.has(cacheKey)) {
 			pending.add(cacheKey);
-			void fetchPrompt(ctx, width, cacheKey);
+			fetchPrompt(ctx, width, cacheKey);
 		}
 
 		return undefined;
@@ -118,6 +163,7 @@ export function createStarshipController(config: FooterConfigController): Starsh
 		},
 
 		onSessionStart() {
+			disposed = false;
 			invalidate();
 			requestRender?.();
 		},
@@ -134,15 +180,17 @@ export function createStarshipController(config: FooterConfigController): Starsh
 			}
 
 			if (event.toolName === "bash") {
-				const command = String((event as { input?: { command?: unknown } }).input?.command ?? "");
+				const command = String(event.input.command ?? "");
 				if (/\bgit\s+(checkout|switch|merge|rebase|pull|reset)/.test(command)) {
 					invalidate();
-					setTimeout(() => requestRender?.(), 150);
+					scheduleDelayedRender(150);
 				}
 			}
 		},
 
 		onSessionShutdown() {
+			disposed = true;
+			abortAll();
 			invalidate();
 			requestRender = undefined;
 		},

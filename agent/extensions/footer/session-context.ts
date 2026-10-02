@@ -1,8 +1,8 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { basename } from "node:path";
-import type { FooterLayoutName } from "./core/types";
+import type { FooterLayoutName, FooterToolResultEvent } from "./core/types";
 import { footerLayoutNames } from "./layouts";
 
 function detectNerdFonts(): boolean {
@@ -66,6 +66,7 @@ const gitPending = new Set<string>();
 const gitGeneration = new Map<string, number>();
 let gitEpoch = 0;
 const gitTtlMs = 1_000;
+const activeGitProcesses = new Set<ChildProcess>();
 
 function nextGitGeneration(cwd: string): number {
 	const next = (gitGeneration.get(cwd) ?? 0) + 1;
@@ -75,18 +76,26 @@ function nextGitGeneration(cwd: string): number {
 
 function gitRun(cwd: string, args: string[], timeoutMs = 300): Promise<string | null> {
 	return new Promise((resolve) => {
-		const process = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		let process: ChildProcess;
+		try {
+			process = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		} catch {
+			resolve(null);
+			return;
+		}
+		activeGitProcesses.add(process);
 		let output = "";
 		let finished = false;
 
 		const finish = (result: string | null) => {
 			if (finished) return;
 			finished = true;
+			activeGitProcesses.delete(process);
 			clearTimeout(timeoutHandle);
 			resolve(result);
 		};
 
-		process.stdout.on("data", (data) => {
+		process.stdout?.on("data", (data) => {
 			output += data;
 		});
 		process.on("close", (code) => finish(code === 0 ? output.trim() : null));
@@ -97,6 +106,13 @@ function gitRun(cwd: string, args: string[], timeoutMs = 300): Promise<string | 
 			finish(null);
 		}, timeoutMs);
 	});
+}
+
+function gitAbortAll(): void {
+	for (const process of activeGitProcesses) {
+		process.kill();
+	}
+	activeGitProcesses.clear();
 }
 
 async function gitFetch(cwd: string): Promise<GitState> {
@@ -196,20 +212,48 @@ function getDisplayedAgentName(pi: ExtensionAPI): string {
 	return "default";
 }
 
-function getUsageTotals(ctx: ExtensionContext): { tokIn: number; tokOut: number; cost: number } {
-	let tokIn = 0;
-	let tokOut = 0;
-	let cost = 0;
+interface UsageTotals {
+	tokIn: number;
+	tokOut: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+}
 
-	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-		const message = entry.message as AssistantMessage;
-		tokIn += message.usage?.input ?? 0;
-		tokOut += message.usage?.output ?? 0;
-		cost += message.usage?.cost?.total ?? 0;
+interface AccountableEntry {
+	type: string;
+	message?: { role?: string; usage?: Usage };
+	usage?: Usage;
+}
+
+function addUsageTotals(totals: UsageTotals, usage: Usage | undefined): void {
+	if (!usage) return;
+	totals.tokIn += usage.input;
+	totals.tokOut += usage.output;
+	totals.cacheRead += usage.cacheRead;
+	totals.cacheWrite += usage.cacheWrite;
+	totals.cost += usage.cost.total;
+}
+
+export function getUsageTotals(entries: readonly AccountableEntry[]): UsageTotals {
+	const totals: UsageTotals = { tokIn: 0, tokOut: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	for (const entry of entries) {
+		if (entry.type === "message") {
+			const role = entry.message?.role;
+			if (role === "assistant" || role === "toolResult") {
+				addUsageTotals(totals, entry.message?.usage);
+			}
+			continue;
+		}
+		if (entry.type === "usage" || entry.type === "compaction" || entry.type === "branch_summary") {
+			addUsageTotals(totals, entry.usage);
+		}
 	}
+	return totals;
+}
 
-	return { tokIn, tokOut, cost };
+function getContextUsageTotals(ctx: ExtensionContext): UsageTotals {
+	return getUsageTotals(ctx.sessionManager.getBranch() as unknown as AccountableEntry[]);
 }
 
 export type SegmentId = "path" | "git" | "agent" | "model" | "thinking" | "context" | "tokens" | "cost" | "time_spent";
@@ -228,7 +272,7 @@ export interface SessionContextController {
 	onTurnEnd(): void;
 	onModelSelect(): void;
 	onThinkingLevelSelect(): void;
-	onToolResult(event: { toolName: string; input?: unknown }): void;
+	onToolResult(event: FooterToolResultEvent): void;
 	onSessionShutdown(): void;
 	renderSegment(ctx: ExtensionContext, segment: SegmentId, options?: SessionContextRenderOptions): string | null;
 }
@@ -237,6 +281,20 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
 	let requestRender: (() => void) | undefined;
 	let sessionStart = Date.now();
 	let cachedUsageTotals: { leafId: unknown; totals: ReturnType<typeof getUsageTotals> } | undefined;
+	const delayedRenderTimers = new Set<ReturnType<typeof setTimeout>>();
+
+	const scheduleDelayedRender = (delayMs: number): void => {
+		const handle = setTimeout(() => {
+			delayedRenderTimers.delete(handle);
+			requestRender?.();
+		}, delayMs);
+		delayedRenderTimers.add(handle);
+	};
+
+	const clearDelayedRenders = (): void => {
+		for (const handle of delayedRenderTimers) clearTimeout(handle);
+		delayedRenderTimers.clear();
+	};
 
 	const invalidateUsageTotals = (): void => {
 		cachedUsageTotals = undefined;
@@ -246,7 +304,7 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
 		const leafId = ctx.sessionManager.getLeafId();
 		if (cachedUsageTotals && cachedUsageTotals.leafId === leafId) return cachedUsageTotals.totals;
 
-		const totals = getUsageTotals(ctx);
+		const totals = getContextUsageTotals(ctx);
 		cachedUsageTotals = { leafId, totals };
 		return totals;
 	};
@@ -289,15 +347,17 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
 			}
 
 			if (event.toolName === "bash") {
-				const command = String((event as { input?: { command?: unknown } }).input?.command ?? "");
+				const command = String(event.input.command ?? "");
 				if (/\bgit\s+(checkout|switch|merge|rebase|pull|reset)/.test(command)) {
 					gitInvalidate();
-					setTimeout(() => requestRender?.(), 150);
+					scheduleDelayedRender(150);
 				}
 			}
 		},
 
 		onSessionShutdown() {
+			gitAbortAll();
+			clearDelayedRenders();
 			invalidateUsageTotals();
 			requestRender = undefined;
 		},
@@ -372,10 +432,13 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
 				}
 
 				case "tokens": {
-					const { tokIn, tokOut } = getCachedUsageTotals(ctx);
-					return tokIn || tokOut
-						? theme.fg("muted", `${icons.tokIn} ${fmtNum(tokIn)} ${icons.tokOut} ${fmtNum(tokOut)}`)
-						: null;
+					const { tokIn, tokOut, cacheRead, cacheWrite } = getCachedUsageTotals(ctx);
+					if (!tokIn && !tokOut) return null;
+					const parts = [`${icons.tokIn} ${fmtNum(tokIn)}`, `${icons.tokOut} ${fmtNum(tokOut)}`];
+					if (cacheRead > 0 || cacheWrite > 0) {
+						parts.push(`R${fmtNum(cacheRead)}`, `W${fmtNum(cacheWrite)}`);
+					}
+					return theme.fg("muted", parts.join(" "));
 				}
 
 				case "cost": {
@@ -398,3 +461,7 @@ export function parseContextPreset(value: string): Preset | undefined {
 	const normalized = value.trim().toLowerCase();
 	return sessionContextPresets.find((preset) => preset === normalized);
 }
+
+export const __test__ = {
+	getUsageTotals,
+};

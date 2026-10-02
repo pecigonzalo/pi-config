@@ -226,7 +226,7 @@ function mergeFooterConfig(base: FooterConfig, override: FooterConfigFile): Foot
 	});
 }
 
-export function loadFooterConfig(cwd: string): FooterConfigLoadResult {
+export function loadFooterConfig(cwd: string, includeProject: boolean): FooterConfigLoadResult {
 	const diagnostics: FooterConfigDiagnostic[] = [];
 
 	const extensionConfig = mergeFooterConfig(
@@ -238,8 +238,19 @@ export function loadFooterConfig(cwd: string): FooterConfigLoadResult {
 		readJsonFile(path.join(getAgentDir(), "footer.jsonc"), diagnostics),
 	);
 
+	const projectConfigPath = path.join(cwd, ".pi", "footer.jsonc");
+	if (!includeProject) {
+		if (fs.existsSync(projectConfigPath)) {
+			diagnostics.push({
+				key: `footer-config:${projectConfigPath}`,
+				message: `Project footer config ignored (${projectConfigPath}): project is not trusted.`,
+			});
+		}
+		return { config: globalConfig, diagnostics };
+	}
+
 	return {
-		config: mergeFooterConfig(globalConfig, readJsonFile(path.join(cwd, ".pi", "footer.jsonc"), diagnostics)),
+		config: mergeFooterConfig(globalConfig, readJsonFile(projectConfigPath, diagnostics)),
 		diagnostics,
 	};
 }
@@ -249,7 +260,7 @@ export class FooterConfigController {
 	private readonly reportedDiagnosticKeys = new Set<string>();
 
 	onSessionStart(ctx: ExtensionContext): void {
-		const { config, diagnostics } = loadFooterConfig(ctx.cwd);
+		const { config, diagnostics } = loadFooterConfig(ctx.cwd, ctx.isProjectTrusted());
 		this.config = config;
 
 		if (!ctx.hasUI) return;
