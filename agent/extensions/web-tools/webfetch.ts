@@ -287,6 +287,8 @@ export async function executeWebfetch(
 			warnings.push("Normalized output was truncated for model context safety.");
 		}
 		if (!response.ok) {
+			// Non-ok responses are returned as data-bearing results with a warning, like the built-in
+			// bash tool reports non-zero exit codes, rather than marking the whole call as an error.
 			warnings.push(`HTTP ${response.status} ${response.statusText}`.trim());
 		}
 		if (!contentType.raw) {

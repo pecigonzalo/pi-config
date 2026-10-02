@@ -41,6 +41,11 @@ export interface ContentTypeInfo {
 	charset?: string;
 }
 
+/**
+ * Clamp to the documented 1..120 range instead of rejecting. The tool schemas deliberately omit
+ * numeric constraints, matching Pi's built-in tools (bash validates its timeout in code), so an
+ * out-of-range value stays forgiving rather than failing argument validation.
+ */
 export function clampTimeout(timeout: number | undefined): number {
 	if (typeof timeout !== "number" || !Number.isFinite(timeout)) return DEFAULT_TIMEOUT_SECONDS;
 	return Math.max(1, Math.min(MAX_TIMEOUT_SECONDS, Math.floor(timeout)));

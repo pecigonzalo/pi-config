@@ -125,6 +125,7 @@ interface ParsedMcpSearchBlock {
 	highlights: string[];
 }
 
+// Clamp rather than reject; see clampTimeout in shared.ts for why the schemas omit constraints.
 function normalizeLimit(limit: number | undefined): number {
 	if (typeof limit !== "number" || !Number.isFinite(limit)) return DEFAULT_LIMIT;
 	return Math.max(1, Math.min(MAX_LIMIT, Math.floor(limit)));
