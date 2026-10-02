@@ -2,6 +2,12 @@
 
 A Pi extension that adds a `typescript` tool: a CodeMode-style, one-shot TypeScript runtime for batched analysis, artifact generation, and limited host-orchestrated workflows.
 
+## Status: disabled
+
+Since the Pi 1.0 upgrade this extension is disabled by configuration (`-extensions/typescript/typescript.ts` in `agent/settings.json`); source, tests, and package metadata are kept intact. Pi 1.0 ships built-in Codemode, which runs JavaScript in a restricted QuickJS sandbox with no direct Node APIs, filesystem, network, subprocesses, or timers.
+
+Reconsider re-enabling if built-in Codemode proves insufficient, for example when scripts need Bun/Node capabilities (filesystem, network, spawn, timers), artifact generation, host bridges, or task orchestration. The `typescript` tool is absent from the active tool set while disabled.
+
 ## What it is
 
 Instead of making the model call many small tools step by step, this tool lets it execute a short TypeScript program in a Bun runtime and return a compact result.
