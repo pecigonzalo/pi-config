@@ -57,7 +57,10 @@ function formatStatus(service: LspManagerService | undefined): string {
 
 export default function lspManagerExtension(pi: ExtensionAPI) {
 	let service: LspManagerService | undefined;
-	const unsubscribeServiceRequests = registerServiceResponder(pi, () => service);
+	// Respond to lsp-manager:request for the lifetime of the extension runtime.
+	// Do not unsubscribe on session_shutdown: Pi keeps the same runtime when a
+	// session is replaced (/new, /resume), and the next session needs the responder.
+	registerServiceResponder(pi, () => service);
 
 	pi.registerMessageRenderer("lsp-manager-status", (message, _options, theme) => {
 		const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content);
@@ -75,7 +78,6 @@ export default function lspManagerExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		clearService(pi, service);
-		unsubscribeServiceRequests();
 		if (ctx.hasUI) ctx.ui.setStatus("lsp-manager", undefined);
 		if (service) await service.shutdown();
 		service = undefined;

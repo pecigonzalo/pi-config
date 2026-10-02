@@ -149,23 +149,27 @@ describe("lsp-manager status command", () => {
 	});
 });
 
+function makeFakeEvents() {
+	const handlers = new Map<string, Set<(payload: unknown) => void>>();
+	const events = {
+		emitted: [] as Array<[string, unknown]>,
+		emit(name: string, payload: unknown) {
+			this.emitted.push([name, payload]);
+			for (const handler of handlers.get(name) ?? []) handler(payload);
+		},
+		on(name: string, handler: (payload: unknown) => void) {
+			const listeners = handlers.get(name) ?? new Set<(payload: unknown) => void>();
+			listeners.add(handler);
+			handlers.set(name, listeners);
+			return () => listeners.delete(handler);
+		},
+	};
+	return { events, pi: { events } as never };
+}
+
 describe("lsp-manager extension registry", () => {
 	it("publishes and responds to service requests through the event bus", () => {
-		const handlers = new Map<string, Set<(payload: unknown) => void>>();
-		const events = {
-			emitted: [] as Array<[string, unknown]>,
-			emit(name: string, payload: unknown) {
-				this.emitted.push([name, payload]);
-				for (const handler of handlers.get(name) ?? []) handler(payload);
-			},
-			on(name: string, handler: (payload: unknown) => void) {
-				const listeners = handlers.get(name) ?? new Set<(payload: unknown) => void>();
-				listeners.add(handler);
-				handlers.set(name, listeners);
-				return () => listeners.delete(handler);
-			},
-		};
-		const pi = { events } as never;
+		const { events, pi } = makeFakeEvents();
 		let service: LspManagerService | undefined = { status: () => [] } as unknown as LspManagerService;
 
 		const unsubscribe = indexTest.registerServiceResponder(pi, () => service);
@@ -177,6 +181,28 @@ describe("lsp-manager extension registry", () => {
 		service = undefined;
 		expect(events.emitted.some(([name]) => name === "lsp-manager:shutdown")).toBe(true);
 		expect(indexTest.requestService(pi)).toBeUndefined();
+
+		unsubscribe();
+	});
+
+	it("keeps the request responder registered across session shutdown and restart", () => {
+		const { pi } = makeFakeEvents();
+		let service: LspManagerService | undefined = { status: () => [] } as unknown as LspManagerService;
+
+		const unsubscribe = indexTest.registerServiceResponder(pi, () => service);
+
+		// First session: publish, use, then shut down. The responder stays active.
+		indexTest.publishService(pi, service);
+		expect(indexTest.requestService(pi)).toBe(service);
+		indexTest.clearService(pi, service);
+		service = undefined;
+		expect(indexTest.requestService(pi)).toBeUndefined();
+
+		// A later session in the same extension runtime publishes a new service.
+		const replacement: LspManagerService = { status: () => [] } as unknown as LspManagerService;
+		service = replacement;
+		indexTest.publishService(pi, replacement);
+		expect(indexTest.requestService(pi)).toBe(replacement);
 
 		unsubscribe();
 	});

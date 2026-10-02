@@ -1,55 +1,26 @@
 import { relative } from "node:path";
 import { captureSignature } from "./extractors";
 import type { Definition, SourceFile } from "./types";
+import {
+	LSP_MANAGER_REQUEST_EVENT,
+	type LspDocumentSymbol,
+	type LspHoverInfo,
+	type LspLocation,
+	type LspManagerService,
+	type LspManagerServiceRequest,
+	type LspPosition,
+	type LspRequestOptions,
+} from "../../lsp-manager/contract";
 
-export const LSP_MANAGER_REQUEST_EVENT = "lsp-manager:request";
-
-export interface LspPosition {
-	line: number;
-	column: number;
-}
-
-export interface LspLocation {
-	file: string;
-	line: number;
-	column: number;
-	endLine?: number;
-	endColumn?: number;
-}
-
-export interface LspHoverInfo {
-	file: string;
-	line: number;
-	column: number;
-	contents: string;
-}
-
-export interface LspDocumentSymbol {
-	name: string;
-	kind: string;
-	file: string;
-	line: number;
-	column: number;
-	endLine?: number;
-	endColumn?: number;
-	container?: string;
-}
-
-export interface LspRequestOptions {
-	signal?: AbortSignal;
-}
-
-export interface LspManagerService {
-	supportsFile?(filePath: string): boolean;
-	definition(filePath: string, position: LspPosition, options?: LspRequestOptions): Promise<LspLocation[]>;
-	references(filePath: string, position: LspPosition, options?: LspRequestOptions): Promise<LspLocation[]>;
-	hover(filePath: string, position: LspPosition, options?: LspRequestOptions): Promise<LspHoverInfo | undefined>;
-	documentSymbols?(filePath: string, options?: LspRequestOptions): Promise<LspDocumentSymbol[]>;
-}
-
-interface LspManagerServiceRequest {
-	respond(service: LspManagerService | undefined): void;
-}
+export {
+	LSP_MANAGER_REQUEST_EVENT,
+	type LspDocumentSymbol,
+	type LspHoverInfo,
+	type LspLocation,
+	type LspManagerService,
+	type LspPosition,
+	type LspRequestOptions,
+} from "../../lsp-manager/contract";
 
 export function getLspService(pi: { events: unknown }): LspManagerService | undefined {
 	const eventBus = pi.events as { emit?: (channel: string, data: unknown) => void };

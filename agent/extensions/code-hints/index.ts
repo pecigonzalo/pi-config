@@ -10,7 +10,7 @@ import {
 	type LspFileDiagnostics,
 	type LspManagerService,
 	type LspManagerServiceRequest,
-} from "../lsp-manager/service";
+} from "../lsp-manager/contract";
 
 const CODE_HINTS_MESSAGE_TYPE = "code-hints";
 const DEFAULT_TIMEOUT_MS = 3_000;

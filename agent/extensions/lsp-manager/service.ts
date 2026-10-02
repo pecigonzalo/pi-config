@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, extname, join, resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	createMessageConnection,
@@ -29,22 +29,43 @@ import type {
 	LocationLink,
 	SymbolInformation,
 } from "vscode-languageserver-protocol";
+import type {
+	LspDiagnosticItem,
+	LspDiagnosticSeverity,
+	LspDiagnosticsOptions,
+	LspDocumentSymbol,
+	LspFileDiagnostics,
+	LspHoverInfo,
+	LspLocation,
+	LspManagerService,
+	LspPosition,
+	LspRequestOptions,
+	LspStatusItem,
+	LspTouchOptions,
+} from "./contract";
 
-/** Event emitted when an LSP manager service is available. */
-export const LSP_MANAGER_READY_EVENT = "lsp-manager:ready";
-
-/** Event emitted when an LSP manager service is shutting down. */
-export const LSP_MANAGER_SHUTDOWN_EVENT = "lsp-manager:shutdown";
-
-/** Event emitted by consumers to request the current LSP manager service. */
-export const LSP_MANAGER_REQUEST_EVENT = "lsp-manager:request";
-
-export interface LspManagerServiceRequest {
-	respond(service: LspManagerService | undefined): void;
-}
+export { LSP_MANAGER_READY_EVENT, LSP_MANAGER_REQUEST_EVENT, LSP_MANAGER_SHUTDOWN_EVENT } from "./contract";
+export type {
+	LspDiagnosticItem,
+	LspDiagnosticSeverity,
+	LspDiagnosticStatus,
+	LspDiagnosticsOptions,
+	LspDocumentSymbol,
+	LspFileDiagnostics,
+	LspHoverInfo,
+	LspLocation,
+	LspManagerService,
+	LspManagerServiceRequest,
+	LspPosition,
+	LspRequestOptions,
+	LspStatusItem,
+	LspTouchOptions,
+} from "./contract";
 
 const INIT_TIMEOUT_MS = 30_000;
 const DEFAULT_DIAGNOSTIC_TIMEOUT_MS = 3_000;
+const DEFAULT_SEMANTIC_TIMEOUT_MS = 5_000;
+const DEFAULT_MAX_FILE_BYTES = 1_048_576;
 const PROCESS_EXIT_TIMEOUT_MS = 1_000;
 const MAX_OPEN_FILES = 40;
 const CONFIGURATION_SECTION_ROOTS = new Set([
@@ -60,98 +81,6 @@ const CONFIGURATION_SECTION_ROOTS = new Set([
 	"typescript",
 	"typescriptreact",
 ]);
-
-export type LspDiagnosticSeverity = "error" | "warning" | "info" | "hint";
-export type LspDiagnosticStatus = "ok" | "unsupported" | "timeout" | "error";
-
-export interface LspPosition {
-	line: number;
-	column: number;
-}
-
-export interface LspDiagnosticItem {
-	file: string;
-	line: number;
-	column: number;
-	severity: LspDiagnosticSeverity;
-	message: string;
-	source?: string;
-	code?: string;
-}
-
-export interface LspLocation {
-	file: string;
-	line: number;
-	column: number;
-	endLine?: number;
-	endColumn?: number;
-}
-
-export interface LspHoverInfo {
-	file: string;
-	line: number;
-	column: number;
-	contents: string;
-}
-
-export interface LspDocumentSymbol {
-	name: string;
-	kind: string;
-	file: string;
-	line: number;
-	column: number;
-	endLine?: number;
-	endColumn?: number;
-	container?: string;
-}
-
-export interface LspFileDiagnostics {
-	file: string;
-	status: LspDiagnosticStatus;
-	diagnostics: LspDiagnosticItem[];
-	error?: string;
-}
-
-export interface LspStatusItem {
-	id: string;
-	command: string;
-	extensions: string[];
-	available: boolean;
-	running: boolean;
-	openFiles: number;
-	diagnostics: number;
-	root?: string;
-}
-
-export interface LspDiagnosticsOptions {
-	timeoutMs?: number;
-	severity?: "error" | "warning" | "info" | "hint" | "all";
-	signal?: AbortSignal;
-}
-
-export interface LspTouchOptions {
-	waitForDiagnostics?: boolean;
-	timeoutMs?: number;
-	signal?: AbortSignal;
-}
-
-export interface LspRequestOptions {
-	signal?: AbortSignal;
-}
-
-/** Reusable service exposed by the lsp-manager extension. */
-export interface LspManagerService {
-	supportsFile(filePath: string): boolean;
-	warmup(filePath: string, options?: LspRequestOptions): Promise<boolean>;
-	touchFile(filePath: string, options?: LspTouchOptions): Promise<LspFileDiagnostics>;
-	diagnostics(filePaths: string[], options?: LspDiagnosticsOptions): Promise<LspFileDiagnostics[]>;
-	definition(filePath: string, position: LspPosition, options?: LspRequestOptions): Promise<LspLocation[]>;
-	references(filePath: string, position: LspPosition, options?: LspRequestOptions): Promise<LspLocation[]>;
-	hover(filePath: string, position: LspPosition, options?: LspRequestOptions): Promise<LspHoverInfo | undefined>;
-	documentSymbols(filePath: string, options?: LspRequestOptions): Promise<LspDocumentSymbol[]>;
-	status(): LspStatusItem[];
-	shutdown(): Promise<void>;
-}
 
 interface ServerDefinition {
 	id: string;
@@ -617,18 +546,30 @@ export class DefaultLspManagerService implements LspManagerService {
 	private shuttingDown = false;
 	private shutdownPromise: Promise<void> | undefined;
 
-	constructor(private readonly cwd: string) {}
+	private readonly workspaceRoot: string;
+	private readonly maxFileBytes: number;
+
+	constructor(
+		private readonly cwd: string,
+		options: { maxFileBytes?: number } = {},
+	) {
+		this.workspaceRoot = normalizePath(cwd);
+		this.maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
+	}
 
 	supportsFile(filePath: string): boolean {
 		if (this.shuttingDown) return false;
 		const absolutePath = this.resolvePath(filePath);
+		if (!this.isWithinWorkspace(absolutePath)) return false;
 		const server = serverForFile(absolutePath);
 		return !!server && commandExists(server.command);
 	}
 
 	async warmup(filePath: string, options: LspRequestOptions = {}): Promise<boolean> {
 		if (this.shuttingDown || isAborted(options.signal)) return false;
-		const client = await this.getClientForFile(filePath, options.signal).catch(() => undefined);
+		const absolutePath = this.resolvePath(filePath);
+		if (!this.isWithinWorkspace(absolutePath) || this.isFileTooLarge(absolutePath)) return false;
+		const client = await this.getClientForFile(absolutePath, options.signal).catch(() => undefined);
 		return !!client && !isAborted(options.signal);
 	}
 
@@ -636,6 +577,10 @@ export class DefaultLspManagerService implements LspManagerService {
 		const absolutePath = this.resolvePath(filePath);
 		if (this.shuttingDown || isAborted(options.signal)) {
 			return { file: absolutePath, status: "error", diagnostics: [], error: "LSP manager is shutting down." };
+		}
+		const workspaceIssue = this.workspaceValidationError(absolutePath);
+		if (workspaceIssue) {
+			return { file: absolutePath, status: "error", diagnostics: [], error: workspaceIssue };
 		}
 		const server = serverForFile(absolutePath);
 		if (!server) {
@@ -661,17 +606,24 @@ export class DefaultLspManagerService implements LspManagerService {
 		}
 
 		if (options.waitForDiagnostics === false) {
-			this.openOrUpdate(client, server, absolutePath);
+			const opened = this.openOrUpdate(client, server, absolutePath);
+			if (opened === "too-large") {
+				return { file: absolutePath, status: "error", diagnostics: [], error: this.tooLargeError() };
+			}
 			return { file: absolutePath, status: "ok", diagnostics: [] };
 		}
 
-		const responded = await this.openOrUpdateAndWait(
+		const outcome = await this.openOrUpdateAndWait(
 			client,
 			server,
 			absolutePath,
 			options.timeoutMs ?? DEFAULT_DIAGNOSTIC_TIMEOUT_MS,
 			options.signal,
 		);
+		if (outcome === "too-large") {
+			return { file: absolutePath, status: "error", diagnostics: [], error: this.tooLargeError() };
+		}
+		const responded = outcome === "ok";
 		const diagnostics = (client.diagnostics.get(absolutePath) ?? []).map((diagnostic) =>
 			diagnosticToItem(absolutePath, diagnostic),
 		);
@@ -698,6 +650,11 @@ export class DefaultLspManagerService implements LspManagerService {
 		for (const filePath of [...new Set(filePaths)]) {
 			if (isAborted(options.signal)) break;
 			const absolutePath = this.resolvePath(filePath);
+			const workspaceIssue = this.workspaceValidationError(absolutePath);
+			if (workspaceIssue) {
+				results.push({ file: absolutePath, status: "error", diagnostics: [], error: workspaceIssue });
+				continue;
+			}
 			const server = serverForFile(absolutePath);
 			if (!server) {
 				results.push({
@@ -724,12 +681,17 @@ export class DefaultLspManagerService implements LspManagerService {
 				continue;
 			}
 
-			const responded = await this.openOrUpdateAndWait(client, server, absolutePath, timeoutMs, options.signal);
+			const outcome = await this.openOrUpdateAndWait(client, server, absolutePath, timeoutMs, options.signal);
 			const rawDiagnostics = client.diagnostics.get(absolutePath) ?? [];
 			const diagnostics = filterBySeverity(
 				rawDiagnostics.map((diagnostic) => diagnosticToItem(absolutePath, diagnostic)),
 				options.severity,
 			);
+			if (outcome === "too-large") {
+				results.push({ file: absolutePath, status: "error", diagnostics: [], error: this.tooLargeError() });
+				continue;
+			}
+			const responded = outcome === "ok";
 			results.push({
 				file: absolutePath,
 				status: responded || rawDiagnostics.length > 0 ? "ok" : "timeout",
@@ -748,11 +710,13 @@ export class DefaultLspManagerService implements LspManagerService {
 		if (this.shuttingDown || isAborted(options.signal)) return [];
 		const loaded = await this.loadSyncedFile(filePath, options.signal);
 		if (!loaded || this.shuttingDown || loaded.client.closed || isAborted(options.signal)) return [];
-		const result = await withAbort(
+		const result = await withTimeout(
 			loaded.client.connection.sendRequest(DefinitionRequest.type, {
 				textDocument: { uri: loaded.uri },
 				position: positionToLsp(position),
 			}),
+			options.timeoutMs ?? DEFAULT_SEMANTIC_TIMEOUT_MS,
+			`${loaded.client.id} definition`,
 			options.signal,
 		).catch(() => undefined);
 		return normalizeLocations(result);
@@ -762,12 +726,14 @@ export class DefaultLspManagerService implements LspManagerService {
 		if (this.shuttingDown || isAborted(options.signal)) return [];
 		const loaded = await this.loadSyncedFile(filePath, options.signal);
 		if (!loaded || this.shuttingDown || loaded.client.closed || isAborted(options.signal)) return [];
-		const result = await withAbort(
+		const result = await withTimeout(
 			loaded.client.connection.sendRequest(ReferencesRequest.type, {
 				textDocument: { uri: loaded.uri },
 				position: positionToLsp(position),
 				context: { includeDeclaration: true },
 			}),
+			options.timeoutMs ?? DEFAULT_SEMANTIC_TIMEOUT_MS,
+			`${loaded.client.id} references`,
 			options.signal,
 		).catch(() => undefined);
 		return normalizeLocations(result);
@@ -781,11 +747,13 @@ export class DefaultLspManagerService implements LspManagerService {
 		if (this.shuttingDown || isAborted(options.signal)) return undefined;
 		const loaded = await this.loadSyncedFile(filePath, options.signal);
 		if (!loaded || this.shuttingDown || loaded.client.closed || isAborted(options.signal)) return undefined;
-		const result = await withAbort(
+		const result = await withTimeout(
 			loaded.client.connection.sendRequest(HoverRequest.type, {
 				textDocument: { uri: loaded.uri },
 				position: positionToLsp(position),
 			}),
+			options.timeoutMs ?? DEFAULT_SEMANTIC_TIMEOUT_MS,
+			`${loaded.client.id} hover`,
 			options.signal,
 		).catch(() => undefined);
 		if (!result?.contents) return undefined;
@@ -798,10 +766,12 @@ export class DefaultLspManagerService implements LspManagerService {
 		if (this.shuttingDown || isAborted(options.signal)) return [];
 		const loaded = await this.loadSyncedFile(filePath, options.signal);
 		if (!loaded || this.shuttingDown || loaded.client.closed || isAborted(options.signal)) return [];
-		const result = await withAbort(
+		const result = await withTimeout(
 			loaded.client.connection.sendRequest(DocumentSymbolRequest.type, {
 				textDocument: { uri: loaded.uri },
 			}),
+			options.timeoutMs ?? DEFAULT_SEMANTIC_TIMEOUT_MS,
+			`${loaded.client.id} documentSymbols`,
 			options.signal,
 		).catch(() => undefined);
 		return normalizeDocumentSymbols(result, loaded.absolutePath);
@@ -871,6 +841,31 @@ export class DefaultLspManagerService implements LspManagerService {
 		return normalizePath(resolve(this.cwd, filePath));
 	}
 
+	private isWithinWorkspace(absolutePath: string): boolean {
+		const rel = relative(this.workspaceRoot, absolutePath);
+		return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+	}
+
+	private isFileTooLarge(absolutePath: string): boolean {
+		if (this.maxFileBytes <= 0) return false;
+		try {
+			return statSync(absolutePath).size > this.maxFileBytes;
+		} catch {
+			return false;
+		}
+	}
+
+	private workspaceValidationError(absolutePath: string): string | undefined {
+		if (!this.isWithinWorkspace(absolutePath)) {
+			return `Path is outside the session workspace (${this.workspaceRoot}).`;
+		}
+		return this.isFileTooLarge(absolutePath) ? this.tooLargeError() : undefined;
+	}
+
+	private tooLargeError(): string {
+		return `File is too large for LSP processing (limit ${this.maxFileBytes} bytes).`;
+	}
+
 	private sendNotification(client: LspClientState, method: unknown, params?: unknown): void {
 		if (this.shuttingDown || client.closed) return;
 		try {
@@ -889,6 +884,7 @@ export class DefaultLspManagerService implements LspManagerService {
 	private async getClientForFile(filePath: string, signal?: AbortSignal): Promise<LspClientState | undefined> {
 		if (this.shuttingDown || isAborted(signal)) return undefined;
 		const absolutePath = this.resolvePath(filePath);
+		if (!this.isWithinWorkspace(absolutePath)) return undefined;
 		const server = serverForFile(absolutePath);
 		if (!server) return undefined;
 		if (!commandExists(server.command)) return undefined;
@@ -1012,8 +1008,13 @@ export class DefaultLspManagerService implements LspManagerService {
 		}
 	}
 
-	private openOrUpdate(client: LspClientState, server: ServerDefinition, absolutePath: string): void {
-		if (this.shuttingDown || client.closed) return;
+	private openOrUpdate(
+		client: LspClientState,
+		server: ServerDefinition,
+		absolutePath: string,
+	): "ok" | "too-large" | "ignored" {
+		if (this.shuttingDown || client.closed) return "ignored";
+		if (this.isFileTooLarge(absolutePath)) return "too-large";
 		const content = readFileSync(absolutePath, "utf-8");
 		const uri = pathToFileURL(absolutePath).href;
 		const languageId = server.languageId(absolutePath);
@@ -1038,6 +1039,7 @@ export class DefaultLspManagerService implements LspManagerService {
 			textDocument: { uri },
 			text: content,
 		});
+		return "ok";
 	}
 
 	private async loadSyncedFile(
@@ -1047,11 +1049,13 @@ export class DefaultLspManagerService implements LspManagerService {
 		if (this.shuttingDown || isAborted(signal)) return undefined;
 		const absolutePath = this.resolvePath(filePath);
 		if (!existsSync(absolutePath)) return undefined;
+		const workspaceIssue = this.workspaceValidationError(absolutePath);
+		if (workspaceIssue) return undefined;
 		const server = serverForFile(absolutePath);
 		if (!server) return undefined;
 		const client = await this.getClientForFile(absolutePath, signal).catch(() => undefined);
 		if (!client || isAborted(signal)) return undefined;
-		this.openOrUpdate(client, server, absolutePath);
+		if (this.openOrUpdate(client, server, absolutePath) !== "ok") return undefined;
 		return { client, server, absolutePath, uri: pathToFileURL(absolutePath).href };
 	}
 
@@ -1061,11 +1065,12 @@ export class DefaultLspManagerService implements LspManagerService {
 		absolutePath: string,
 		timeoutMs: number,
 		signal?: AbortSignal,
-	): Promise<boolean> {
-		if (this.shuttingDown || client.closed || isAborted(signal)) return false;
-		const wait = this.waitForDiagnostics(client, absolutePath, timeoutMs, signal);
-		this.openOrUpdate(client, server, absolutePath);
-		return wait;
+	): Promise<"ok" | "too-large" | "timeout"> {
+		if (this.shuttingDown || client.closed || isAborted(signal)) return "timeout";
+		const opened = this.openOrUpdate(client, server, absolutePath);
+		if (opened === "too-large") return "too-large";
+		const responded = await this.waitForDiagnostics(client, absolutePath, timeoutMs, signal);
+		return responded ? "ok" : "timeout";
 	}
 
 	private waitForDiagnostics(

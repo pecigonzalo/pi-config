@@ -1,7 +1,7 @@
 import { describe, expect, it, test } from "bun:test";
 import { __test__ } from "./index";
-import { LSP_MANAGER_REQUEST_EVENT } from "../lsp-manager/service";
-import type { LspFileDiagnostics, LspManagerService } from "../lsp-manager/service";
+import { LSP_MANAGER_REQUEST_EVENT } from "../lsp-manager/contract";
+import type { LspFileDiagnostics, LspManagerService } from "../lsp-manager/contract";
 
 describe("code-hints formatting", () => {
 	it("formats a compact report for LSP errors", () => {

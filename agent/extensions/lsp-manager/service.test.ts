@@ -1,8 +1,19 @@
 import { describe, expect, it } from "bun:test";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { MessageConnection } from "vscode-languageserver-protocol/node";
 import { __test__ as serviceTest, DefaultLspManagerService } from "./service";
+
+function makeTempProject(): string {
+	const root = join(tmpdir(), `pi-lsp-manager-test-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+	mkdirSync(join(root, "src"), { recursive: true });
+	writeFileSync(join(root, "package.json"), "{}", "utf-8");
+	writeFileSync(join(root, "src", "index.ts"), "const value = 1;\n", "utf-8");
+	return root;
+}
 
 type LifecycleClient = Parameters<typeof serviceTest.registerClientLifecycle>[0];
 
@@ -224,5 +235,50 @@ describe("lsp-manager process lifecycle", () => {
 		expect(connection.notifications).toEqual(["exit"]);
 		expect(connection.endCalls.count).toBe(1);
 		expect(process.signals).toEqual(["SIGTERM"]);
+	});
+});
+
+describe("lsp-manager workspace boundaries and size limits", () => {
+	it("reports files outside the workspace as unsupported", () => {
+		const workspace = makeTempProject();
+		const outside = join(tmpdir(), `pi-lsp-outside-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+		mkdirSync(outside, { recursive: true });
+		writeFileSync(join(outside, "main.go"), "package main\n", "utf-8");
+		try {
+			const service = new DefaultLspManagerService(workspace);
+			expect(service.supportsFile(join(outside, "main.go"))).toBe(false);
+		} finally {
+			rmSync(workspace, { recursive: true, force: true });
+			rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects files outside the session workspace without starting a server", async () => {
+		const workspace = makeTempProject();
+		const outside = join(tmpdir(), `pi-lsp-outside-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+		mkdirSync(outside, { recursive: true });
+		writeFileSync(join(outside, "main.go"), "package main\n", "utf-8");
+		try {
+			const service = new DefaultLspManagerService(workspace);
+			const result = await service.touchFile(join(outside, "main.go"));
+			expect(result.status).toBe("error");
+			expect(result.error).toContain("outside the session workspace");
+		} finally {
+			rmSync(workspace, { recursive: true, force: true });
+			rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	it("skips files over the configured size limit without starting a server", async () => {
+		const workspace = makeTempProject();
+		writeFileSync(join(workspace, "src", "index.ts"), "x".repeat(200), "utf-8");
+		try {
+			const service = new DefaultLspManagerService(workspace, { maxFileBytes: 64 });
+			const result = await service.touchFile(join(workspace, "src", "index.ts"));
+			expect(result.status).toBe("error");
+			expect(result.error).toContain("too large");
+		} finally {
+			rmSync(workspace, { recursive: true, force: true });
+		}
 	});
 });

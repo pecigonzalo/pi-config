@@ -64,7 +64,7 @@ function formatCommandStatus(status: { available: boolean; version?: string }): 
 function formatLspStatus(pi: ExtensionAPI): string {
 	const service = getLspService(pi);
 	if (!service) return "not available (load lsp-manager for definition/references/hover)";
-	return service.documentSymbols
+	return typeof service.documentSymbols === "function"
 		? "available for semantic lookups and document symbols"
 		: "available for semantic lookups; document symbols unavailable";
 }
