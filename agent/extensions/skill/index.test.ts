@@ -6,22 +6,6 @@ mock.module("@earendil-works/pi-tui", () => ({
 	},
 }));
 
-mock.module("typebox", () => ({
-	Type: {
-		Object: (properties: unknown, options?: Record<string, unknown>) => ({
-			type: "object",
-			properties,
-			...options,
-		}),
-		String: (options?: Record<string, unknown>) => ({ type: "string", ...options }),
-		Optional: (value: unknown) => value,
-		Number: (options?: Record<string, unknown>) => ({ type: "number", ...options }),
-		Array: (items: unknown, options?: Record<string, unknown>) => ({ type: "array", items, ...options }),
-		Boolean: (options?: Record<string, unknown>) => ({ type: "boolean", ...options }),
-		Any: (options?: Record<string, unknown>) => ({ ...options }),
-	},
-}));
-
 const { __test__ } = await import("./index");
 
 describe("skill extension lookup", () => {
