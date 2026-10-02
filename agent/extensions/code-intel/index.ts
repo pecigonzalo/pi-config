@@ -65,6 +65,7 @@ export default function codeIntelExtension(pi: ExtensionAPI) {
 		promptSnippet: CODE_INTEL_PROMPT_SNIPPET,
 		promptGuidelines: CODE_INTEL_PROMPT_GUIDELINES,
 		parameters: CODE_INTEL_SCHEMA as any,
+		annotations: { readOnlyHint: true, openWorldHint: false },
 		renderCall(args, theme) {
 			return new Text(formatCallHint(args as Partial<CodeIntelParams>, theme), 0, 0);
 		},

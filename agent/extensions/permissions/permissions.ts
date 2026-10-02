@@ -154,6 +154,13 @@
  *   Set "enabled": false to allow unclassified tools silently, or "askWhenUnannotated": false
  *   to confirm only tools that actively declare risk.
  *
+ *   Declared hints                                    Outcome
+ *   no annotations at all                             prompt (while askWhenUnannotated)
+ *   destructiveHint: true                             prompt (checked first, even if readOnly)
+ *   readOnlyHint !== true, openWorldHint true/absent  prompt
+ *   readOnlyHint: true, destructiveHint !== true      silent
+ *   destructiveHint: false, openWorldHint: false      silent
+ *
  * Other extensions can observe policy changes on the shared event bus:
  *   pi.events.on("permissions:policy-changed", (data) => ...)
  *

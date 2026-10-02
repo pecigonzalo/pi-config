@@ -293,6 +293,7 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 			"Use webfetch for one URL at a time; webfetch is read-only and does not perform search or recursive browsing.",
 		],
 		parameters: WebfetchParams,
+		annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 		async execute(_toolCallId, params, signal) {
 			return executeWebfetch(params, { signal });
 		},

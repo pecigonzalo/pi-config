@@ -5278,6 +5278,7 @@ export default function (pi: ExtensionAPI) {
 		],
 		parameters: SubagentParams,
 		prepareArguments: prepareTaskToolArguments,
+		annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const normalizedParams = normalizeTaskToolParams(params as unknown);

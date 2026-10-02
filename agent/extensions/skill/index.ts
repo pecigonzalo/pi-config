@@ -224,6 +224,7 @@ export default function skillExtension(pi: ExtensionAPI) {
 			"Use `read` for direct file access when you already know the exact path to SKILL.md or a related file.",
 		],
 		parameters: SkillParams,
+		annotations: { readOnlyHint: true, openWorldHint: false },
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const requestedName = params.name.trim();

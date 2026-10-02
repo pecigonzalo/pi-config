@@ -421,6 +421,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: TODO_PROMPT_GUIDELINES,
 		parameters: TodoMutationParams,
 		prepareArguments: toMutationParams,
+		annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: false },
 		executionMode: "sequential",
 		outputSchema: TodoDetailsSchema,
 

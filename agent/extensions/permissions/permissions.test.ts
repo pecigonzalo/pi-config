@@ -3198,6 +3198,75 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 	});
 
+	it.each([
+		{
+			name: "webfetch",
+			toolName: "webfetch",
+			annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+			expectPrompt: false,
+		},
+		{
+			name: "websearch",
+			toolName: "websearch",
+			annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+			expectPrompt: false,
+		},
+		{
+			name: "skill",
+			toolName: "skill",
+			annotations: { readOnlyHint: true, openWorldHint: false },
+			expectPrompt: false,
+		},
+		{
+			name: "todo",
+			toolName: "todo",
+			annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: false },
+			expectPrompt: false,
+		},
+		{
+			name: "task",
+			toolName: "task",
+			annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+			expectPrompt: true,
+		},
+		{
+			name: "a tool that declares both readOnlyHint and destructiveHint",
+			toolName: "read_only_but_destructive",
+			annotations: { readOnlyHint: true, destructiveHint: true },
+			expectPrompt: true,
+		},
+	])(
+		"applies the declared annotations for $name to the unclassified-tool default",
+		async ({ toolName, annotations, expectPrompt }) => {
+			const approvalTitles: string[] = [];
+			const harness = await setupPermissionsHarness({
+				mode: "workspace-write",
+				now: () => 0,
+				approvalTitles,
+				approvalSelection: "Allow once",
+				registeredTools: [{ name: toolName, parameters: { properties: {} }, annotations }],
+				sandboxManager: {
+					initialize: async () => {},
+					reset: async () => {},
+					wrapWithSandbox: async (command: string) => command,
+				},
+			});
+			try {
+				const toolCall = harness.handlers.get("tool_call")?.[0];
+				if (!toolCall) throw new Error("tool_call handler was not registered");
+				const result = await toolCall({ toolName, input: {} }, harness.ctx);
+				expect(result).toBeUndefined();
+				if (expectPrompt) {
+					expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
+				} else {
+					expect(approvalTitles).toHaveLength(0);
+				}
+			} finally {
+				await harness.restore();
+			}
+		},
+	);
+
 	it("lets config disable the annotation default", async () => {
 		const approvalTitles: string[] = [];
 		const harness = await setupPermissionsHarness({
