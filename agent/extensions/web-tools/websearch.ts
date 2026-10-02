@@ -8,6 +8,7 @@ import {
 	normalizeWhitespace,
 	truncateToolText,
 	validateHttpUrl,
+	WEB_TOOLS_NAMESPACE,
 } from "./shared";
 
 const DEFAULT_LIMIT = 5;
@@ -430,6 +431,7 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 		],
 		parameters: WebsearchParams,
 		outputSchema: WebsearchOutput,
+		namespace: WEB_TOOLS_NAMESPACE,
 		annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			// Best-effort wait for a still-connecting server; if the tool is absent or excluded from

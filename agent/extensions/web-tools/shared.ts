@@ -14,6 +14,17 @@ export const OUTPUT_MAX_BYTES = Math.min(DEFAULT_MAX_BYTES, 30 * 1024);
 
 export type ContentKind = "html" | "text" | "json" | "xml" | "unknown";
 
+/**
+ * Shared namespace so codemode groups both tools and `describeNamespace("web-tools")` returns the
+ * same usage guidance that each tool carries in its promptGuidelines.
+ */
+export const WEB_TOOLS_NAMESPACE = {
+	name: "web-tools",
+	description: "Read-only web access: fetch one URL or search the public web",
+	instructions:
+		"webfetch reads a single URL and normalizes it to markdown, text, or html. websearch finds candidate URLs with snippets; follow up with webfetch to read the best result. Both are read-only, bounded, and never modify files.",
+};
+
 export interface TimedSignal {
 	signal: AbortSignal;
 	cleanup: () => void;

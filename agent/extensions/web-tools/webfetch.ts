@@ -20,6 +20,7 @@ import {
 	clipText,
 	DEFAULT_TIMEOUT_SECONDS,
 	MAX_TIMEOUT_SECONDS,
+	WEB_TOOLS_NAMESPACE,
 } from "./shared";
 
 const MAX_FETCH_BYTES = 2 * 1024 * 1024; // 2MB raw response cap before normalization.
@@ -332,6 +333,7 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 		],
 		parameters: WebfetchParams,
 		outputSchema: WebfetchOutput,
+		namespace: WEB_TOOLS_NAMESPACE,
 		annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 		async execute(_toolCallId, params, signal) {
 			return executeWebfetch(params, { signal });
