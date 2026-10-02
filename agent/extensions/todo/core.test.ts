@@ -459,14 +459,17 @@ describe("todo regressions to fix", () => {
 		expect(harness.todo(1)?.history.length).toBe(before);
 	});
 
-	it("returns structured content for success and failure", () => {
+	it("returns structured content on success and none on failure", () => {
 		const harness = createHarness();
 		const success = harness.execute({ action: "add", title: "Structured" });
 		expect((success.structuredContent as { todos?: unknown[] } | undefined)?.todos).toHaveLength(1);
 
+		// Codemode returns structuredContent before checking isError, so a failed call must not carry
+		// one or scripts would resolve it as a successful value.
 		const failure = harness.execute({ action: "update", id: 99, title: "Nope" });
 		expect(failure.isError).toBe(true);
-		expect((failure.structuredContent as { error?: string } | undefined)?.error).toBeDefined();
+		expect(failure.structuredContent).toBeUndefined();
+		expect(failure.details.error).toBeDefined();
 	});
 
 	it("filters non-neutral fields from unrelated actions in model-generated calls", () => {

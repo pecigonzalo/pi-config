@@ -197,12 +197,16 @@ function ok(state: TodoState, action: TodoAction, text: string): TodoResult {
 	};
 }
 
+/**
+ * Failure results keep `details` for rendering but deliberately omit `structuredContent`. Codemode's
+ * `toScriptValue` returns `structuredContent` before it checks `isError`, so a failure carrying one
+ * resolves as a successful value inside scripts; omitting it makes the call reject with this text.
+ */
 function fail(state: TodoState, action: TodoAction, text: string, error: string): TodoResult {
 	const details = createSnapshot(state, action, error);
 	return {
 		content: [{ type: "text", text }],
 		details,
-		structuredContent: details as unknown as JsonValue,
 		isError: true,
 	};
 }
