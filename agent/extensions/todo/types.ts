@@ -69,34 +69,20 @@ export interface TodoDetails {
 export type TodoResult = {
 	content: [{ type: "text"; text: string }];
 	details: TodoDetails;
+	isError?: boolean;
 };
 
-export const TodoParams = Type.Object(
+export const TodoMutationParams = Type.Object(
 	{
 		action: StringEnum(
-			[
-				"list",
-				"add",
-				"update",
-				"toggle",
-				"read",
-				"archive",
-				"link",
-				"unlink",
-				"history",
-				"clear",
-				"set_wip_limit",
-			] as const,
+			["add", "update", "toggle", "archive", "link", "unlink", "clear", "set_wip_limit"] as const,
 			{
 				description:
-					"Action to perform. Each action has a strict parameter set; omit fields that are not listed for the selected action.",
+					"Mutation to perform. Each action has a strict parameter set; omit fields that are not listed for the selected action.",
 			},
 		),
 		id: Type.Optional(
-			Type.Number({
-				description:
-					"Todo ID. Required for update, toggle, read, archive, link, and unlink; optional for history.",
-			}),
+			Type.Number({ description: "Todo ID. Required for update, toggle, archive, link, and unlink." }),
 		),
 		title: Type.Optional(Type.String({ description: "Short title. Required for add; optional for update." })),
 		description: Type.Optional(Type.String({ description: "Long description. Use with add or update." })),
@@ -129,6 +115,23 @@ export const TodoParams = Type.Object(
 				description: "Target status for toggle. Do not use with update, add, or any other action.",
 			}),
 		),
+		archived: Type.Optional(
+			Type.Boolean({ description: "Archive (true) or unarchive (false). Use only with archive." }),
+		),
+		limit: Type.Optional(Type.Number({ description: "Positive WIP limit. Use only with set_wip_limit." })),
+	},
+	{
+		description:
+			"Manage a persistent todo graph. Mutations only; use todo_query to list, read, or inspect history. The action determines which parameters are valid.",
+	},
+);
+
+export const TodoQueryParams = Type.Object(
+	{
+		action: StringEnum(["list", "read", "history"] as const, {
+			description: "Read-only action: list, read, or history.",
+		}),
+		id: Type.Optional(Type.Number({ description: "Todo ID. Required for read; optional for history." })),
 		view: Type.Optional(
 			StringEnum(["default", "tree", "ready"] as const, { description: "List view. Use only with list." }),
 		),
@@ -137,15 +140,10 @@ export const TodoParams = Type.Object(
 			StringEnum(["todo", "in-progress", "done"] as const, { description: "Status filter. Use only with list." }),
 		),
 		tag: Type.Optional(Type.String({ description: "Tag filter. Use only with list." })),
-		archived: Type.Optional(
-			Type.Boolean({ description: "Archive (true) or unarchive (false). Use only with archive." }),
-		),
-		limit: Type.Optional(Type.Number({ description: "Positive WIP limit. Use only with set_wip_limit." })),
 		historyLimit: Type.Optional(Type.Number({ description: "Maximum history entries. Use only with history." })),
 	},
 	{
-		description:
-			"Manage a persistent todo graph. The action determines which parameters are valid. Do not send every optional field or fields belonging to another action.",
+		description: "Read the persistent todo graph without modifying it.",
 	},
 );
 

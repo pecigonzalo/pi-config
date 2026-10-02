@@ -33,8 +33,7 @@ describe("todo state helpers", () => {
 			todos: [
 				createPersistedTodo(4, {
 					title: undefined,
-					text: "Legacy title",
-					status: "in_progress",
+					status: "not-a-status",
 					tags: ["Backend", 123],
 					blockerIds: [2, 2, "x"],
 					history: [{ timestamp: FIXED_TIMESTAMP, type: "created" }],
@@ -49,8 +48,8 @@ describe("todo state helpers", () => {
 		expect(state.todos).toHaveLength(1);
 		expect(state.todos[0]).toMatchObject({
 			id: 4,
-			title: "Legacy title",
-			status: "in-progress",
+			title: "Todo #4",
+			status: "todo",
 			tags: ["Backend"],
 			blockerIds: [2],
 		});

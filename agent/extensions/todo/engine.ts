@@ -198,6 +198,7 @@ function fail(state: TodoState, action: TodoAction, text: string, error: string)
 	return {
 		content: [{ type: "text", text }],
 		details: createSnapshot(state, action, error),
+		isError: true,
 	};
 }
 
@@ -206,14 +207,18 @@ export function resultText(result: TodoResult): string {
 	return text?.type === "text" ? text.text : "";
 }
 
-function isDefaultFillerParam(key: string, value: unknown): boolean {
+function isDefaultFillerParam(action: TodoAction, key: string, value: unknown): boolean {
 	if (value === undefined || value === null) return true;
+	// Zero is never a valid todo ID or required positive count, so callers sending the full
+	// schema treat it as "not provided".
+	if ((key === "id" || key === "parentId" || key === "limit" || key === "historyLimit") && value === 0) {
+		return true;
+	}
+	// A field the selected action accepts is otherwise never filler. Defaults such as priority
+	// "med", effort "M", status "todo", toStatus "todo", description "", or archived false are
+	// meaningful instructions for that action, so stripping them would silently drop intent.
+	if (allowedParams[action].has(key)) return false;
 	switch (key) {
-		case "id":
-		case "parentId":
-		case "limit":
-		case "historyLimit":
-			return value === 0;
 		case "title":
 		case "description":
 		case "tag":
@@ -244,7 +249,7 @@ function isDefaultFillerParam(key: string, value: unknown): boolean {
 function normalizeTodoParams(params: TodoExecuteParams): TodoExecuteParams {
 	const normalized: Partial<TodoExecuteParams> = { action: params.action };
 	for (const [key, value] of Object.entries(params)) {
-		if (key === "action" || isDefaultFillerParam(key, value)) continue;
+		if (key === "action" || isDefaultFillerParam(params.action, key, value)) continue;
 		(normalized as Record<string, unknown>)[key] = value;
 	}
 	return normalized as TodoExecuteParams;

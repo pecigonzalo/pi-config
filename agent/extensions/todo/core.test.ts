@@ -4,14 +4,12 @@ import {
 	executeTodoAction,
 	filteredTodoPool,
 	findTodo,
-	MAX_PERSISTED_HISTORY_ENTRIES,
-	createTodoState,
 	prepareTodoToolArguments,
 	type TodoExecuteParams,
-	type TodoState,
-} from "./core";
+} from "./engine";
+import { createTodoState, MAX_PERSISTED_HISTORY_ENTRIES, type TodoState } from "./state";
 
-const CORE_MODULE_URL = new URL("./core.ts", import.meta.url).href;
+const ENGINE_MODULE_URL = new URL("./engine.ts", import.meta.url).href;
 const FIXED_TIMESTAMP = "2024-01-01T00:00:00.000Z";
 
 function createHarness(initialState: TodoState = createTodoState()) {
@@ -86,7 +84,7 @@ async function runMalformedParentValidation(
 	timeoutMs = 3_000,
 ): Promise<{ timedOut: boolean; exitCode: number; stdout: string; stderr: string }> {
 	const script = `
-		const { executeTodoAction } = await import(${JSON.stringify(CORE_MODULE_URL)});
+		const { executeTodoAction } = await import(${JSON.stringify(ENGINE_MODULE_URL)});
 		const outcome = executeTodoAction(${JSON.stringify(createMalformedCycleState())}, {
 			action: "update",
 			id: 1,
@@ -388,6 +386,67 @@ describe("todo regressions to fix", () => {
 		expect(result.details.error).toBeUndefined();
 		expect(harness.todo(1)?.title).toBe("Full shape add");
 		expect(harness.todo(1)?.parentId).toBeUndefined();
+	});
+
+	it("keeps an explicit todo status filter on list", () => {
+		const harness = createHarness();
+		harness.execute({ action: "add", title: "Open item" });
+		harness.execute({ action: "add", title: "Started item" });
+		harness.execute({ action: "toggle", id: 2, toStatus: "in-progress" });
+
+		const result = harness.execute({ action: "list", status: "todo" });
+		expect(result.details.error).toBeUndefined();
+		expect(result.content[0].text).toContain("Open item");
+		expect(result.content[0].text).not.toContain("Started item");
+	});
+
+	it("reopens a todo with an explicit toStatus todo", () => {
+		const harness = createHarness();
+		harness.execute({ action: "add", title: "Reopen me" });
+		harness.execute({ action: "toggle", id: 1, toStatus: "in-progress" });
+
+		const result = harness.execute({ action: "toggle", id: 1, toStatus: "todo" });
+		expect(result.details.error).toBeUndefined();
+		expect(harness.todo(1)?.status).toBe("todo");
+	});
+
+	it("resets priority and effort to their defaults on update", () => {
+		const harness = createHarness();
+		harness.execute({ action: "add", title: "Reset me", priority: "high", effort: "L" });
+
+		const result = harness.execute({ action: "update", id: 1, priority: "med", effort: "M" });
+		expect(result.details.error).toBeUndefined();
+		expect(harness.todo(1)?.priority).toBe("med");
+		expect(harness.todo(1)?.effort).toBe("M");
+	});
+
+	it("clears a description with an empty string", () => {
+		const harness = createHarness();
+		harness.execute({ action: "add", title: "Has description", description: "some text" });
+
+		const result = harness.execute({ action: "update", id: 1, description: "" });
+		expect(result.details.error).toBeUndefined();
+		expect(harness.todo(1)?.description).toBe("");
+	});
+
+	it("unarchives with archived false", () => {
+		const harness = createHarness();
+		harness.execute({ action: "add", title: "Archive me" });
+		harness.execute({ action: "toggle", id: 1, toStatus: "in-progress" });
+		harness.execute({ action: "toggle", id: 1, toStatus: "done" });
+		harness.execute({ action: "archive", id: 1, archived: true });
+		expect(harness.todo(1)?.archived).toBe(true);
+
+		const result = harness.execute({ action: "archive", id: 1, archived: false });
+		expect(result.details.error).toBeUndefined();
+		expect(harness.todo(1)?.archived).toBe(false);
+	});
+
+	it("flags failed results as errors", () => {
+		const harness = createHarness();
+		const result = harness.execute({ action: "update", id: 999, title: "Nope" });
+		expect(result.isError).toBe(true);
+		expect(result.details.error).toBeDefined();
 	});
 
 	it("filters non-neutral fields from unrelated actions in model-generated calls", () => {

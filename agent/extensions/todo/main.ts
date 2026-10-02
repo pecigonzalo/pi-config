@@ -7,6 +7,7 @@
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import type { Static } from "typebox";
 import {
 	TodoBrowserComponent,
 	type TodoBrowserAction,
@@ -31,10 +32,12 @@ import {
 } from "./state";
 import {
 	type TodoDetailField,
+	type TodoDetails,
 	type TodoEffort,
 	type TodoItem,
 	type TodoPriority,
-	TodoParams,
+	TodoMutationParams,
+	TodoQueryParams,
 	type TodoResult,
 	type TodoStatus,
 } from "./types";
@@ -70,6 +73,35 @@ function compactRenderedTodoText(text: string, expanded: boolean, theme: Theme):
 	].join("\n");
 }
 
+interface TodoRenderResult {
+	content: readonly { type: string; text?: string }[];
+	details: unknown;
+}
+
+function renderTodoCall(args: unknown, theme: Theme): Text {
+	const callArgs: Record<string, unknown> = isRecord(args) ? args : {};
+	let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", String(callArgs.action ?? ""));
+	if (typeof callArgs.id === "number") text += " " + theme.fg("accent", `#${callArgs.id}`);
+	if (typeof callArgs.title === "string" && callArgs.title.trim()) {
+		text += " " + theme.fg("dim", `"${callArgs.title}"`);
+	}
+	if (callArgs.action === "toggle" && isTodoStatus(callArgs.toStatus)) {
+		text += " " + theme.fg("muted", `→ ${statusLabel(callArgs.toStatus)}`);
+	}
+	return new Text(text, 0, 0);
+}
+
+function renderTodoResult(result: TodoRenderResult, expanded: boolean, theme: Theme): Text {
+	const details = isRecord(result.details) ? result.details : undefined;
+	if (typeof details?.error === "string") return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);
+	const text = result.content[0];
+	const renderedText =
+		text?.type === "text" && typeof text.text === "string"
+			? compactRenderedTodoText(text.text, expanded, theme)
+			: "";
+	return new Text(renderedText, 0, 0);
+}
+
 export const TODOS_COMPLETIONS = [
 	{ value: "ready", label: "ready: show todos without blockers" },
 	{ value: "all", label: "all: show all todos including done" },
@@ -82,13 +114,20 @@ export const TODOS_COMPLETIONS = [
 export const TODO_PROMPT_GUIDELINES = [
 	"Use the `todo` tool only for genuinely multi-step work where progress tracking is useful, such as investigation followed by implementation and verification, changes spanning multiple files with coordination, or tasks with blockers and dependencies.",
 	"Do not use the `todo` tool for small or straightforward work, including single-file edits, review-and-commit requests, simple checks or verification runs, quick follow-up fixes, or purely conversational responses.",
+	"Use `todo_query` to list todos, read one todo, or inspect history, and `todo` only to change state.",
 	"Treat `todo.action` parameter sets as strict. Send only the fields listed for the selected action; omit every other optional field. Do not send a full object containing defaults, empty arrays, or fields from another action.",
 	"Use `todo` add with title (required) and optional description, tags, priority, effort, parentId, or blockerIds. Use `todo` update with id (required) and optional title, description, tags, priority, effort, parentId, or blockerIds.",
 	'Use `todo` toggle with id (required) and optional toStatus only. For example, `{ action: "toggle", id: 1, toStatus: "in-progress" }` changes status. Never send priority or effort to toggle, and never send toStatus to update. Use update, not toggle, to change priority or effort.',
-	"Use `todo` list with only view, includeArchived, status, or tag. Use read/archive/history with their id-specific fields, link/unlink for relationships, clear with only action, and set_wip_limit with limit.",
+	"Use `todo` archive with id and archived, link/unlink for relationships, clear with only action, and set_wip_limit with limit.",
 	"Before starting complex multi-step work, use the `todo` tool to create or update the relevant todo items so progress stays visible throughout the turn.",
 	"Keep `todo` tool work focused and update todo status promptly when work starts, pauses, or finishes.",
 	"Use `todo` parent and blocker links when sequencing matters or one task depends on another.",
+];
+
+export const TODO_QUERY_PROMPT_GUIDELINES = [
+	"Use the `todo_query` tool to list todos, read one todo, or inspect history. It never modifies state.",
+	"Use `todo_query` list with only view, includeArchived, status, or tag. Use read with id, and history with id and an optional historyLimit.",
+	"Check `todo_query` list before mutating so you reuse current todo IDs.",
 ];
 
 export default function (pi: ExtensionAPI) {
@@ -124,7 +163,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const installTodoWidget = (ctx: ExtensionContext) => {
-		if (!ctx.hasUI) return;
+		if (ctx.mode !== "tui") return;
 		if (!widgetVisible) {
 			requestTodoWidgetRender = undefined;
 			ctx.ui.setWidget("todo-panel", undefined);
@@ -152,7 +191,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const handleTodoWidgetCommand = async (args: string, ctx: ExtensionContext) => {
-		if (!ctx.hasUI) {
+		if (ctx.mode !== "tui") {
 			ctx.ui.notify("/todos widget requires interactive mode", "error");
 			return;
 		}
@@ -268,7 +307,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const handleTodosCommand = async (args: string, ctx: ExtensionContext) => {
-		if (!ctx.hasUI) {
+		if (ctx.mode !== "tui") {
 			ctx.ui.notify("/todos requires interactive mode", "error");
 			return;
 		}
@@ -377,44 +416,85 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", async (_event, ctx) => {
 		requestTodoWidgetRender = undefined;
-		if (!ctx.hasUI) return;
+		if (ctx.mode !== "tui") return;
 		ctx.ui.setWidget("todo-panel", undefined);
 	});
+
+	const toMutationParams = (args: unknown) =>
+		prepareTodoToolArguments(args) as unknown as Static<typeof TodoMutationParams>;
+	const toQueryParams = (args: unknown) =>
+		prepareTodoToolArguments(args) as unknown as Static<typeof TodoQueryParams>;
 
 	pi.registerTool({
 		name: "todo",
 		label: "Todo",
 		description:
-			"Manage a persistent todo graph. The action selects a strict parameter set. Actions: list (view/includeArchived/status/tag), add (title/description/tags/priority/effort/parentId/blockerIds), update (id/title/description/tags/priority/effort/parentId/blockerIds), toggle (id/toStatus), read (id), archive (id/archived), link (id/parentId/addBlockerIds), unlink (id/clearParent/removeBlockerIds), history (id/historyLimit), clear, set_wip_limit (limit). Omit fields that do not belong to the selected action.",
-		promptSnippet: "Track multi-step work with a persistent todo graph using action-specific parameters.",
+			"Mutate a persistent todo graph. Actions: add, update, toggle, archive, link, unlink, clear, set_wip_limit. Use todo_query to list, read, or inspect history.",
+		promptSnippet: "Create and mutate a persistent todo graph with action-specific parameters.",
 		promptGuidelines: TODO_PROMPT_GUIDELINES,
-		parameters: TodoParams,
-		prepareArguments: prepareTodoToolArguments,
+		parameters: TodoMutationParams,
+		prepareArguments: toMutationParams,
+		executionMode: "sequential",
 
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			return runTodoAction(params as TodoExecuteParams);
 		},
 
 		renderCall(args, theme, _context) {
-			const callArgs: Record<string, unknown> = isRecord(args) ? args : {};
-			let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", String(callArgs.action ?? ""));
-			if (typeof callArgs.id === "number") text += " " + theme.fg("accent", `#${callArgs.id}`);
-			if (typeof callArgs.title === "string" && callArgs.title.trim()) {
-				text += " " + theme.fg("dim", `"${callArgs.title}"`);
-			}
-			if (callArgs.action === "toggle" && isTodoStatus(callArgs.toStatus)) {
-				text += " " + theme.fg("muted", `→ ${statusLabel(callArgs.toStatus)}`);
-			}
-			return new Text(text, 0, 0);
+			return renderTodoCall(args, theme);
 		},
 
 		renderResult(result, { expanded }, theme, _context) {
-			const details = isRecord(result.details) ? result.details : undefined;
-			if (typeof details?.error === "string") return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);
-			const text = result.content[0];
-			const renderedText = text?.type === "text" ? compactRenderedTodoText(text.text, expanded, theme) : "";
-			return new Text(renderedText, 0, 0);
+			return renderTodoResult(result, expanded, theme);
 		},
+	});
+
+	pi.registerTool({
+		name: "todo_query",
+		label: "Todo Query",
+		description: "Read a persistent todo graph. Actions: list, read, history.",
+		promptSnippet: "List todos or read a todo and its history from the persistent todo graph.",
+		promptGuidelines: TODO_QUERY_PROMPT_GUIDELINES,
+		parameters: TodoQueryParams,
+		prepareArguments: toQueryParams,
+		annotations: { readOnlyHint: true, openWorldHint: false },
+
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			return runTodoAction(params as TodoExecuteParams);
+		},
+
+		renderCall(args, theme, _context) {
+			return renderTodoCall(args, theme);
+		},
+
+		renderResult(result, { expanded }, theme, _context) {
+			return renderTodoResult(result, expanded, theme);
+		},
+	});
+
+	pi.registerEntryRenderer<TodoDetails>("todo-state", (entry, { expanded }, theme) => {
+		const details = isRecord(entry.data) ? (entry.data as unknown as TodoDetails) : undefined;
+		if (!details) return new Text(theme.fg("dim", "todo state snapshot"), 0, 0);
+		const todos = Array.isArray(details.todos) ? details.todos : [];
+		const header =
+			theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", String(details.action ?? "state"));
+		const lines = [
+			header,
+			theme.fg("dim", `${todos.length} todo${todos.length === 1 ? "" : "s"} · WIP ${details.wipLimit ?? "?"}`),
+		];
+		if (details.error) lines.push(theme.fg("error", `Error: ${details.error}`));
+		if (expanded) {
+			for (const todo of todos) {
+				lines.push(theme.fg("dim", `  #${todo.id} ${todo.title} (${todo.status})`));
+			}
+		}
+		return new Text(lines.join("\n"), 0, 0);
+	});
+
+	pi.registerEntryRenderer<{ visible?: boolean }>("todo-widget-state", (entry, _options, theme) => {
+		const data = isRecord(entry.data) ? (entry.data as { visible?: unknown }) : undefined;
+		const visible = Boolean(data?.visible);
+		return new Text(theme.fg("dim", `todo widget ${visible ? "on" : "off"}`), 0, 0);
 	});
 
 	pi.registerCommand("todos", {

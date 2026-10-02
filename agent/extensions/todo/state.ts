@@ -118,9 +118,8 @@ export function normalizeTodo(raw: unknown): TodoItem | null {
 
 	const createdAt = typeof value.createdAt === "string" ? value.createdAt : now();
 	const updatedAt = typeof value.updatedAt === "string" ? value.updatedAt : createdAt;
-	const title =
-		typeof value.title === "string" ? value.title : typeof value.text === "string" ? value.text : `Todo #${id}`;
-	const status = normalizeStatus(value.status, value.done);
+	const title = typeof value.title === "string" ? value.title : `Todo #${id}`;
+	const status = normalizeStatus(value.status);
 	const history = normalizeHistory(value.history, id);
 
 	return {
@@ -143,10 +142,8 @@ export function normalizeTodo(raw: unknown): TodoItem | null {
 	};
 }
 
-function normalizeStatus(status: unknown, done: unknown): TodoItem["status"] {
+function normalizeStatus(status: unknown): TodoItem["status"] {
 	if (status === "todo" || status === "in-progress" || status === "done") return status;
-	if (status === "in_progress") return "in-progress";
-	if (done === true) return "done";
 	return "todo";
 }
 
