@@ -68,6 +68,8 @@ const DEFAULT_SEMANTIC_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_FILE_BYTES = 1_048_576;
 const PROCESS_EXIT_TIMEOUT_MS = 1_000;
 const MAX_OPEN_FILES = 40;
+const DEFAULT_MAX_CLIENTS = 8;
+const DEFAULT_CLIENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CONFIGURATION_SECTION_ROOTS = new Set([
 	"gopls",
 	"javascript",
@@ -106,6 +108,8 @@ interface LspClientState {
 	listeners: Map<string, Set<(received: boolean) => void>>;
 	openFiles: Map<string, OpenDocumentState>;
 	closed: boolean;
+	lastUsedAt: number;
+	idleTimer?: ReturnType<typeof setTimeout>;
 }
 
 const SERVER_DEFINITIONS: ServerDefinition[] = [
@@ -114,7 +118,10 @@ const SERVER_DEFINITIONS: ServerDefinition[] = [
 		command: "typescript-language-server",
 		args: ["--stdio"],
 		extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
-		rootMarkers: ["tsconfig.json", "jsconfig.json", "package.json", ".git"],
+		// package.json is intentionally not a marker: every package in a JS monorepo
+		// has one, which started a language server per package. tsconfig.json and
+		// jsconfig.json are the actual TypeScript project markers.
+		rootMarkers: ["tsconfig.json", "jsconfig.json"],
 		languageId: (filePath) => {
 			const ext = extname(filePath).toLowerCase();
 			if (ext === ".tsx") return "typescriptreact";
@@ -547,6 +554,10 @@ function markClientClosed(
 	pendingClients: Set<LspClientState>,
 ): void {
 	client.closed = true;
+	if (client.idleTimer) {
+		clearTimeout(client.idleTimer);
+		client.idleTimer = undefined;
+	}
 	const key = `${client.id}:${client.root}`;
 	if (clients.get(key) === client) clients.delete(key);
 	pendingClients.delete(client);
@@ -590,13 +601,17 @@ export class DefaultLspManagerService implements LspManagerService {
 
 	private readonly workspaceRoot: string;
 	private readonly maxFileBytes: number;
+	private readonly maxClients: number;
+	private readonly idleTimeoutMs: number;
 
 	constructor(
 		private readonly cwd: string,
-		options: { workspaceRoot?: string; maxFileBytes?: number } = {},
+		options: { workspaceRoot?: string; maxFileBytes?: number; maxClients?: number; idleTimeoutMs?: number } = {},
 	) {
 		this.workspaceRoot = normalizePath(options.workspaceRoot ?? cwd);
 		this.maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
+		this.maxClients = Math.max(1, options.maxClients ?? DEFAULT_MAX_CLIENTS);
+		this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_CLIENT_IDLE_TIMEOUT_MS;
 	}
 
 	supportsFile(filePath: string): boolean {
@@ -905,6 +920,28 @@ export class DefaultLspManagerService implements LspManagerService {
 		}
 	}
 
+	private touchClient(client: LspClientState): void {
+		client.lastUsedAt = Date.now();
+		if (client.idleTimer) clearTimeout(client.idleTimer);
+		client.idleTimer = setTimeout(() => {
+			client.idleTimer = undefined;
+			if (client.closed || this.shuttingDown) return;
+			void this.shutdownClient(client).catch(() => undefined);
+		}, this.idleTimeoutMs);
+		client.idleTimer.unref?.();
+	}
+
+	private evictClientsForCapacity(): void {
+		while (this.clients.size >= this.maxClients) {
+			let oldest: LspClientState | undefined;
+			for (const client of this.clients.values()) {
+				if (!oldest || client.lastUsedAt < oldest.lastUsedAt) oldest = client;
+			}
+			if (!oldest) return;
+			void this.shutdownClient(oldest).catch(() => undefined);
+		}
+	}
+
 	private clientKey(server: ServerDefinition, root: string): string {
 		return `${server.id}:${root}`;
 	}
@@ -917,16 +954,23 @@ export class DefaultLspManagerService implements LspManagerService {
 		if (!server) return undefined;
 		if (!commandExists(server.command)) return undefined;
 
+		// Root each language server at its nearest project marker so multi-language
+		// repos get the correct module root. TypeScript markers exclude package.json,
+		// so a JS monorepo no longer starts a server per package. The client cap and
+		// idle eviction bound how many servers stay alive.
 		const root = findNearestRoot(absolutePath, this.cwd, server.rootMarkers);
 		if (!root) return undefined;
-
 		const key = this.clientKey(server, root);
 		const existing = this.clients.get(key);
-		if (existing && !existing.closed && !processHasExited(existing.process)) return existing;
+		if (existing && !existing.closed && !processHasExited(existing.process)) {
+			this.touchClient(existing);
+			return existing;
+		}
 		if (existing) this.clients.delete(key);
 
 		let spawning = this.spawning.get(key);
 		if (!spawning) {
+			this.evictClientsForCapacity();
 			spawning = this.startClient(server, root, signal);
 			this.spawning.set(key, spawning);
 			spawning.finally(() => this.spawning.delete(key));
@@ -937,7 +981,10 @@ export class DefaultLspManagerService implements LspManagerService {
 			if (client) await this.shutdownClient(client);
 			return undefined;
 		}
-		if (client) this.clients.set(key, client);
+		if (client) {
+			this.clients.set(key, client);
+			this.touchClient(client);
+		}
 		return client;
 	}
 
@@ -974,6 +1021,7 @@ export class DefaultLspManagerService implements LspManagerService {
 				listeners: new Map(),
 				openFiles: new Map(),
 				closed: false,
+				lastUsedAt: Date.now(),
 			};
 
 			connection.onRequest(ConfigurationRequest.type, (params) => resolveWorkspaceConfiguration(params));

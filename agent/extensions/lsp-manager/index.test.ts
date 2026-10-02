@@ -1,17 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { __test__ as serviceTest, type LspManagerService, type LspStatusItem } from "./service";
 import { __test__ as indexTest } from "./index";
-
-function makeTempProject(): string {
-	const root = join(tmpdir(), `pi-lsp-manager-test-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-	mkdirSync(join(root, "src"), { recursive: true });
-	writeFileSync(join(root, "package.json"), "{}", "utf-8");
-	writeFileSync(join(root, "src", "index.ts"), "const value = 1;\n", "utf-8");
-	return root;
-}
 
 describe("lsp-manager helpers", () => {
 	it("detects builtin server definitions by extension", () => {
@@ -20,6 +9,15 @@ describe("lsp-manager helpers", () => {
 		expect(serviceTest.serverForFile("main.tf")?.id).toBe("terraform");
 		expect(serviceTest.serverForFile("terraform.tfvars")?.id).toBe("terraform");
 		expect(serviceTest.serverForFile("README.md")).toBeUndefined();
+	});
+
+	it("keeps language module markers and drops package.json for TypeScript", () => {
+		expect(serviceTest.serverForFile("src/index.ts")?.rootMarkers).not.toContain("package.json");
+		expect(serviceTest.serverForFile("src/index.ts")?.rootMarkers).toContain("tsconfig.json");
+		expect(serviceTest.serverForFile("main.go")?.rootMarkers).toContain("go.mod");
+		expect(serviceTest.serverForFile("main.rs")?.rootMarkers).toContain("Cargo.toml");
+		expect(serviceTest.serverForFile("main.py")?.rootMarkers).toContain("pyproject.toml");
+		expect(serviceTest.serverForFile("main.tf")?.rootMarkers).toContain(".terraform");
 	});
 
 	it("maps Terraform file suffixes to Terraform language IDs", () => {
@@ -80,16 +78,6 @@ describe("lsp-manager helpers", () => {
 		});
 
 		expect(result).toEqual([{}, {}, {}, null]);
-	});
-
-	it("finds project roots by nearest marker", () => {
-		const root = makeTempProject();
-		try {
-			const found = serviceTest.findNearestRoot(join(root, "src", "index.ts"), root, ["package.json"]);
-			expect(found).toBe(serviceTest.normalizePath(root));
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
 	});
 
 	it("includes pending initialization clients in shutdown snapshots", () => {

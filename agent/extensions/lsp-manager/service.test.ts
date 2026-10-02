@@ -98,6 +98,7 @@ function createClient(process: FakeProcess, connection: FakeConnection): Lifecyc
 		listeners: new Map(),
 		openFiles: new Map(),
 		closed: false,
+		lastUsedAt: 0,
 	};
 }
 
@@ -234,6 +235,67 @@ describe("lsp-manager process lifecycle", () => {
 		expect(connection.shutdownRequests.count).toBe(1);
 		expect(connection.notifications).toEqual(["exit"]);
 		expect(connection.endCalls.count).toBe(1);
+		expect(process.signals).toEqual(["SIGTERM"]);
+	});
+});
+
+interface ServiceInternals {
+	clients: Map<string, LifecycleClient>;
+	pendingClients: Set<LifecycleClient>;
+	ownedClients: Set<LifecycleClient>;
+	touchClient: (client: LifecycleClient) => void;
+	evictClientsForCapacity: () => void;
+}
+
+function registerOwnedClient(service: DefaultLspManagerService, client: LifecycleClient): ServiceInternals {
+	const internals = service as unknown as ServiceInternals;
+	internals.clients.set(`${client.id}:${client.root}`, client);
+	internals.ownedClients.add(client);
+	serviceTest.registerClientLifecycle(client, internals.clients, internals.pendingClients, internals.ownedClients);
+	return internals;
+}
+
+describe("lsp-manager project roots", () => {
+	it("resolves the nearest project marker for a file", () => {
+		const root = makeTempProject();
+		try {
+			const found = serviceTest.findNearestRoot(join(root, "src", "index.ts"), root, ["package.json"]);
+			expect(found).toBe(serviceTest.normalizePath(root));
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("lsp-manager client reuse and eviction", () => {
+	it("evicts the least recently used client when at capacity", async () => {
+		const service = new DefaultLspManagerService("/repo", { maxClients: 1 });
+		const oldestProcess = new FakeProcess(new Set(["SIGTERM"]));
+		const oldest = createClient(oldestProcess, createFakeConnection());
+		oldest.root = "/repo/old";
+		oldest.lastUsedAt = 1;
+		const internals = registerOwnedClient(service, oldest);
+
+		internals.evictClientsForCapacity();
+
+		expect(internals.clients.size).toBe(0);
+		await nextTurn();
+		await nextTurn();
+		expect(oldestProcess.signals).toEqual(["SIGTERM"]);
+	});
+
+	it("shuts down a client after the idle timeout", async () => {
+		const service = new DefaultLspManagerService("/repo", { idleTimeoutMs: 5 });
+		const process = new FakeProcess(new Set(["SIGTERM"]));
+		const client = createClient(process, createFakeConnection());
+		const internals = registerOwnedClient(service, client);
+
+		internals.touchClient(client);
+		expect(internals.clients.size).toBe(1);
+
+		await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
+
+		expect(internals.clients.size).toBe(0);
 		expect(process.signals).toEqual(["SIGTERM"]);
 	});
 });
