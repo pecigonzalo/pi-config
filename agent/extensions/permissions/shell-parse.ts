@@ -49,6 +49,8 @@ export interface ParsedCommand {
 	prefixTokens: string[];
 	/** Approval "always" pattern: prefix + " *" */
 	alwaysPattern: string;
+	/** Raw text of every file_redirect/heredoc_redirect attached to this command (own children + redirected_statement parent). */
+	redirectionTexts: string[];
 }
 
 export interface ParsedBash {
@@ -267,6 +269,27 @@ function collectNestedCommands(node: any): any[] {
 	return result;
 }
 
+/**
+ * Collect the raw text of redirections attached to a command node: direct
+ * children (leading-redirect form: `> file cmd`) plus the siblings in a
+ * `redirected_statement` wrapper (trailing form: `cmd > file`). Nested
+ * substitutions (`$(...)`) are left alone — commands inside them surface as
+ * their own ParsedCommand entries.
+ */
+function collectRedirectionTexts(node: any): string[] {
+	const texts: string[] = [];
+	const collect = (n: any) => {
+		for (let i = 0; i < n.childCount; i++) {
+			const child = n.child(i);
+			if (!child) continue;
+			if (child.type === "file_redirect" || child.type === "heredoc_redirect") texts.push(child.text);
+		}
+	};
+	collect(node);
+	if (node.parent?.type === "redirected_statement") collect(node.parent);
+	return texts;
+}
+
 /** Recursively collect all `command` nodes from an AST */
 function collectCommands(node: any): any[] {
 	const result: any[] = [];
@@ -317,6 +340,7 @@ export async function parseBashCommand(command: string): Promise<ParsedBash> {
 			tokens,
 			prefixTokens,
 			alwaysPattern,
+			redirectionTexts: collectRedirectionTexts(node),
 		});
 	}
 

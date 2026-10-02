@@ -17,7 +17,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { detectDangerousBashPattern } from "./shell-policy";
+import { dangerReasonForCommandText, dangerReasonForParsedCommand } from "./shell-policy";
+import type { ParsedCommand } from "./shell-parse";
 import type { PermissionToolInput, PermissionToolName, ResolvedClassifierSettings, Rule } from "./shared";
 
 export type ClassifierVerdict =
@@ -30,6 +31,8 @@ export interface ClassifyPermissionRequestParams {
 	rule: Rule;
 	/** For bash: the unapproved command/segment being evaluated, if known. */
 	command?: string;
+	/** For bash: the parsed unapproved segment, when tree-sitter decomposition produced one. */
+	parsedCommand?: ParsedCommand;
 	ctx: ExtensionContext;
 	settings: ResolvedClassifierSettings;
 }
@@ -39,15 +42,20 @@ export interface ClassifyPermissionRequestParams {
 /**
  * Checks the classifier-independent escalate list. Returns a reason string when the request must
  * always go to the human, or undefined when the classifier may be consulted. Bash reuses
- * shell-policy.ts's dangerous-pattern list (rm, sudo, git push, git reset --hard, ...) rather than
- * keeping a second, separately-maintained list.
+ * shell-policy.ts's parsed dangerous-command detection (rm, sudo, git push, git reset --hard, ...)
+ * rather than keeping a second, separately-maintained list. The parsed unapproved segment is
+ * preferred when available (accurate tokens, wrappers stripped); the raw text form is a
+ * best-effort backstop for callers without a parse.
  */
 export function isHardEscalate(
 	toolName: PermissionToolName,
 	_input: PermissionToolInput,
 	command: string | undefined,
+	parsedCommand?: ParsedCommand,
 ): string | undefined {
-	if (toolName === "bash") return detectDangerousBashPattern(command ?? "");
+	if (toolName === "bash") {
+		return parsedCommand ? dangerReasonForParsedCommand(parsedCommand) : dangerReasonForCommandText(command ?? "");
+	}
 	if (toolName === "mcp") return "MCP tool calls always require human confirmation";
 	return undefined;
 }
@@ -244,11 +252,11 @@ function escalate(rationale: string): ClassifierVerdict {
 }
 
 export async function classifyPermissionRequest(params: ClassifyPermissionRequestParams): Promise<ClassifierVerdict> {
-	const { toolName, input, rule, command, ctx, settings } = params;
+	const { toolName, input, rule, command, parsedCommand, ctx, settings } = params;
 
 	if (!settings.enabled) return escalate("classifier disabled");
 
-	const hardReason = isHardEscalate(toolName, input, command);
+	const hardReason = isHardEscalate(toolName, input, command, parsedCommand);
 	if (hardReason) return escalate(hardReason);
 
 	const model = ctx.modelRegistry.find(settings.provider, settings.model);

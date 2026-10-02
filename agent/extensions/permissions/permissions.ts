@@ -66,6 +66,18 @@
  * If no rule matches, the externalPath policy is checked for structured
  * filesystem tools, then the call is allowed.
  *
+ * Bash commands are decomposed into individual segments via tree-sitter.
+ * Segments that are statically provable to be side-effect-free or trivially
+ * bounded and reversible — a duration-capped `sleep`, `set` with arguments
+ * (shell options never outlive the invocation), `command -v/-V` lookups, and
+ * the no-op builtins `true`/`false`/`:` with only /dev/null or fd
+ * redirections — are skipped in permission consideration, so
+ * `sleep 1 && npm test` only ever prompts about `npm test`. Explicit rules that
+ * match a command still win over this list (including a catch-all "block").
+ * Execution wrappers (`command`, `env`, `nohup`, `xargs`, ...) are stripped
+ * before evaluation and the inner command is judged normally, so `command ls`
+ * follows the `ls` rules and `command rm -rf /` still trips the delete check.
+ *
  * Built-in runtime rules wrap user rules: invariants (e.g. .git internals)
  * are evaluated before them, safe defaults (e.g. the user skill catalog)
  * after them, so user rules can override the latter but not the former.
@@ -160,7 +172,6 @@ import {
 } from "./matching";
 import {
 	canAutoApproveParsedBash,
-	detectDangerousBashPattern,
 	getFirstUnapprovedParsedCommand,
 	isAllParsedCommandsAllowed,
 	sandboxFallbackModeForPolicy,
@@ -911,11 +922,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		treeSitterReady = await isTreeSitterAvailable();
 		if (ctx.hasUI) {
 			if (treeSitterReady) ctx.ui.notify("Shell parser active: tree-sitter", "info");
-			else
-				ctx.ui.notify(
-					"Shell parser unavailable: falling back to simple whole-command bash approvals",
-					"warning",
-				);
+			else ctx.ui.notify("Shell parser unavailable: bash commands will require confirmation", "warning");
 		}
 		await initializeSandbox(ctx);
 	});
@@ -1394,6 +1401,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		command: string | undefined,
 		mode: PermissionMode,
 		ctx: ExtensionContext,
+		parsedCommand?: ParsedCommand,
 	): Promise<boolean> {
 		if (mode !== "auto" || rule.autoReview === false) return false;
 		const verdict = await classifyPermissionRequest({
@@ -1401,6 +1409,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			input,
 			rule,
 			command,
+			parsedCommand,
 			ctx,
 			settings: getClassifierSettings(config),
 		});
@@ -1433,7 +1442,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			try {
 				parsedBash = await parseBashCommand(command);
 			} catch {
-				// tree-sitter failed; parsedBash stays undefined → simple fallback
+				// tree-sitter failed; parsedBash stays undefined → whole-command ask below
 			}
 		}
 
@@ -1450,22 +1459,28 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 				ctx,
 			);
 		}
-		const dangerousReason = parsedBash ? undefined : detectDangerousBashPattern(command);
-		if (dangerousReason) {
-			return askPermission("bash", input, dangerousReason, projectRoot, ctx);
+		// Tree-sitter unavailable or parsing failed: every bash decision in this extension is
+		// made on parsed segments (safe-segment skipping, wrapper normalization, per-command
+		// name checks). Without a parse there is no way to prove a command is safe, so fail
+		// closed to a whole-command confirmation, like the ask-all-bash sandbox fallback.
+		if (!parsedBash) {
+			return askPermission(
+				"bash",
+				input,
+				"Bash parser unavailable: confirmation required for all bash commands",
+				projectRoot,
+				ctx,
+			);
 		}
 
-		if (parsedBash && canAutoApproveParsedBash(parsedBash, policy.rules, isApprovedBashSegment)) {
+		if (canAutoApproveParsedBash(parsedBash, policy.rules, isApprovedBashSegment)) {
 			return ALLOW_PERMISSION;
 		}
 
 		const getUnapprovedBashSegment = (): { segment?: string; parsed?: ParsedCommand } => {
-			if (parsedBash) {
-				const unapproved = getFirstUnapprovedParsedCommand(parsedBash, policy.rules, isApprovedBashSegment);
-				if (unapproved) return { segment: unapproved.source, parsed: unapproved };
-				return {};
-			}
-			return { segment: command };
+			const unapproved = getFirstUnapprovedParsedCommand(parsedBash, policy.rules, isApprovedBashSegment);
+			if (unapproved) return { segment: unapproved.source, parsed: unapproved };
+			return {};
 		};
 
 		const rule = policy.rules.length > 0 ? matchRule(policy.rules, "bash", input) : undefined;
@@ -1478,19 +1493,28 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		}
 
 		if (rule.action === "ask") {
-			if (parsedBash && canAutoApproveParsedBash(parsedBash, policy.rules, isApprovedBashSegment)) {
-				return ALLOW_PERMISSION;
-			}
+			// canAutoApproveParsedBash already returned above; reaching here means at least one
+			// segment is unapproved, so go straight to finding it.
 			const { segment: unapprovedSegment, parsed: unapprovedParsed } = getUnapprovedBashSegment();
 			const note =
 				rule.reason ?? (unapprovedSegment ? `Unapproved shell segment: ${unapprovedSegment}` : undefined);
-			if (await maybeAutoApprove("bash", input, rule, unapprovedSegment ?? command, policy.mode, ctx)) {
+			if (
+				await maybeAutoApprove(
+					"bash",
+					input,
+					rule,
+					unapprovedSegment ?? command,
+					policy.mode,
+					ctx,
+					unapprovedParsed,
+				)
+			) {
 				return ALLOW_PERMISSION;
 			}
 			return askPermission("bash", input, note, projectRoot, ctx, unapprovedSegment, unapprovedParsed);
 		}
 
-		if (rule.action === "allow" && parsedBash) {
+		if (rule.action === "allow") {
 			if (parsedBash.isComplex || !isAllParsedCommandsAllowed(parsedBash, policy.rules, isApprovedBashSegment)) {
 				const { segment: unapprovedSegment, parsed: unapprovedParsed } = getUnapprovedBashSegment();
 				const note = unapprovedSegment
@@ -1569,10 +1593,6 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 	): Promise<PermissionDecision> {
 		const policy = activePolicy(configWithModeOverride(), agentName, profileName);
 
-		let bashApprovals: ApprovalRecord[] = [];
-		let isApprovedBashSegment: ((candidate: string) => boolean) | undefined;
-		let parsedBash: ParsedBash | undefined;
-
 		if (toolName === "bash") {
 			return checkBashPermission(getCommandInput(input) ?? "", input, projectRoot, ctx);
 		} else if (sessionAllows.has(toolName)) {
@@ -1580,18 +1600,6 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		} else if (approvalsCoverTool(persistentApprovals, toolName, projectRoot, agentName, approvalsSettings)) {
 			return ALLOW_PERMISSION;
 		}
-
-		const getUnapprovedBashSegment = (): { segment?: string; parsed?: ParsedCommand } => {
-			if (toolName !== "bash") return {};
-			if (parsedBash) {
-				const unapproved = getFirstUnapprovedParsedCommand(parsedBash, policy.rules, isApprovedBashSegment);
-				if (unapproved) return { segment: unapproved.source, parsed: unapproved };
-				return {};
-			}
-			// No tree-sitter: can't decompose, return the whole command as the segment
-			const command = getCommandInput(input) ?? "";
-			return { segment: command };
-		};
 
 		const rule = policy.rules.length > 0 ? matchRule(policy.rules, toolName, input) : undefined;
 
@@ -1603,17 +1611,6 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			}
 
 			if (rule.action === "ask") {
-				if (toolName === "bash") {
-					// If tree-sitter confirms all simple commands are allowed, skip.
-					if (parsedBash && canAutoApproveParsedBash(parsedBash, policy.rules, isApprovedBashSegment)) {
-						return ALLOW_PERMISSION;
-					}
-					const { segment: unapprovedSegment, parsed: unapprovedParsed } = getUnapprovedBashSegment();
-					const note =
-						rule.reason ??
-						(unapprovedSegment ? `Unapproved shell segment: ${unapprovedSegment}` : undefined);
-					return askPermission(toolName, input, note, projectRoot, ctx, unapprovedSegment, unapprovedParsed);
-				}
 				// For filesystem tools, check if an existing folder/path approval already covers this path
 				if (isFilesystemToolName(toolName)) {
 					const rawPath = getPathInput(input);
@@ -1642,34 +1639,6 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 
 			// action === "allow": still check external path unless opted out
 			if (rule.action === "allow") {
-				if (toolName === "bash") {
-					if (parsedBash) {
-						// Ask if complex or any command isn't allowed
-						if (
-							parsedBash.isComplex ||
-							!isAllParsedCommandsAllowed(parsedBash, policy.rules, isApprovedBashSegment)
-						) {
-							const { segment: unapprovedSegment, parsed: unapprovedParsed } = getUnapprovedBashSegment();
-							const note = unapprovedSegment
-								? `Unapproved shell segment: ${unapprovedSegment}`
-								: parsedBash.isComplex
-									? "Complex shell command requires confirmation"
-									: undefined;
-							if (note)
-								return askPermission(
-									toolName,
-									input,
-									note,
-									projectRoot,
-									ctx,
-									unapprovedSegment,
-									unapprovedParsed,
-								);
-						}
-					}
-					// No tree-sitter: rule already matched "allow", let it through
-				}
-
 				const epa = rule.externalPathAction ?? "inherit";
 				if (epa === "allow") return ALLOW_PERMISSION; // explicit bypass
 
@@ -1853,7 +1822,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			const sandboxStatus = sandboxStatusText();
 			const bashExecutionMode = sandboxBashExecutionMode();
 			const sandboxConfig = sandboxPromptConfig();
-			const shellParserStatus = treeSitterReady ? "tree-sitter (active)" : "simple fallback";
+			const shellParserStatus = treeSitterReady ? "tree-sitter (active)" : "unavailable (ask-all bash)";
 			const verbose = /^(verbose|full|debug|all)$/i.test((args || "").trim());
 			const sessionApprovalCount = sessionPathApprovals.length + sessionBashApprovals.length;
 			const actionCounts = {
@@ -1906,7 +1875,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 						`  ${theme.fg("muted", "Bash exec:    ")}${theme.fg(sandboxActive ? "success" : "warning", bashExecutionMode)}`,
 					);
 					lines.push(
-						`  ${theme.fg("muted", "Shell parser: ")}${theme.fg(treeSitterReady ? "success" : "warning", shellParserStatus)}${!treeSitterReady ? theme.fg("dim", ": whole-command approvals only") : ""}`,
+						`  ${theme.fg("muted", "Shell parser: ")}${theme.fg(treeSitterReady ? "success" : "warning", shellParserStatus)}${!treeSitterReady ? theme.fg("dim", ": bash commands require confirmation") : ""}`,
 					);
 					lines.push(
 						`  ${theme.fg("muted", "Approvals:    ")}${theme.fg("warning", `${sessionApprovalCount} session`)}${theme.fg("dim", ", ")}${theme.fg("accent", `${persistentApprovals.length} saved`)}`,
@@ -1993,7 +1962,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 						`  ${theme.fg("muted", "Bash exec mode: ")}${theme.fg(sandboxActive ? "success" : "warning", bashExecutionMode)}`,
 					);
 					lines.push(
-						`  ${theme.fg("muted", "Shell parser:   ")}${theme.fg(treeSitterReady ? "success" : "warning", shellParserStatus)}${!treeSitterReady ? theme.fg("dim", ": whole-command approvals only") : ""}`,
+						`  ${theme.fg("muted", "Shell parser:   ")}${theme.fg(treeSitterReady ? "success" : "warning", shellParserStatus)}${!treeSitterReady ? theme.fg("dim", ": bash commands require confirmation") : ""}`,
 					);
 					lines.push(
 						`  ${theme.fg("muted", "Sandbox TMPDIR: ")}${theme.fg("dim", sandboxTmpDir ?? getEffectiveSandboxTmpDir(ctx.cwd, config.sandbox))}${theme.fg("dim", sandboxTmpDirEphemeral ? " (session)" : " (shared)")}`,

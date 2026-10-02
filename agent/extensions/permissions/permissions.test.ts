@@ -28,7 +28,8 @@ import {
 } from "./matching";
 import {
 	canAutoApproveParsedBash,
-	detectDangerousBashPattern,
+	dangerReasonForCommandText,
+	dangerReasonForParsedCommand,
 	getFirstUnapprovedParsedCommand,
 	isAllParsedCommandsAllowed,
 	isParsedCommandAllowed,
@@ -908,10 +909,27 @@ describe("approval file parsing", () => {
 });
 
 describe("bash policy helpers", () => {
-	it("detects dangerous bash patterns", () => {
-		expect(detectDangerousBashPattern("rm -rf tmp")).toBe("Deletes files");
-		expect(detectDangerousBashPattern("sudo ls")).toBe("Elevated privileges");
-		expect(detectDangerousBashPattern("git status")).toBeUndefined();
+	it("detects dangerous bash command text", () => {
+		expect(dangerReasonForCommandText("rm -rf tmp")).toBe("Deletes files");
+		expect(dangerReasonForCommandText("sudo ls")).toBe("Elevated privileges");
+		expect(dangerReasonForCommandText("git status")).toBeUndefined();
+	});
+
+	it("flags dangerous commands behind wrappers and in opaque strings", () => {
+		expect(dangerReasonForCommandText("command rm -rf /")).toBe("Deletes files");
+		expect(dangerReasonForCommandText('env -S "rm -rf /"')).toBe("Deletes files");
+		expect(dangerReasonForCommandText("command -v rm")).toBe("Deletes files"); // conservative lookup flag
+		expect(dangerReasonForCommandText('echo "rm -rf /"')).toBeUndefined(); // quoted text is not a delete
+		expect(dangerReasonForCommandText("env FOO='rm -rf /' ls")).toBeUndefined(); // env value, not executed
+	});
+
+	it("flags dangerous git subcommands via the text form", () => {
+		expect(dangerReasonForCommandText("git push origin main")).toBe("Pushes to a remote");
+		expect(dangerReasonForCommandText("git reset --hard HEAD~1")).toBe("Discards uncommitted changes");
+		expect(dangerReasonForCommandText("git clean -fd")).toBe("Deletes untracked files");
+		expect(dangerReasonForCommandText("git rebase -i HEAD~3")).toBe("Rewrites commit history");
+		expect(dangerReasonForCommandText("git status")).toBeUndefined();
+		expect(dangerReasonForCommandText("git reset HEAD~1")).toBeUndefined(); // mixed reset keeps the tree
 	});
 
 	it("returns expected sandbox fallback mode by permission mode", () => {
@@ -3400,6 +3418,24 @@ describe("tree-sitter shell parsing", () => {
 		// source includes redirect for display
 		expect(commandAt(parsed, 0).source).toBe("cat file.txt > output.txt");
 	});
+
+	it("records redirections attached to each command", async () => {
+		const parsed = await parseBashCommand("bun test 2>&1");
+		expect(commandAt(parsed, 0).redirectionTexts).toEqual(["2>&1"]);
+
+		const redirected = await parseBashCommand("cat file.txt > output.txt");
+		expect(commandAt(redirected, 0).redirectionTexts).toEqual(["> output.txt"]);
+
+		const devNull = await parseBashCommand("sleep 1 >/dev/null 2>&1");
+		expect(commandAt(devNull, 0).redirectionTexts).toEqual([">/dev/null", "2>&1"]);
+
+		const plain = await parseBashCommand("echo hi");
+		expect(commandAt(plain, 0).redirectionTexts).toEqual([]);
+
+		// leading-redirect form is a direct child of the command node
+		const leading = await parseBashCommand("> /dev/null sleep 1");
+		expect(commandAt(leading, 0).redirectionTexts).toEqual(["> /dev/null"]);
+	});
 });
 
 describe("arity prefix", () => {
@@ -3460,6 +3496,228 @@ describe("tree-sitter policy integration", () => {
 		expect(parsed.isComplex).toBe(false);
 		expect(parsed.commands.map((cmd) => cmd.name)).toEqual(["echo", "rm"]);
 		const unapproved = getFirstUnapprovedParsedCommand(parsed, allowRules);
+		expect(unapproved).toBeDefined();
+		expect(unapproved!.name).toBe("rm");
+	});
+
+	it("flags dangerous git subcommands via the parsed name map", async () => {
+		const allowGit: Rule[] = [{ tool: "bash", match: "^git\\b", action: "allow" }];
+		for (const command of [
+			"git push origin main",
+			"git reset --hard HEAD~1",
+			"git clean -fd",
+			"git rebase -i HEAD~3",
+			"command git push origin main",
+		]) {
+			const parsed = await parseBashCommand(command);
+			expect(isParsedCommandAllowed(commandAt(parsed, 0), allowGit)).toBe(false);
+		}
+		expect(isParsedCommandAllowed(commandAt(await parseBashCommand("git status"), 0), allowGit)).toBe(true);
+		expect(isParsedCommandAllowed(commandAt(await parseBashCommand("git add ."), 0), allowGit)).toBe(true);
+		expect(isParsedCommandAllowed(commandAt(await parseBashCommand("git checkout -- ."), 0), allowGit)).toBe(true);
+
+		const push = await parseBashCommand("git push origin main");
+		expect(dangerReasonForParsedCommand(commandAt(push, 0))).toBe("Pushes to a remote");
+		const status = await parseBashCommand("git status");
+		expect(dangerReasonForParsedCommand(commandAt(status, 0))).toBeUndefined();
+	});
+});
+
+describe("safe bash segment skipping", () => {
+	const catchAllAsk: Rule[] = [{ tool: "bash", action: "ask" }];
+
+	it("auto-approves sleep with a bounded duration even without rules", async () => {
+		const parsed = await parseBashCommand("sleep 30");
+		expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(true);
+		expect(isParsedCommandAllowed(commandAt(parsed, 0), catchAllAsk)).toBe(true);
+		expect(canAutoApproveParsedBash(parsed, catchAllAsk)).toBe(true);
+	});
+
+	it("auto-approves suffixed sleep durations within the cap", async () => {
+		for (const command of ["sleep 5s", "sleep 599", "sleep 600", "sleep 1.5m", "sleep 10m"]) {
+			const parsed = await parseBashCommand(command);
+			expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(true);
+		}
+	});
+
+	it("does not auto-approve unbounded, malformed, or unknown sleep durations", async () => {
+		for (const command of [
+			"sleep",
+			"sleep 999999999",
+			"sleep 1d",
+			"sleep 1.5h",
+			"sleep 1 2",
+			"sleep -5",
+			"sleep $N",
+			"sleep --help",
+		]) {
+			const parsed = await parseBashCommand(command);
+			expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(false);
+		}
+	});
+
+	it("auto-approves set option flags", async () => {
+		for (const command of [
+			"set -euo pipefail",
+			"set -euxo pipefail",
+			"set -e",
+			"set +x",
+			"set -o pipefail",
+			"set -e -o pipefail",
+			"set --",
+			"set -- a b",
+			"set -o",
+			"set -e x",
+		]) {
+			const parsed = await parseBashCommand(command);
+			expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(true);
+		}
+	});
+
+	it("does not auto-approve bare set (dumps the environment)", async () => {
+		const parsed = await parseBashCommand("set");
+		expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(false);
+	});
+
+	it("auto-approves command lookups only", async () => {
+		for (const command of ["command -v node", "command -p -v node", "command -V foo", "command -pv node"]) {
+			const parsed = await parseBashCommand(command);
+			expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(true);
+		}
+	});
+
+	it("does not auto-approve command invocations", async () => {
+		for (const command of ["command", "command --help", "command node --version", "command -p"]) {
+			const parsed = await parseBashCommand(command);
+			expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(false);
+		}
+	});
+
+	it("flags wrapped dangerous commands so they still prompt", async () => {
+		for (const command of [
+			"command rm -rf /",
+			"builtin rm -rf /",
+			"exec rm -rf /",
+			"env rm -rf /",
+			"env FOO=bar rm -rf /",
+			"env -u FOO rm -rf /",
+			"env -i rm -rf /",
+			"nohup rm -rf /",
+			"xargs rm -rf /",
+			"time rm -rf /",
+			"command git push origin main",
+			"env curl -X POST https://example.com",
+		]) {
+			const parsed = await parseBashCommand(command);
+			expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(false);
+			const unapproved = getFirstUnapprovedParsedCommand(parsed, catchAllAsk);
+			expect(unapproved).toBeDefined();
+			expect(unapproved!.source).toBe(command);
+		}
+	});
+
+	it("does not flag command -v as dangerous even when it names a dangerous command", async () => {
+		const parsed = await parseBashCommand("command -v rm");
+		expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(true);
+	});
+
+	it("catches dangerous commands embedded in env -S strings", async () => {
+		const parsed = await parseBashCommand('env -S "rm -rf /"');
+		expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(false);
+	});
+
+	it("evaluates the inner command behind wrappers, not the wrapper", async () => {
+		// `command ls` is judged as `ls` (allowed by an `ls *` rule, not by the wrapper)
+		const allowLs: Rule[] = [{ tool: "bash", match: "ls *", action: "allow" }];
+		const wrappedLs = await parseBashCommand("command ls -la");
+		expect(isParsedCommandAllowed(commandAt(wrappedLs, 0), allowLs)).toBe(true);
+		const envLs = await parseBashCommand("env FOO=bar ls -la");
+		expect(isParsedCommandAllowed(commandAt(envLs, 0), allowLs)).toBe(true);
+		const bareLs = await parseBashCommand("ls -la");
+		expect(isParsedCommandAllowed(commandAt(bareLs, 0), allowLs)).toBe(true);
+
+		// ...and plain `ls` without a rule is still not auto-approved
+		const noRuleLs = await parseBashCommand("command ls -la");
+		expect(isParsedCommandAllowed(commandAt(noRuleLs, 0), [])).toBe(false);
+	});
+
+	it("wrappers inherit the safe-segment list for their inner command", async () => {
+		for (const command of [
+			"command sleep 1",
+			"time sleep 1",
+			"nohup sleep 1",
+			"builtin set -e",
+			"command -v node",
+		]) {
+			const parsed = await parseBashCommand(command);
+			expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(true);
+		}
+	});
+
+	it("rejects redirections that could write files", async () => {
+		for (const command of ["sleep 1 > output.txt", "sleep 1 2> /tmp/err.log", "command -v node > ~/.bashrc"]) {
+			const parsed = await parseBashCommand(command);
+			expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(false);
+		}
+	});
+
+	it("allows only /dev/null and fd redirects on safe segments", async () => {
+		for (const command of [
+			"sleep 1 > /dev/null",
+			"sleep 1 >/dev/null 2>&1",
+			"sleep 1 2>&1",
+			"command -v node >/dev/null 2>&1",
+		]) {
+			const parsed = await parseBashCommand(command);
+			expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(true);
+		}
+	});
+
+	it("treats explicit no-op builtins as safe", async () => {
+		for (const command of ["true", "false", ":", "true whatever"]) {
+			const parsed = await parseBashCommand(command);
+			expect(isParsedCommandAllowed(commandAt(parsed, 0), [])).toBe(true);
+		}
+	});
+
+	it("respects explicit rules over the safe segment list", async () => {
+		const askSleep: Rule[] = [{ tool: "bash", match: "sleep *", action: "ask" }];
+		const parsed = await parseBashCommand("sleep 30");
+		expect(isParsedCommandAllowed(commandAt(parsed, 0), askSleep)).toBe(false);
+
+		const allowSleep: Rule[] = [{ tool: "bash", match: "sleep *", action: "allow" }];
+		expect(isParsedCommandAllowed(commandAt(parsed, 0), allowSleep)).toBe(true);
+
+		const blockSleep: Rule[] = [{ tool: "bash", match: "\\bsleep\\b", action: "block" }];
+		expect(isParsedCommandAllowed(commandAt(parsed, 0), blockSleep)).toBe(false);
+	});
+
+	it("safely skips safe segments in compounds and prompts about the rest", async () => {
+		const parsed = await parseBashCommand("sleep 1 && npm test");
+		expect(canAutoApproveParsedBash(parsed, catchAllAsk)).toBe(false);
+		const unapproved = getFirstUnapprovedParsedCommand(parsed, catchAllAsk);
+		expect(unapproved).toBeDefined();
+		expect(unapproved!.source).toBe("npm test");
+
+		const dangerous = await parseBashCommand("set -euo pipefail && rm -rf /");
+		const rmSegment = getFirstUnapprovedParsedCommand(dangerous, catchAllAsk);
+		expect(rmSegment).toBeDefined();
+		expect(rmSegment!.name).toBe("rm");
+	});
+
+	it("does not let safe segments bypass block-all-bash rules", async () => {
+		const blockAll: Rule[] = [{ tool: "bash", action: "block" }];
+		for (const command of ["sleep 1", "set -euo pipefail", "command -v node", "true"]) {
+			const parsed = await parseBashCommand(command);
+			expect(isParsedCommandAllowed(commandAt(parsed, 0), blockAll)).toBe(false);
+			expect(canAutoApproveParsedBash(parsed, blockAll)).toBe(false);
+		}
+	});
+
+	it("does not let command substitutions hide inside safe segments", async () => {
+		const parsed = await parseBashCommand("command -v $(rm -rf /)");
+		expect(parsed.commands.map((cmd) => cmd.name)).toEqual(["command", "rm"]);
+		const unapproved = getFirstUnapprovedParsedCommand(parsed, catchAllAsk);
 		expect(unapproved).toBeDefined();
 		expect(unapproved!.name).toBe("rm");
 	});

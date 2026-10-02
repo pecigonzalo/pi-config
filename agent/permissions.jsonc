@@ -348,4 +348,11 @@
     "allowLocalBinding": true,
     "addAllowWrite": ["~/.mcporter", "~/.mcp.json"],
   },
+  // Classifier used to auto-review "ask" rules when a policy's mode is "auto".
+  // The stock default (anthropic/claude-haiku-4-5) has no auth configured here,
+  // so point it at the default session model from agent/settings.json.
+  "classifier": {
+    "provider": "opencode-go",
+    "model": "deepseek-v4-flash",
+  },
 }
