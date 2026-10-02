@@ -69,6 +69,26 @@ describe("executeWebfetch", () => {
 		expect(result.content[0]?.text).toBeTruthy();
 	});
 
+	test("flags responses that exceed the raw size cap", async () => {
+		const result = await executeWebfetch(
+			{ url: "https://example.com/big" },
+			{
+				fetchImpl: async () =>
+					new Response("a".repeat(2 * 1024 * 1024 + 128), {
+						status: 200,
+						headers: { "content-type": "text/plain" },
+					}),
+			},
+		);
+
+		expect(result.details.responseTruncated).toBe(true);
+		expect(result.details.responseBytes).toBe(2 * 1024 * 1024);
+		expect(result.structuredContent.responseTruncated).toBe(true);
+		expect(result.details.warnings.some((warning) => warning.includes("truncated before normalization"))).toBe(
+			true,
+		);
+	});
+
 	test("rejects invalid urls", async () => {
 		await expect(executeWebfetch({ url: "not-a-url" })).rejects.toThrow("Invalid url");
 	});

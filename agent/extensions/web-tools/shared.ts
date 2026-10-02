@@ -136,12 +136,16 @@ export async function readBodyWithLimit(
 	const chunks: Uint8Array[] = [];
 	let bytes = 0;
 	let truncated = false;
+	let completed = false;
 
 	try {
 		while (true) {
 			if (signal.aborted) throw new Error("aborted");
 			const { done, value } = await reader.read();
-			if (done || !value) break;
+			if (done || !value) {
+				completed = true;
+				break;
+			}
 
 			if (bytes + value.byteLength <= maxBytes) {
 				chunks.push(value);
@@ -159,19 +163,31 @@ export async function readBodyWithLimit(
 			break;
 		}
 	} finally {
-		if (truncated) await reader.cancel().catch(() => {});
+		// Cancel on truncation or abort so the underlying stream is released; a completed stream
+		// must not be cancelled.
+		if (!completed) {
+			try {
+				await reader.cancel();
+			} catch {
+				// The stream may already be errored or aborted.
+			}
+		}
 		reader.releaseLock();
 	}
 
 	return { buffer: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))), truncated };
 }
 
+// Bun's TextDecoder types restrict the label to a known union; the runtime accepts any WHATWG
+// encoding label and throws for unknown ones, which decodeBuffer already falls back from.
+const TextDecoderWithLabel = TextDecoder as unknown as new (label?: string) => TextDecoder;
+
 export function decodeBuffer(buffer: Buffer, charset: string | undefined): string {
 	if (buffer.length === 0) return "";
 
 	if (charset) {
 		try {
-			return new TextDecoder(charset as any).decode(buffer);
+			return new TextDecoderWithLabel(charset).decode(buffer);
 		} catch {
 			// Fall back to utf-8.
 		}
