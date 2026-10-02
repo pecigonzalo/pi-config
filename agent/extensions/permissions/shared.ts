@@ -12,7 +12,7 @@ export function baseRestrictionMode(mode: PermissionMode): Exclude<PermissionMod
 	return mode === "auto" ? "workspace-write" : mode;
 }
 
-export const FILESYSTEM_TOOL_NAMES = ["read", "write", "edit", "grep", "find", "ls"] as const;
+export const FILESYSTEM_TOOL_NAMES = ["read", "write", "edit", "grep", "find", "ls", "code_intel"] as const;
 export type FilesystemToolName = (typeof FILESYSTEM_TOOL_NAMES)[number];
 export type KnownToolName = "bash" | "mcp" | FilesystemToolName;
 export type RuleToolName = KnownToolName | "*" | (string & {});
@@ -20,6 +20,7 @@ export type PermissionToolName = Exclude<RuleToolName, "*">;
 
 export type PermissionToolInput = {
 	path?: unknown;
+	root?: unknown;
 	command?: unknown;
 };
 

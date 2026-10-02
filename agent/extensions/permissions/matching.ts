@@ -8,7 +8,9 @@ export function getCommandInput(input: PermissionToolInput): string | undefined 
 }
 
 export function getPathInput(input: PermissionToolInput): string | undefined {
-	return typeof input.path === "string" ? input.path : undefined;
+	if (typeof input.path === "string") return input.path;
+	// Tools like code_intel scope by root when no path is given (repo_map, symbols).
+	return typeof input.root === "string" ? input.root : undefined;
 }
 
 export function asPermissionToolInput(input: unknown): PermissionToolInput {
@@ -31,6 +33,7 @@ export function getMatchTarget(toolName: PermissionToolName, input: PermissionTo
 		case "grep":
 		case "find":
 		case "ls":
+		case "code_intel":
 			return getPathInput(input);
 		default:
 			return undefined;

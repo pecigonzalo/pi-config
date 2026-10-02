@@ -22,10 +22,13 @@ import {
 	canonicalizePathToken,
 	findGitRepoRoot,
 	getFilesystemApprovalTargets,
+	getMatchTarget,
+	getPathInput,
 	isPathOutsideCwd,
 	matchRule,
 	ruleMatch,
 } from "./matching";
+import { isFilesystemToolName } from "./shared";
 import {
 	canAutoApproveParsedBash,
 	dangerReasonForCommandText,
@@ -3737,4 +3740,15 @@ test("permissions completions filter by prefix", () => {
 
 test("permissions completions return nothing for unrecognised prefix", () => {
 	expect(PERMISSIONS_COMPLETIONS.filter((s) => s.value.startsWith("xyz"))).toEqual([]);
+});
+
+test("code_intel is a filesystem tool with root-aware path input", () => {
+	expect(isFilesystemToolName("code_intel")).toBe(true);
+	expect(getPathInput({ path: "src/a.ts" })).toBe("src/a.ts");
+	expect(getPathInput({ path: "src/a.ts", root: "/repo" })).toBe("src/a.ts");
+	expect(getPathInput({ root: "/repo" })).toBe("/repo");
+	expect(getPathInput({})).toBeUndefined();
+	expect(getPathInput({ command: "echo hi" })).toBeUndefined();
+	expect(getMatchTarget("code_intel", { root: "." })).toBe(".");
+	expect(getMatchTarget("code_intel", { path: "src/a.ts" })).toBe("src/a.ts");
 });
