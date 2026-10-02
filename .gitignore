@@ -4,6 +4,7 @@ agent/models-store.json
 agent/trust.json
 agent/permissions-approvals.json
 agent/auth.json
+agent/mcp-auth.json
 agent/**/auth.json
 agent/sessions/
 agent/pi-debug.log

@@ -10,27 +10,29 @@
         "--headless",
         "--isolated",
         "--output-dir",
-        "${MCPORTER_DAEMON_DIR:-/tmp/.pi-mcporter-daemon}/playwright"
+        "~/.pi/mcp-playwright"
       ],
-      "cwd": "${MCPORTER_DAEMON_DIR:-/tmp/.pi-mcporter-daemon}/playwright",
-      "lifecycle": "keep-alive"
+      "description": "Automate browser interactions with Playwright"
     },
     "github-grep": {
-      "baseUrl": "https://mcp.grep.app"
+      "url": "https://mcp.grep.app",
+      "description": "Search code examples on GitHub"
     },
     "deep-wiki": {
-      "baseUrl": "https://mcp.deepwiki.com/mcp"
+      "url": "https://mcp.deepwiki.com/mcp",
+      "description": "Search and read developer documentation"
     },
     "linear": {
-      "baseUrl": "https://mcp.linear.app/mcp"
+      "url": "https://mcp.linear.app/mcp",
+      "description": "Search and update Linear issues"
     },
     "wealthfolio": {
       "type": "http",
       "url": "http://localhost:8080/mcp",
       "headers": {
         "Authorization": "Bearer ${WEALTHFOLIO_API_KEY}"
-      }
+      },
+      "description": "Wealthfolio portfolio data"
     }
-  },
-  "imports": []
+  }
 }
