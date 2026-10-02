@@ -42,15 +42,20 @@ describe("WebsearchParams", () => {
 describe("executeWebsearch", () => {
 	test("calls the Exa MCP tool with query, objective and numResults", async () => {
 		const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+		const progress: string[] = [];
 		const result = await executeWebsearch(
 			{ query: "pi coding agent", limit: 2 },
 			{
+				onProgress: (message) => progress.push(message),
 				callTool: async (name, args) => {
 					calls.push({ name, args });
 					return ok(searchText([DOC_BLOCK, OTHER_BLOCK]));
 				},
 			},
 		);
+
+		expect(progress).toContain("Searching the web...");
+		expect(progress.some((message) => message.startsWith("Found "))).toBe(true);
 
 		expect(calls).toEqual([
 			{

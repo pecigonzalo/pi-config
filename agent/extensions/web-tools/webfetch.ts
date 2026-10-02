@@ -196,6 +196,7 @@ export async function executeWebfetch(
 	options?: {
 		signal?: AbortSignal;
 		fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+		onProgress?: (message: string) => void;
 	},
 ): Promise<{
 	content: { type: "text"; text: string }[];
@@ -209,6 +210,7 @@ export async function executeWebfetch(
 
 	const timedSignal = createTimedSignal(options?.signal, timeoutSeconds);
 	try {
+		options?.onProgress?.(`Fetching ${parsedUrl.toString()}...`);
 		let response: Response;
 		try {
 			response = await fetchImpl(parsedUrl.toString(), {
@@ -226,6 +228,7 @@ export async function executeWebfetch(
 			throw new Error(`webfetch failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 
+		options?.onProgress?.(`HTTP ${response.status} received; normalizing...`);
 		const contentType = parseContentType(response.headers.get("content-type"));
 		const contentKind = detectContentKind(contentType.mime);
 		const appliedFormat = chooseOutputFormat(requestedFormat, contentKind);
@@ -320,7 +323,7 @@ export async function executeWebfetch(
 }
 
 export function registerWebfetchTool(pi: ExtensionAPI) {
-	const tool = defineTool<typeof WebfetchParams, WebfetchDetails>({
+	const tool = defineTool<typeof WebfetchParams, WebfetchDetails | undefined>({
 		name: "webfetch",
 		label: "Web Fetch",
 		description:
@@ -335,8 +338,11 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 		outputSchema: WebfetchOutput,
 		namespace: WEB_TOOLS_NAMESPACE,
 		annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
-		async execute(_toolCallId, params, signal) {
-			return executeWebfetch(params, { signal });
+		async execute(_toolCallId, params, signal, onUpdate) {
+			return executeWebfetch(params, {
+				signal,
+				onProgress: (message) => onUpdate?.({ content: [{ type: "text", text: message }], details: undefined }),
+			});
 		},
 		renderCall(args, theme) {
 			const displayUrl = clipText(args?.url ?? "(missing url)", 100);
@@ -351,7 +357,7 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 			const details = result.details;
 
 			if (isPartial) {
-				return new Text(theme.fg("warning", "Fetching URL content..."), 0, 0);
+				return new Text(theme.fg("warning", textOutput || "Fetching URL content..."), 0, 0);
 			}
 
 			if (!expanded) {

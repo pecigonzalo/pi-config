@@ -110,6 +110,7 @@ export type McpCallTool = (toolName: string, args: Record<string, unknown>) => P
 
 export interface WebsearchOptions {
 	callTool: McpCallTool;
+	onProgress?: (message: string) => void;
 }
 
 interface ParsedMcpSearchBlock {
@@ -323,6 +324,7 @@ export async function executeWebsearch(
 
 	let outcome: McpToolOutcome;
 	try {
+		options.onProgress?.("Searching the web...");
 		outcome = await options.callTool(EXA_SEARCH_TOOL, {
 			query,
 			objective,
@@ -366,6 +368,7 @@ export async function executeWebsearch(
 	}
 
 	const rendered = renderResults(query, domains, results);
+	options.onProgress?.(`Found ${results.length} result${results.length === 1 ? "" : "s"}.`);
 	const outputTruncation = truncateToolText(rendered);
 	if (outputTruncation.truncated) {
 		warnings.push("Search results were truncated for model context safety.");
@@ -417,7 +420,7 @@ export async function executeWebsearch(
 }
 
 export function registerWebsearchTool(pi: ExtensionAPI) {
-	const tool = defineTool<typeof WebsearchParams, WebsearchDetails>({
+	const tool = defineTool<typeof WebsearchParams, WebsearchDetails | undefined>({
 		name: "websearch",
 		label: "Web Search",
 		description:
@@ -433,7 +436,7 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 		outputSchema: WebsearchOutput,
 		namespace: WEB_TOOLS_NAMESPACE,
 		annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			// Best-effort wait for a still-connecting server; if the tool is absent or excluded from
 			// the active tool set, `executeTool` reports it and `executeWebsearch` maps the error.
 			await waitForMcpTool(
@@ -442,6 +445,7 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 				signal,
 			);
 			return executeWebsearch(params, {
+				onProgress: (message) => onUpdate?.({ content: [{ type: "text", text: message }], details: undefined }),
 				callTool: async (toolName, args) => {
 					const outcome = await ctx.executeTool(toolName, args, { signal });
 					return {
@@ -468,7 +472,7 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 			const details = result.details;
 
 			if (isPartial) {
-				return new Text(theme.fg("warning", "Searching the web..."), 0, 0);
+				return new Text(theme.fg("warning", textOutput || "Searching the web..."), 0, 0);
 			}
 
 			if (!expanded) {
