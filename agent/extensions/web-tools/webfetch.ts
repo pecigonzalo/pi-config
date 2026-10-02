@@ -1,7 +1,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { defineTool, keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import { type Static, Type } from "typebox";
 import TurndownService from "turndown";
 import {
 	clampTimeout,
@@ -42,12 +42,6 @@ export const WebfetchParams = Type.Object(
 );
 
 export type WebfetchFormat = "markdown" | "text" | "html";
-
-export interface WebfetchParamsInput {
-	url: string;
-	format?: WebfetchFormat;
-	timeout?: number;
-}
 
 export interface WebfetchDetails {
 	url: string;
@@ -160,7 +154,7 @@ function normalizeForFormat(content: string, kind: ContentKind, format: Webfetch
 }
 
 export async function executeWebfetch(
-	params: WebfetchParamsInput,
+	params: Static<typeof WebfetchParams>,
 	options?: {
 		signal?: AbortSignal;
 		fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -281,7 +275,7 @@ export async function executeWebfetch(
 }
 
 export function registerWebfetchTool(pi: ExtensionAPI) {
-	pi.registerTool({
+	const tool = defineTool<typeof WebfetchParams, WebfetchDetails>({
 		name: "webfetch",
 		label: "Web Fetch",
 		description:
@@ -298,11 +292,7 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 			return executeWebfetch(params, { signal });
 		},
 		renderCall(args, theme) {
-			const rawUrl =
-				typeof (args as { url?: unknown })?.url === "string"
-					? ((args as { url: string }).url ?? "")
-					: "(missing url)";
-			const displayUrl = clipText(rawUrl, 100);
+			const displayUrl = clipText(args?.url ?? "(missing url)", 100);
 			return new Text(`${theme.fg("toolTitle", theme.bold("webfetch"))} ${theme.fg("accent", displayUrl)}`, 0, 0);
 		},
 		renderResult(result, { expanded, isPartial }, theme) {
@@ -311,7 +301,7 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 				.map((item) => item.text ?? "")
 				.join("\n")
 				.trim();
-			const details = result.details as WebfetchDetails | undefined;
+			const details = result.details;
 
 			if (isPartial) {
 				return new Text(theme.fg("warning", "Fetching URL content..."), 0, 0);
@@ -336,4 +326,5 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 			return new Text(theme.fg("toolOutput", textOutput || "(no output)"), 0, 0);
 		},
 	});
+	pi.registerTool(tool);
 }

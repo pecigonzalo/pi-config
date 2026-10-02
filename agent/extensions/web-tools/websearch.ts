@@ -1,6 +1,6 @@
-import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { defineTool, keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import { type Static, Type } from "typebox";
 import {
 	clipText,
 	formatTruncationNotice,
@@ -44,13 +44,6 @@ export const WebsearchParams = Type.Object(
 	},
 	{ additionalProperties: false },
 );
-
-export interface WebsearchParamsInput {
-	query: string;
-	limit?: number;
-	domains?: string[];
-	objective?: string;
-}
 
 export interface WebsearchResultItem {
 	title: string;
@@ -287,7 +280,7 @@ function renderResults(query: string, domains: string[], results: WebsearchResul
 }
 
 export async function executeWebsearch(
-	params: WebsearchParamsInput,
+	params: Static<typeof WebsearchParams>,
 	options: WebsearchOptions,
 ): Promise<{ content: { type: "text"; text: string }[]; details: WebsearchDetails }> {
 	const query = normalizeQuery(params.query);
@@ -379,7 +372,7 @@ export async function executeWebsearch(
 }
 
 export function registerWebsearchTool(pi: ExtensionAPI) {
-	pi.registerTool({
+	const tool = defineTool<typeof WebsearchParams, WebsearchDetails>({
 		name: "websearch",
 		label: "Web Search",
 		description:
@@ -413,12 +406,8 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 			});
 		},
 		renderCall(args, theme) {
-			const rawQuery =
-				typeof (args as { query?: unknown })?.query === "string"
-					? ((args as { query: string }).query ?? "")
-					: "(missing query)";
 			return new Text(
-				`${theme.fg("toolTitle", theme.bold("websearch"))} ${theme.fg("accent", `"${clipText(rawQuery, 90)}"`)}`,
+				`${theme.fg("toolTitle", theme.bold("websearch"))} ${theme.fg("accent", `"${clipText(args?.query ?? "(missing query)", 90)}"`)}`,
 				0,
 				0,
 			);
@@ -429,7 +418,7 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 				.map((item) => item.text ?? "")
 				.join("\n")
 				.trim();
-			const details = result.details as WebsearchDetails | undefined;
+			const details = result.details;
 
 			if (isPartial) {
 				return new Text(theme.fg("warning", "Searching the web..."), 0, 0);
@@ -454,4 +443,5 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 			return new Text(theme.fg("toolOutput", textOutput || "(no output)"), 0, 0);
 		},
 	});
+	pi.registerTool(tool);
 }
