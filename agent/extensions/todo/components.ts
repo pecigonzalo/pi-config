@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { type Keybinding, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { TodoDetailField, TodoEffort, TodoItem, TodoPriority, TodoStatus } from "./types";
 
 export interface TodoBrowserRow {
@@ -21,17 +21,20 @@ export type TodoDetailAction =
 	| { type: "toggle"; id: number; selectedField: TodoDetailField }
 	| { type: "archive"; id: number; selectedField: TodoDetailField };
 
+// Validated against the exported keybinding union so a Pi rename is caught at compile time.
+const SELECT_KEYBINDINGS = [
+	"tui.select.up",
+	"tui.select.down",
+	"tui.select.pageUp",
+	"tui.select.pageDown",
+	"tui.select.confirm",
+	"tui.select.cancel",
+] as const satisfies readonly Keybinding[];
+
+export type TodoBrowserKeybinding = (typeof SELECT_KEYBINDINGS)[number];
+
 export interface TodoBrowserKeybindings {
-	matches(
-		data: string,
-		keybinding:
-			| "tui.select.up"
-			| "tui.select.down"
-			| "tui.select.pageUp"
-			| "tui.select.pageDown"
-			| "tui.select.confirm"
-			| "tui.select.cancel",
-	): boolean;
+	matches(data: string, keybinding: TodoBrowserKeybinding): boolean;
 }
 
 export interface TodoBrowserOptions {

@@ -5,7 +5,7 @@
  * branch-aware reconstruction from session history.
  */
 
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import type { Static } from "typebox";
 import {
@@ -412,7 +412,7 @@ export default function (pi: ExtensionAPI) {
 	const toQueryParams = (args: unknown) =>
 		prepareTodoToolArguments(args) as unknown as Static<typeof TodoQueryParams>;
 
-	pi.registerTool({
+	const todoTool = defineTool({
 		name: "todo",
 		label: "Todo",
 		description:
@@ -425,7 +425,7 @@ export default function (pi: ExtensionAPI) {
 		outputSchema: TodoDetailsSchema,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-			const result = runTodoAction(params as TodoExecuteParams);
+			const result = runTodoAction(params);
 			refreshTodoWidget();
 			return result;
 		},
@@ -438,8 +438,9 @@ export default function (pi: ExtensionAPI) {
 			return renderTodoResult(result, expanded, theme);
 		},
 	});
+	pi.registerTool(todoTool);
 
-	pi.registerTool({
+	const todoQueryTool = defineTool({
 		name: "todo_query",
 		label: "Todo Query",
 		description: "Read a persistent todo graph. Actions: list, read, history.",
@@ -451,7 +452,7 @@ export default function (pi: ExtensionAPI) {
 		outputSchema: TodoDetailsSchema,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-			return runTodoAction(params as TodoExecuteParams);
+			return runTodoAction(params);
 		},
 
 		renderCall(args, theme, _context) {
@@ -462,6 +463,7 @@ export default function (pi: ExtensionAPI) {
 			return renderTodoResult(result, expanded, theme);
 		},
 	});
+	pi.registerTool(todoQueryTool);
 
 	pi.registerEntryRenderer<TodoDetails>("todo-state", (entry, { expanded }, theme) => {
 		const details = isRecord(entry.data) ? (entry.data as unknown as TodoDetails) : undefined;
