@@ -1,4 +1,4 @@
-import { StringEnum } from "@earendil-works/pi-ai";
+import { StringEnum, type JsonValue } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
 export type TodoStatus = "todo" | "in-progress" | "done";
@@ -69,6 +69,7 @@ export interface TodoDetails {
 export type TodoResult = {
 	content: [{ type: "text"; text: string }];
 	details: TodoDetails;
+	structuredContent?: JsonValue;
 	isError?: boolean;
 };
 
@@ -146,6 +147,60 @@ export const TodoQueryParams = Type.Object(
 		description: "Read the persistent todo graph without modifying it.",
 	},
 );
+
+const TodoHistoryEntrySchema = Type.Object({
+	timestamp: Type.String(),
+	type: StringEnum([
+		"created",
+		"updated",
+		"status_changed",
+		"archived",
+		"unarchived",
+		"linked",
+		"unlinked",
+		"read",
+		"cleared",
+	] as const),
+	todoId: Type.Number(),
+	meta: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+});
+
+const TodoItemSchema = Type.Object({
+	id: Type.Number(),
+	title: Type.String(),
+	description: Type.Optional(Type.String()),
+	status: StringEnum(["todo", "in-progress", "done"] as const),
+	tags: Type.Array(Type.String()),
+	priority: StringEnum(["low", "med", "high"] as const),
+	effort: StringEnum(["S", "M", "L"] as const),
+	parentId: Type.Optional(Type.Number()),
+	blockerIds: Type.Array(Type.Number()),
+	archived: Type.Boolean(),
+	history: Type.Array(TodoHistoryEntrySchema),
+	createdAt: Type.String(),
+	updatedAt: Type.String(),
+});
+
+/** Structured shape returned to programmatic callers such as codemode scripts. */
+export const TodoDetailsSchema = Type.Object({
+	action: StringEnum([
+		"list",
+		"add",
+		"update",
+		"toggle",
+		"read",
+		"archive",
+		"link",
+		"unlink",
+		"history",
+		"clear",
+		"set_wip_limit",
+	] as const),
+	todos: Type.Array(TodoItemSchema),
+	nextId: Type.Number(),
+	wipLimit: Type.Number(),
+	error: Type.Optional(Type.String()),
+});
 
 export type TodoView = "default" | "tree" | "ready";
 

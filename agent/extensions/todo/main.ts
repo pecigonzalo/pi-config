@@ -24,18 +24,14 @@ import {
 	type TodoExecuteParams,
 } from "./engine";
 import { buildTodoBrowserRows, buildTodoCommandTitle, buildTodoPanelRows, statusLabel } from "./presenters";
-import {
-	applyPersistedDetails as applyPersistedTodoDetails,
-	createTodoState,
-	reconstructTodoSession,
-	type TodoState,
-} from "./state";
+import { createTodoState, reconstructTodoSession, type TodoState } from "./state";
 import {
 	type TodoDetailField,
 	type TodoDetails,
 	type TodoEffort,
 	type TodoItem,
 	type TodoPriority,
+	TodoDetailsSchema,
 	TodoMutationParams,
 	TodoQueryParams,
 	type TodoResult,
@@ -151,10 +147,6 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const findTodo = (id: number): TodoItem | undefined => findTodoInState(getState(), id);
-
-	const applyPersistedDetails = (details: unknown) => {
-		setState(applyPersistedTodoDetails(getState(), details));
-	};
 
 	const reconstructState = (ctx: ExtensionContext) => {
 		const reconstructed = reconstructTodoSession(ctx.sessionManager.getBranch());
@@ -409,11 +401,6 @@ export default function (pi: ExtensionAPI) {
 		reconstructState(ctx);
 		installTodoWidget(ctx);
 	});
-	pi.on("tool_result", async (event, _ctx) => {
-		if (!isRecord(event) || event.toolName !== "todo") return;
-		applyPersistedDetails(event.details);
-		refreshTodoWidget();
-	});
 	pi.on("session_shutdown", async (_event, ctx) => {
 		requestTodoWidgetRender = undefined;
 		if (ctx.mode !== "tui") return;
@@ -435,9 +422,12 @@ export default function (pi: ExtensionAPI) {
 		parameters: TodoMutationParams,
 		prepareArguments: toMutationParams,
 		executionMode: "sequential",
+		outputSchema: TodoDetailsSchema,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-			return runTodoAction(params as TodoExecuteParams);
+			const result = runTodoAction(params as TodoExecuteParams);
+			refreshTodoWidget();
+			return result;
 		},
 
 		renderCall(args, theme, _context) {
@@ -458,6 +448,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: TodoQueryParams,
 		prepareArguments: toQueryParams,
 		annotations: { readOnlyHint: true, openWorldHint: false },
+		outputSchema: TodoDetailsSchema,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			return runTodoAction(params as TodoExecuteParams);

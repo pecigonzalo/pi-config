@@ -449,6 +449,26 @@ describe("todo regressions to fix", () => {
 		expect(result.details.error).toBeDefined();
 	});
 
+	it("does not record history when reading a todo", () => {
+		const harness = createHarness();
+		harness.execute({ action: "add", title: "Inspect me" });
+		const before = harness.todo(1)?.history.length;
+
+		const result = harness.execute({ action: "read", id: 1 });
+		expect(result.details.error).toBeUndefined();
+		expect(harness.todo(1)?.history.length).toBe(before);
+	});
+
+	it("returns structured content for success and failure", () => {
+		const harness = createHarness();
+		const success = harness.execute({ action: "add", title: "Structured" });
+		expect((success.structuredContent as { todos?: unknown[] } | undefined)?.todos).toHaveLength(1);
+
+		const failure = harness.execute({ action: "update", id: 99, title: "Nope" });
+		expect(failure.isError).toBe(true);
+		expect((failure.structuredContent as { error?: string } | undefined)?.error).toBeDefined();
+	});
+
 	it("filters non-neutral fields from unrelated actions in model-generated calls", () => {
 		const harness = createHarness();
 		harness.execute({ action: "add", title: "Start me" });

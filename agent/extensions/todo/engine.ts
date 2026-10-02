@@ -3,6 +3,7 @@
  */
 
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
+import type { JsonValue } from "@earendil-works/pi-ai";
 import { cloneTodos, createSnapshot, pruneTodoHistory, type TodoState } from "./state";
 import { filteredTodoPool, listText, statusLabel, unfinishedBlockers } from "./presenters";
 export { filteredTodoPool, listText, statusLabel, unfinishedBlockers } from "./presenters";
@@ -188,16 +189,20 @@ function todoLabel(todo: TodoItem): string {
 }
 
 function ok(state: TodoState, action: TodoAction, text: string): TodoResult {
+	const details = createSnapshot(state, action);
 	return {
 		content: [{ type: "text", text }],
-		details: createSnapshot(state, action),
+		details,
+		structuredContent: details as unknown as JsonValue,
 	};
 }
 
 function fail(state: TodoState, action: TodoAction, text: string, error: string): TodoResult {
+	const details = createSnapshot(state, action, error);
 	return {
 		content: [{ type: "text", text }],
-		details: createSnapshot(state, action, error),
+		details,
+		structuredContent: details as unknown as JsonValue,
 		isError: true,
 	};
 }
@@ -615,7 +620,6 @@ export function executeTodoAction(
 				};
 			}
 
-			addHistory(todo, "read");
 			return { state: nextState, result: ok(nextState, "read", truncateTodoOutput(readTodoText(todo))) };
 		}
 

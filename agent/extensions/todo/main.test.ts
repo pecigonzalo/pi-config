@@ -32,7 +32,12 @@ test("query guidelines point at the read-only tool", () => {
 });
 
 test("registers a sequential mutation tool and a read-only query tool", () => {
-	const tools: Array<{ name: string; executionMode?: string; annotations?: { readOnlyHint?: boolean } }> = [];
+	const tools: Array<{
+		name: string;
+		executionMode?: string;
+		annotations?: { readOnlyHint?: boolean };
+		outputSchema?: unknown;
+	}> = [];
 	const entryRenderers: string[] = [];
 	const pi = {
 		on: () => () => {},
@@ -44,6 +49,8 @@ test("registers a sequential mutation tool and a read-only query tool", () => {
 	todoExtension(pi);
 
 	expect(tools.find((tool) => tool.name === "todo")?.executionMode).toBe("sequential");
+	expect(tools.find((tool) => tool.name === "todo")?.outputSchema).toBeDefined();
 	expect(tools.find((tool) => tool.name === "todo_query")?.annotations?.readOnlyHint).toBe(true);
+	expect(tools.find((tool) => tool.name === "todo_query")?.outputSchema).toBeDefined();
 	expect(entryRenderers).toEqual(["todo-state", "todo-widget-state"]);
 });
