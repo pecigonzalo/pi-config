@@ -24,7 +24,8 @@
     },
     "linear": {
       "url": "https://mcp.linear.app/mcp",
-      "description": "Search and update Linear issues"
+      "description": "Search and update Linear issues",
+      "enabled": false
     },
     "wealthfolio": {
       "type": "http",
@@ -32,7 +33,8 @@
       "headers": {
         "Authorization": "Bearer ${WEALTHFOLIO_API_KEY}"
       },
-      "description": "Wealthfolio portfolio data"
+      "description": "Wealthfolio portfolio data",
+      "enabled": false
     }
   }
 }
