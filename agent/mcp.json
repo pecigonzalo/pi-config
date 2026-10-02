@@ -3,7 +3,8 @@
     "playwright": {
       "command": "bunx",
       "args": [
-        "@playwright/mcp@0.0.78",
+        "--bun",
+        "@playwright/mcp@latest",
         "--browser",
         "firefox",
         "--headless",
@@ -22,6 +23,13 @@
     },
     "linear": {
       "baseUrl": "https://mcp.linear.app/mcp"
+    },
+    "wealthfolio": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer ${WEALTHFOLIO_API_KEY}"
+      }
     }
   },
   "imports": []
