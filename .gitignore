@@ -140,3 +140,6 @@ dist
 .yarn/install-state.gz
 .pnp.*
 
+
+# Runtime scratch dirs (permissions tests, codemode tasks)
+.tmp/
