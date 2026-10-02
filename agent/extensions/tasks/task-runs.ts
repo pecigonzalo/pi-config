@@ -156,7 +156,7 @@ export function resolveTaskOriginForBranch(
 		const entry = entries[index];
 		if (!entry) continue;
 		if (!originEntryId && typeof entry.id === "string") originEntryId = entry.id;
-		if (entry.type !== "message" || !isRecord(entry.message)) continue;
+		if (entry.type !== "message") continue;
 		if (entry.message.role !== "user") continue;
 		originUserEntryId = typeof entry.id === "string" ? entry.id : undefined;
 		const preview = extractMessagePreviewText(entry.message);

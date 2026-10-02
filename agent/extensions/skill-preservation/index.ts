@@ -343,7 +343,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_end", async (event, _ctx) => {
-		if (!isRecord(event.message) || event.message.role !== "user") return undefined;
+		if (event.message.role !== "user") return undefined;
 
 		for (const text of extractTextParts(event.message.content)) {
 			for (const block of extractSkillBlocksFromText(text, knownSkills)) {

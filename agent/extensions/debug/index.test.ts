@@ -51,6 +51,7 @@ describe("debug prompt tool formatting", () => {
 				description: "Read file contents",
 				parameters: { type: "object", properties: { path: { type: "string" } } },
 				promptGuidelines: ["Use read when inspecting a known file path."],
+				exposure: "direct",
 				sourceInfo: {
 					path: "<builtin:read>",
 					source: "builtin",
