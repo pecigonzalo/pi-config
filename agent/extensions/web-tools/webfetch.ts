@@ -18,6 +18,7 @@ import {
 	validateHttpUrl,
 	normalizeWhitespace,
 	clipText,
+	persistFullOutput,
 	DEFAULT_TIMEOUT_SECONDS,
 	MAX_TIMEOUT_SECONDS,
 	WEB_TOOLS_NAMESPACE,
@@ -59,6 +60,7 @@ export interface WebfetchDetails {
 	responseTruncated: boolean;
 	outputTruncation: ReturnType<typeof truncateToolText>;
 	title?: string;
+	fullOutputPath?: string;
 	warnings: string[];
 }
 
@@ -78,6 +80,9 @@ export const WebfetchOutput = Type.Object(
 		title: Type.Optional(Type.String({ description: "Document title when the response is HTML" })),
 		responseBytes: Type.Number({ description: "Bytes read from the response body" }),
 		responseTruncated: Type.Boolean({ description: "Whether the raw body hit the size cap" }),
+		fullOutputPath: Type.Optional(
+			Type.String({ description: "Temp file with the complete output when truncated" }),
+		),
 		warnings: Type.Array(Type.String(), { description: "Non-fatal issues encountered while fetching" }),
 	},
 	{ additionalProperties: false },
@@ -95,6 +100,7 @@ function toWebfetchOutput(details: WebfetchDetails): Static<typeof WebfetchOutpu
 		...(details.title ? { title: details.title } : {}),
 		responseBytes: details.responseBytes,
 		responseTruncated: details.responseTruncated,
+		...(details.fullOutputPath ? { fullOutputPath: details.fullOutputPath } : {}),
 		warnings: details.warnings,
 	};
 }
@@ -270,6 +276,7 @@ export async function executeWebfetch(
 		const normalized = normalizeForFormat(decodedBody, contentKind, appliedFormat);
 		const outputSource = normalized || "(empty response body)";
 		const outputTruncation = truncateToolText(outputSource);
+		const fullOutputPath = outputTruncation.truncated ? await persistFullOutput(normalized, "webfetch") : undefined;
 
 		if (bodyRead.truncated) {
 			warnings.push(
@@ -293,6 +300,7 @@ export async function executeWebfetch(
 		outputParts.push(outputTruncation.content);
 		const truncationNotice = formatTruncationNotice(outputTruncation);
 		if (truncationNotice) outputParts.push(truncationNotice);
+		if (fullOutputPath) outputParts.push(`[Full output saved to: ${fullOutputPath}]`);
 
 		const details: WebfetchDetails = {
 			url: parsedUrl.toString(),
@@ -309,6 +317,7 @@ export async function executeWebfetch(
 			responseTruncated: bodyRead.truncated,
 			outputTruncation,
 			title,
+			fullOutputPath,
 			warnings,
 		};
 

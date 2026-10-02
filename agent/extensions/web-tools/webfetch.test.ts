@@ -87,6 +87,12 @@ describe("executeWebfetch", () => {
 		expect(result.details.warnings.some((warning) => warning.includes("truncated before normalization"))).toBe(
 			true,
 		);
+
+		const fullOutputPath = result.details.fullOutputPath;
+		expect(fullOutputPath).toBeDefined();
+		if (fullOutputPath) {
+			expect(await Bun.file(fullOutputPath).text()).toHaveLength(2 * 1024 * 1024);
+		}
 	});
 
 	test("rejects invalid urls", async () => {

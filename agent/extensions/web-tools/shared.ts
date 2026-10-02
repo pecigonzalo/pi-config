@@ -1,9 +1,13 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	formatSize,
 	type TruncationResult,
 	truncateHead,
+	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 
 export const DEFAULT_TIMEOUT_SECONDS = 15;
@@ -215,6 +219,24 @@ export function truncateToolText(
 		maxLines: options?.maxLines ?? OUTPUT_MAX_LINES,
 		maxBytes: options?.maxBytes ?? OUTPUT_MAX_BYTES,
 	});
+}
+
+/**
+ * Write the complete pre-truncation text to a temp file so the model can read what was omitted,
+ * matching how the built-in bash and grep tools report truncated output. Returns undefined when the
+ * file cannot be written, so truncation reporting never fails the tool.
+ */
+export async function persistFullOutput(content: string, prefix: string): Promise<string | undefined> {
+	try {
+		const directory = await mkdtemp(join(tmpdir(), `pi-${prefix}-`));
+		const file = join(directory, "output.txt");
+		await withFileMutationQueue(file, async () => {
+			await writeFile(file, content, "utf8");
+		});
+		return file;
+	} catch {
+		return undefined;
+	}
 }
 
 export function formatTruncationNotice(truncation: TruncationResult): string {

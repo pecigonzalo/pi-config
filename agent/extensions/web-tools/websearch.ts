@@ -6,6 +6,7 @@ import {
 	formatTruncationNotice,
 	normalizeDomainFilters,
 	normalizeWhitespace,
+	persistFullOutput,
 	truncateToolText,
 	validateHttpUrl,
 	WEB_TOOLS_NAMESPACE,
@@ -66,6 +67,7 @@ export interface WebsearchDetails {
 	resultCount: number;
 	results: WebsearchResultItem[];
 	outputTruncation: ReturnType<typeof truncateToolText>;
+	fullOutputPath?: string;
 	warnings: string[];
 }
 
@@ -75,6 +77,9 @@ export const WebsearchOutput = Type.Object(
 		objective: Type.String({ description: "Objective sent to the provider" }),
 		domains: Type.Array(Type.String(), { description: "Client-side domain filters that were applied" }),
 		resultCount: Type.Number({ description: "Number of results returned" }),
+		fullOutputPath: Type.Optional(
+			Type.String({ description: "Temp file with the complete output when truncated" }),
+		),
 		warnings: Type.Array(Type.String(), { description: "Non-fatal issues encountered while searching" }),
 		results: Type.Array(
 			Type.Object(
@@ -370,6 +375,7 @@ export async function executeWebsearch(
 	const rendered = renderResults(query, domains, results);
 	options.onProgress?.(`Found ${results.length} result${results.length === 1 ? "" : "s"}.`);
 	const outputTruncation = truncateToolText(rendered);
+	const fullOutputPath = outputTruncation.truncated ? await persistFullOutput(rendered, "websearch") : undefined;
 	if (outputTruncation.truncated) {
 		warnings.push("Search results were truncated for model context safety.");
 	}
@@ -381,6 +387,7 @@ export async function executeWebsearch(
 	outputParts.push(outputTruncation.content);
 	const truncationNotice = formatTruncationNotice(outputTruncation);
 	if (truncationNotice) outputParts.push(truncationNotice);
+	if (fullOutputPath) outputParts.push(`[Full output saved to: ${fullOutputPath}]`);
 
 	const details: WebsearchDetails = {
 		provider: "exa",
@@ -394,6 +401,7 @@ export async function executeWebsearch(
 		resultCount: results.length,
 		results,
 		outputTruncation,
+		fullOutputPath,
 		warnings,
 	};
 
@@ -402,6 +410,7 @@ export async function executeWebsearch(
 		objective,
 		domains,
 		resultCount: results.length,
+		fullOutputPath,
 		warnings,
 		results: results.map((result) => ({
 			title: result.title,
