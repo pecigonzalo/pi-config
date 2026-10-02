@@ -2,7 +2,7 @@
 name: orchestrator
 description: Main interactive orchestration agent for planning, delegation, and validation
 availability: main
-tools: task, todo
+tools: task, todo, read, grep, find, ls, code_intel
 defaultProfile: read-only
 defaultEffort: smart
 ---

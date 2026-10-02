@@ -2,26 +2,25 @@
   "efforts": {
     "smart": {
       "description": "A smarter thinking model for complex tasks and reasoning",
-      "provider": "openai-codex",
-      "model": "gpt-5.6-terra",
-      "thinkingLevel": "max"
-    },
-    "light": {
-      "description": "Lower-cost lightweight reasoning model",
-      "provider": "openai-codex",
-      "model": "gpt-5.6-luna",
-      "thinkingLevel": "medium"
-    },
-    "balanced": {
-      "description": "Cost-effective default model for most tasks",
-      "provider": "openai-codex",
+      "provider": "opencode-go",
       "model": "gpt-5.6-luna",
       "thinkingLevel": "xhigh"
     },
+    "light": {
+      "description": "Lower-cost lightweight reasoning model",
+      "provider": "opencode-go",
+      "model": "deepseek-v4-flash"
+    },
+    "balanced": {
+      "description": "Cost-effective default model for most tasks",
+      "provider": "opencode-go",
+      "model": "deepseek-v4-flash",
+      "thinkingLevel": "high"
+    },
     "heavy": {
       "description": "Heavier model for deep planning and hard tasks",
-      "provider": "openai-codex",
-      "model": "gpt-5.6-sol",
+      "provider": "opencode-go",
+      "model": "gpt-5.6-luna",
       "thinkingLevel": "high"
     }
   }
