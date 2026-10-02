@@ -1,26 +1,23 @@
-import { StringEnum } from "@earendil-works/pi-ai";
 import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { callMcpTool, MCP_MAX_RESPONSE_BYTES } from "./mcp";
 import {
-	clampTimeout,
 	clipText,
 	formatTruncationNotice,
 	normalizeDomainFilters,
 	normalizeWhitespace,
 	truncateToolText,
 	validateHttpUrl,
-	DEFAULT_TIMEOUT_SECONDS,
 } from "./shared";
 
 const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 10;
 const MAX_DOMAINS = 10;
-const DEFAULT_EXA_MCP_URL = "https://mcp.exa.ai/mcp";
-const EXA_MCP_TIMEOUT_SECONDS = clampTimeout(
-	process.env.WEBSEARCH_TIMEOUT_SECONDS ? Number(process.env.WEBSEARCH_TIMEOUT_SECONDS) : DEFAULT_TIMEOUT_SECONDS,
-);
+const MAX_OBJECTIVE_CHARS = 4096;
+const EXA_SERVER_NAME = "exa";
+const EXA_SEARCH_TOOL = `mcp__${EXA_SERVER_NAME}__web_search_exa`;
+const MCP_READY_TIMEOUT_MS = 3000;
+const MCP_READY_POLL_MS = 100;
 
 export const WebsearchParams = Type.Object(
 	{
@@ -32,29 +29,27 @@ export const WebsearchParams = Type.Object(
 		),
 		domains: Type.Optional(
 			Type.Array(
-				Type.String({ description: "Restrict search to a domain or subdomain, e.g. docs.example.com" }),
+				Type.String({ description: "Restrict results to a domain or subdomain, e.g. docs.example.com" }),
 				{
-					description: `Optional allowlist of domains to search within, up to ${MAX_DOMAINS}`,
+					description: `Optional allowlist of domains to filter results to, up to ${MAX_DOMAINS}`,
 				},
 			),
 		),
-		mode: Type.Optional(
-			StringEnum(["auto", "exact", "semantic"] as const, {
+		objective: Type.Optional(
+			Type.String({
 				description:
-					'Search mode: "auto" (default), "exact" for identifiers/error text/package names, or "semantic" for conceptual/topic retrieval',
+					"Which documents should rank first and which facts to extract. Defaults to the query when omitted.",
 			}),
 		),
 	},
 	{ additionalProperties: false },
 );
 
-export type WebsearchMode = "auto" | "exact" | "semantic";
-
 export interface WebsearchParamsInput {
 	query: string;
 	limit?: number;
 	domains?: string[];
-	mode?: WebsearchMode;
+	objective?: string;
 }
 
 export interface WebsearchResultItem {
@@ -62,15 +57,15 @@ export interface WebsearchResultItem {
 	url: string;
 	snippet: string;
 	domain: string;
-	score?: number;
 	publishedDate?: string;
 }
 
 export interface WebsearchDetails {
 	provider: "exa";
 	transport: "mcp";
+	tool: string;
 	query: string;
-	mode: WebsearchMode;
+	objective: string;
 	requestedLimit?: number;
 	appliedLimit: number;
 	domains: string[];
@@ -78,16 +73,25 @@ export interface WebsearchDetails {
 	results: WebsearchResultItem[];
 	outputTruncation: ReturnType<typeof truncateToolText>;
 	warnings: string[];
-	response: {
-		status?: number;
-		requestId?: string;
-		endpoint: string;
-		rateLimit?: {
-			retryAfterSeconds?: number;
-			remaining?: number;
-			resetAt?: string;
-		};
-	};
+}
+
+/** Text block shape returned by the built-in MCP integration. */
+export interface McpTextContent {
+	type: string;
+	text?: string;
+}
+
+/** Normalized subset of the built-in MCP tool outcome this tool depends on. */
+export interface McpToolOutcome {
+	isError: boolean;
+	content: McpTextContent[];
+	structuredContent?: unknown;
+}
+
+export type McpCallTool = (toolName: string, args: Record<string, unknown>) => Promise<McpToolOutcome>;
+
+export interface WebsearchOptions {
+	callTool: McpCallTool;
 }
 
 interface ParsedMcpSearchBlock {
@@ -102,76 +106,83 @@ function normalizeLimit(limit: number | undefined): number {
 	return Math.max(1, Math.min(MAX_LIMIT, Math.floor(limit)));
 }
 
-function normalizeMode(mode: WebsearchMode | undefined): WebsearchMode {
-	return mode ?? "auto";
-}
-
 function normalizeQuery(query: string): string {
 	const trimmed = query.trim();
 	if (!trimmed) throw new Error("websearch requires a non-empty query");
 	return trimmed;
 }
 
-function mapModeToExaType(mode: WebsearchMode): string {
-	switch (mode) {
-		case "exact":
-			return "fast";
-		case "semantic":
-			return "neural";
-		case "auto":
-		default:
-			return "auto";
+function normalizeObjective(objective: string | undefined, query: string): string {
+	const trimmed = objective?.trim();
+	return (trimmed && trimmed.length > 0 ? trimmed : query).slice(0, MAX_OBJECTIVE_CHARS);
+}
+
+function buildSearchError(message: string): Error {
+	if (/not found|unknown tool|no such tool|unknown server/i.test(message)) {
+		return new Error(
+			`websearch requires the "${EXA_SERVER_NAME}" MCP server (url https://mcp.exa.ai/mcp) in mcp.json`,
+		);
 	}
-}
-
-function parseHeaderNumber(value: string | null): number | undefined {
-	if (!value) return undefined;
-	const parsed = Number(value);
-	return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-interface ExaMcpRequestConfig {
-	endpoint: string;
-	headers?: Record<string, string>;
-}
-
-function isSensitiveQueryParam(paramName: string): boolean {
-	const normalized = paramName.toLowerCase();
-	return (
-		normalized === "exaapikey" ||
-		/(^|[_-])(api)?key$/i.test(normalized) ||
-		/(token|secret|auth|password)/i.test(normalized)
-	);
-}
-
-function sanitizeEndpointForDetails(endpoint: string): string {
-	let parsed: URL;
-	try {
-		parsed = new URL(endpoint);
-	} catch {
-		return endpoint;
+	if (/401|403|unauthorized|forbidden|auth/i.test(message)) {
+		return new Error(
+			`websearch authentication failed; check the "${EXA_SERVER_NAME}" server configuration in mcp.json`,
+		);
 	}
-
-	for (const key of new Set(parsed.searchParams.keys())) {
-		if (!isSensitiveQueryParam(key)) continue;
-		parsed.searchParams.set(key, "REDACTED");
+	if (/429|rate limit/i.test(message)) {
+		return new Error("websearch rate limited by provider");
 	}
-
-	return parsed.toString();
+	if (!message.trim()) {
+		return new Error("websearch failed: MCP response contained no output");
+	}
+	return new Error(`websearch failed: ${message}`);
 }
 
-function buildExaMcpRequest(): ExaMcpRequestConfig {
-	const endpoint = new URL(process.env.EXA_MCP_URL || DEFAULT_EXA_MCP_URL).toString();
-	const apiKey = process.env.EXA_API_KEY?.trim();
-	if (!apiKey) return { endpoint };
+function extractOutcomeText(outcome: McpToolOutcome): string {
+	return outcome.content
+		.filter((item) => item.type === "text" && typeof item.text === "string")
+		.map((item) => (item.text ?? "").trim())
+		.filter(Boolean)
+		.join("\n\n");
+}
 
-	return {
-		endpoint,
-		headers: {
-			authorization: `Bearer ${apiKey}`,
-			"x-api-key": apiKey,
-		},
-	};
+function domainMatches(host: string, filter: string): boolean {
+	return host === filter || host.endsWith(`.${filter}`);
+}
+
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+	return new Promise((resolve) => {
+		if (signal?.aborted) {
+			resolve();
+			return;
+		}
+		const onAbort = () => {
+			clearTimeout(timer);
+			resolve();
+		};
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+/**
+ * Built-in MCP connects servers in the background and only waits for `codemode`, `tool_search`, and
+ * resource tools, so a custom tool calling `ctx.executeTool()` can race the first connection. Poll
+ * the registered tool list until the server's tool appears, or the timeout/abort ends the wait.
+ */
+async function waitForMcpTool(
+	isRegistered: () => boolean,
+	timeoutMs: number,
+	signal: AbortSignal | undefined,
+): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (!isRegistered()) {
+		if (Date.now() >= deadline || signal?.aborted) return isRegistered();
+		await sleep(MCP_READY_POLL_MS, signal);
+	}
+	return true;
 }
 
 function parseSearchBlock(block: string): ParsedMcpSearchBlock | undefined {
@@ -251,8 +262,8 @@ function normalizeResult(block: ParsedMcpSearchBlock): WebsearchResultItem | und
 	};
 }
 
-function renderResults(query: string, mode: WebsearchMode, domains: string[], results: WebsearchResultItem[]): string {
-	const lines: string[] = [`Search results for \"${query}\"`, `Mode: ${mode}`];
+function renderResults(query: string, domains: string[], results: WebsearchResultItem[]): string {
+	const lines: string[] = [`Search results for "${query}"`];
 	if (domains.length > 0) lines.push(`Domains: ${domains.join(", ")}`);
 	lines.push(`Results: ${results.length}`);
 	lines.push("");
@@ -275,77 +286,40 @@ function renderResults(query: string, mode: WebsearchMode, domains: string[], re
 	return lines.join("\n").trim();
 }
 
-async function callExaMcpSearch(
-	request: { query: string; limit: number; domains: string[]; mode: WebsearchMode },
-	options?: {
-		signal?: AbortSignal;
-		fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
-	},
-): Promise<{ response: Response; requestId?: string; text: string; endpoint: string; bodyTruncated: boolean }> {
-	const mcpRequest = buildExaMcpRequest();
-
-	try {
-		const { response, text, bodyTruncated } = await callMcpTool({
-			url: mcpRequest.endpoint,
-			toolName: "web_search_exa",
-			args: {
-				query: request.query,
-				type: mapModeToExaType(request.mode),
-				numResults: request.limit,
-				livecrawl: "fallback",
-				includeDomains: request.domains.length > 0 ? request.domains : undefined,
-			},
-			timeoutSeconds: EXA_MCP_TIMEOUT_SECONDS,
-			signal: options?.signal,
-			fetchImpl: options?.fetchImpl,
-			headers: mcpRequest.headers,
-		});
-
-		const requestId = text.match(/"requestId":"([^"]+)"/)?.[1];
-		return { response, requestId, text, endpoint: sanitizeEndpointForDetails(mcpRequest.endpoint), bodyTruncated };
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		if (/HTTP 401|HTTP 403|auth/i.test(message)) {
-			throw new Error(
-				"websearch authentication failed; check EXA_API_KEY or remove it to use unauthenticated MCP access",
-			);
-		}
-		if (/HTTP 429|rate limit/i.test(message)) {
-			throw new Error("websearch rate limited by provider");
-		}
-		throw new Error(`websearch failed: ${message}`);
-	}
-}
-
 export async function executeWebsearch(
 	params: WebsearchParamsInput,
-	options?: {
-		signal?: AbortSignal;
-		fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
-	},
+	options: WebsearchOptions,
 ): Promise<{ content: { type: "text"; text: string }[]; details: WebsearchDetails }> {
 	const query = normalizeQuery(params.query);
 	const appliedLimit = normalizeLimit(params.limit);
-	const mode = normalizeMode(params.mode);
 	const domains = normalizeDomainFilters(params.domains).slice(0, MAX_DOMAINS);
+	const objective = normalizeObjective(params.objective, query);
 	const warnings: string[] = [];
 
-	const { response, requestId, text, endpoint, bodyTruncated } = await callExaMcpSearch(
-		{ query, limit: appliedLimit, domains, mode },
-		options,
-	);
-	if (bodyTruncated) {
-		warnings.push(
-			`MCP response exceeded ${Math.round(MCP_MAX_RESPONSE_BYTES / 1024)}KB and was truncated before parsing.`,
-		);
+	// The hosted Exa tool has no domain filter, so request extra results and filter client-side.
+	const requestedResults = domains.length > 0 ? MAX_LIMIT : appliedLimit;
+
+	let outcome: McpToolOutcome;
+	try {
+		outcome = await options.callTool(EXA_SEARCH_TOOL, {
+			query,
+			objective,
+			numResults: requestedResults,
+		});
+	} catch (error) {
+		throw buildSearchError(error instanceof Error ? error.message : String(error));
 	}
+
+	const text = extractOutcomeText(outcome);
+	if (outcome.isError) throw buildSearchError(text);
+	if (!text) throw buildSearchError("");
+
 	const parsedBlocks = parseMcpSearchText(text);
 	const normalizedResults = parsedBlocks
 		.map((block) => normalizeResult(block))
-		.filter((item): item is WebsearchResultItem => Boolean(item))
-		.slice(0, appliedLimit);
+		.filter((item): item is WebsearchResultItem => Boolean(item));
 
-	if (parsedBlocks.length === 0 && text.trim().length > 0) {
+	if (parsedBlocks.length === 0) {
 		warnings.push("MCP search response did not match the expected result block format.");
 	}
 	if (parsedBlocks.length > normalizedResults.length) {
@@ -354,7 +328,22 @@ export async function executeWebsearch(
 		);
 	}
 
-	const rendered = renderResults(query, mode, domains, normalizedResults);
+	const filtered =
+		domains.length > 0
+			? normalizedResults.filter((result) => domains.some((domain) => domainMatches(result.domain, domain)))
+			: normalizedResults;
+	if (domains.length > 0 && filtered.length < normalizedResults.length) {
+		warnings.push(
+			`${normalizedResults.length - filtered.length} result(s) outside the requested domains were filtered out.`,
+		);
+	}
+
+	const results = filtered.slice(0, appliedLimit);
+	if (results.length < filtered.length) {
+		warnings.push(`${filtered.length - results.length} result(s) over the limit of ${appliedLimit} were dropped.`);
+	}
+
+	const rendered = renderResults(query, domains, results);
 	const outputTruncation = truncateToolText(rendered);
 	if (outputTruncation.truncated) {
 		warnings.push("Search results were truncated for model context safety.");
@@ -371,25 +360,16 @@ export async function executeWebsearch(
 	const details: WebsearchDetails = {
 		provider: "exa",
 		transport: "mcp",
+		tool: EXA_SEARCH_TOOL,
 		query,
-		mode,
+		objective,
 		requestedLimit: params.limit,
 		appliedLimit,
 		domains,
-		resultCount: normalizedResults.length,
-		results: normalizedResults,
+		resultCount: results.length,
+		results,
 		outputTruncation,
 		warnings,
-		response: {
-			status: response.status,
-			requestId,
-			endpoint,
-			rateLimit: {
-				retryAfterSeconds: parseHeaderNumber(response.headers.get("retry-after")),
-				remaining: parseHeaderNumber(response.headers.get("x-ratelimit-remaining")),
-				resetAt: response.headers.get("x-ratelimit-reset") ?? undefined,
-			},
-		},
 	};
 
 	return {
@@ -409,23 +389,36 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 			"Use websearch when you need to discover relevant URLs rather than read a known page.",
 			"Use websearch before webfetch when you need candidate pages first, then use webfetch to inspect the most relevant result.",
 			"Use websearch with domains when the user wants results constrained to specific documentation or company sites.",
-			'Use websearch with mode="exact" for exact identifiers, package names, quoted text, or error messages; use websearch with mode="semantic" for broader topic discovery.',
+			"Use websearch with objective to say which documents should rank first or which facts to extract.",
 		],
 		parameters: WebsearchParams,
-		async execute(_toolCallId, params, signal) {
-			return executeWebsearch(params, { signal });
+		annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			// Best-effort wait for a still-connecting server; if the tool is absent or excluded from
+			// the active tool set, `executeTool` reports it and `executeWebsearch` maps the error.
+			await waitForMcpTool(
+				() => pi.getAllTools().some((tool) => tool.name === EXA_SEARCH_TOOL),
+				MCP_READY_TIMEOUT_MS,
+				signal,
+			);
+			return executeWebsearch(params, {
+				callTool: async (toolName, args) => {
+					const outcome = await ctx.executeTool(toolName, args, { signal });
+					return {
+						isError: outcome.isError,
+						content: outcome.result.content,
+						structuredContent: outcome.result.structuredContent,
+					};
+				},
+			});
 		},
 		renderCall(args, theme) {
 			const rawQuery =
 				typeof (args as { query?: unknown })?.query === "string"
 					? ((args as { query: string }).query ?? "")
 					: "(missing query)";
-			const mode =
-				typeof (args as { mode?: unknown })?.mode === "string"
-					? ` ${theme.fg("muted", `[${(args as { mode: string }).mode}]`)}`
-					: "";
 			return new Text(
-				`${theme.fg("toolTitle", theme.bold("websearch"))} ${theme.fg("accent", `\"${clipText(rawQuery, 90)}\"`)}${mode}`,
+				`${theme.fg("toolTitle", theme.bold("websearch"))} ${theme.fg("accent", `"${clipText(rawQuery, 90)}"`)}`,
 				0,
 				0,
 			);
@@ -444,7 +437,7 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 
 			if (!expanded) {
 				const count = details?.resultCount ?? 0;
-				const query = details?.query ? ` for \"${details.query}\"` : "";
+				const query = details?.query ? ` for "${details.query}"` : "";
 				const warnings = details?.warnings?.length
 					? theme.fg(
 							"warning",

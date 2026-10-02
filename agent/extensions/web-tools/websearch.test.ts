@@ -1,20 +1,21 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { executeWebsearch, WebsearchParams } from "./websearch";
+import { describe, expect, test } from "bun:test";
+import { executeWebsearch, type McpToolOutcome, WebsearchParams } from "./websearch";
 
-const originalExaApiKey = process.env.EXA_API_KEY;
-const originalExaMcpUrl = process.env.EXA_MCP_URL;
-
-function restoreEnv() {
-	if (originalExaApiKey === undefined) delete process.env.EXA_API_KEY;
-	else process.env.EXA_API_KEY = originalExaApiKey;
-
-	if (originalExaMcpUrl === undefined) delete process.env.EXA_MCP_URL;
-	else process.env.EXA_MCP_URL = originalExaMcpUrl;
+function block(title: string, url: string, highlight = "Snippet."): string {
+	return `Title: ${title}\nURL: ${url}\nPublished: 2026-01-01\nAuthor: Exa\nHighlights:\n${highlight}\n[...]`;
 }
 
-afterEach(() => {
-	restoreEnv();
-});
+function searchText(blocks: string[]): string {
+	return blocks.join("\n\n---\n\n");
+}
+
+function ok(text: string): McpToolOutcome {
+	return { isError: false, content: [{ type: "text", text }] };
+}
+
+const DOC_BLOCK = block("Pi Docs", "https://docs.example.com/pi", "Pi is a coding agent.");
+const OTHER_BLOCK = block("Example", "https://other.example.net/example", "Another result.");
+const SUB_BLOCK = block("Pi API", "https://api.docs.example.com/v1", "API reference.");
 
 describe("WebsearchParams", () => {
 	test("documents the supported limit range without unsupported schema keywords", () => {
@@ -30,106 +31,122 @@ describe("WebsearchParams", () => {
 		expect(domains.description).toContain("10");
 		expect(domains).not.toHaveProperty("maxItems");
 	});
+
+	test("exposes objective and no longer exposes mode", () => {
+		const properties = (WebsearchParams as unknown as { properties: Record<string, unknown> }).properties;
+		expect(properties).toHaveProperty("objective");
+		expect(properties).not.toHaveProperty("mode");
+	});
 });
 
 describe("executeWebsearch", () => {
-	test("normalizes MCP SSE results into compact output without requiring an API key", async () => {
-		delete process.env.EXA_API_KEY;
-		process.env.EXA_MCP_URL = "https://mcp.exa.ai/mcp";
-
+	test("calls the Exa MCP tool with query, objective and numResults", async () => {
+		const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
 		const result = await executeWebsearch(
-			{ query: "pi coding agent", limit: 2, domains: ["docs.example.com"], mode: "semantic" },
+			{ query: "pi coding agent", limit: 2 },
 			{
-				fetchImpl: async (url, init) => {
-					const body = JSON.parse(String(init?.body));
-					expect(String(url)).toBe("https://mcp.exa.ai/mcp");
-					expect(body.params.name).toBe("web_search_exa");
-					expect(body.params.arguments.includeDomains).toEqual(["docs.example.com"]);
-					expect(body.params.arguments.type).toBe("neural");
-					return new Response(
-						[
-							"event: message",
-							'data: {"result":{"content":[{"type":"text","text":"Title: Pi Docs\\nURL: https://docs.example.com/pi\\nPublished: 2026-01-01\\nAuthor: Exa\\nHighlights:\\nPi is a coding agent.\\n[...]\\nPi is extensible.\\n\\n---\\n\\nTitle: Example\\nURL: https://docs.example.com/example\\nPublished: N/A\\nAuthor: Exa\\nHighlights:\\nAnother result."}],"_meta":{"searchTime":1.2}},"jsonrpc":"2.0","id":1}',
-						].join("\n"),
-						{ status: 200, headers: { "content-type": "text/event-stream" } },
-					);
+				callTool: async (name, args) => {
+					calls.push({ name, args });
+					return ok(searchText([DOC_BLOCK, OTHER_BLOCK]));
 				},
 			},
 		);
 
+		expect(calls).toEqual([
+			{
+				name: "mcp__exa__web_search_exa",
+				args: { query: "pi coding agent", objective: "pi coding agent", numResults: 2 },
+			},
+		]);
 		expect(result.details.provider).toBe("exa");
 		expect(result.details.transport).toBe("mcp");
 		expect(result.details.resultCount).toBe(2);
+		expect(result.details.objective).toBe("pi coding agent");
 		expect(result.details.results[0]?.url).toBe("https://docs.example.com/pi");
-		expect(result.details.results[0]?.snippet).toContain("Pi is a coding agent.");
 		expect(result.content[0]?.text).toContain("Pi Docs");
-		expect(result.content[0]?.text).toContain("Pi is extensible.");
 	});
 
-	test("sends EXA_API_KEY via headers and redacts secrets from returned details", async () => {
-		process.env.EXA_API_KEY = "test-key";
-		process.env.EXA_MCP_URL = "https://mcp.exa.ai/mcp?exaApiKey=url-secret&foo=bar&access_token=token-secret";
-
-		const result = await executeWebsearch(
-			{ query: "pi coding agent" },
+	test("uses an explicit objective when provided", async () => {
+		let objective: unknown;
+		await executeWebsearch(
+			{ query: "pi", objective: "Official release notes only" },
 			{
-				fetchImpl: async (url, init) => {
-					const parsed = new URL(String(url));
-					const headers = new Headers(init?.headers);
+				callTool: async (_name, args) => {
+					objective = args.objective;
+					return ok(searchText([DOC_BLOCK]));
+				},
+			},
+		);
+		expect(objective).toBe("Official release notes only");
+	});
 
-					expect(headers.get("authorization")).toBe("Bearer test-key");
-					expect(headers.get("x-api-key")).toBe("test-key");
-					expect(parsed.searchParams.get("exaApiKey")).toBe("url-secret");
-					return new Response(
-						JSON.stringify({
-							result: {
-								content: [
-									{
-										type: "text",
-										text: "Title: Pi\nURL: https://pi.dev/\nPublished: N/A\nAuthor: Exa\nHighlights:\nMinimal coding agent.",
-									},
-								],
-							},
-							jsonrpc: "2.0",
-							id: 1,
-						}),
-						{ status: 200, headers: { "content-type": "application/json" } },
-					);
+	test("filters results by domain client-side and requests extra results", async () => {
+		let requested: unknown;
+		const result = await executeWebsearch(
+			{ query: "pi", limit: 2, domains: ["docs.example.com"] },
+			{
+				callTool: async (_name, args) => {
+					requested = args.numResults;
+					return ok(searchText([DOC_BLOCK, OTHER_BLOCK, SUB_BLOCK]));
 				},
 			},
 		);
 
-		const detailsEndpoint = new URL(result.details.response.endpoint);
-		expect(detailsEndpoint.searchParams.get("foo")).toBe("bar");
-		expect(detailsEndpoint.searchParams.get("exaApiKey")).toBe("REDACTED");
-		expect(detailsEndpoint.searchParams.get("access_token")).toBe("REDACTED");
-		expect(result.content[0]?.text).not.toContain("test-key");
-		expect(JSON.stringify(result)).not.toContain("test-key");
-		expect(JSON.stringify(result)).not.toContain("url-secret");
-		expect(JSON.stringify(result)).not.toContain("token-secret");
+		expect(requested).toBe(10);
+		expect(result.details.domains).toEqual(["docs.example.com"]);
+		expect(result.details.resultCount).toBe(2);
+		expect(result.details.results.map((item) => item.domain)).toEqual(["docs.example.com", "api.docs.example.com"]);
+		expect(result.details.warnings.some((warning) => warning.includes("outside the requested domains"))).toBe(true);
 	});
 
-	test("treats empty parsed results as success", async () => {
-		delete process.env.EXA_API_KEY;
-
-		const result = await executeWebsearch(
-			{ query: "nothing" },
-			{
-				fetchImpl: async () =>
-					new Response(
-						JSON.stringify({
-							result: {
-								content: [{ type: "text", text: "No useful results." }],
-							},
-							jsonrpc: "2.0",
-							id: 1,
-						}),
-						{ status: 200, headers: { "content-type": "application/json" } },
-					),
-			},
-		);
+	test("treats unparseable results as an empty success with a warning", async () => {
+		const result = await executeWebsearch({ query: "nothing" }, { callTool: async () => ok("No useful results.") });
 
 		expect(result.details.resultCount).toBe(0);
+		expect(result.details.warnings.some((warning) => warning.includes("expected result block format"))).toBe(true);
 		expect(result.content[0]?.text).toContain("No search results found.");
+	});
+
+	test("maps MCP error outcomes to a normalized error", async () => {
+		await expect(
+			executeWebsearch(
+				{ query: "pi" },
+				{
+					callTool: async () => ({
+						isError: true,
+						content: [{ type: "text", text: "HttpException: 429 Too Many Requests" }],
+					}),
+				},
+			),
+		).rejects.toThrow("rate limited");
+	});
+
+	test("explains how to configure the server when the MCP tool is missing", async () => {
+		await expect(
+			executeWebsearch(
+				{ query: "pi" },
+				{
+					callTool: async () => ({
+						isError: true,
+						content: [{ type: "text", text: "Tool mcp__exa__web_search_exa not found" }],
+					}),
+				},
+			),
+		).rejects.toThrow("mcp.json");
+	});
+
+	test("rejects invalid domain filters", async () => {
+		await expect(
+			executeWebsearch(
+				{ query: "pi", domains: ["not a domain"] },
+				{ callTool: async () => ok(searchText([DOC_BLOCK])) },
+			),
+		).rejects.toThrow("Invalid domain filter");
+	});
+
+	test("rejects empty queries", async () => {
+		await expect(
+			executeWebsearch({ query: "   " }, { callTool: async () => ok(searchText([DOC_BLOCK])) }),
+		).rejects.toThrow("non-empty query");
 	});
 });
