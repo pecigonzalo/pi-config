@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { buildClassifierPrompt, isHardEscalate, parseClassifierVerdict } from "./classifier";
-import type { Rule } from "./shared";
+import type { ClassifierResult } from "@earendil-works/pi-ai";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { buildClassifierPrompt, classifyPermissionRequest, isHardEscalate, parseClassifierVerdict } from "./classifier";
+import type { ResolvedClassifierSettings, Rule } from "./shared";
 
 describe("isHardEscalate", () => {
 	test("flags existing dangerous bash patterns (rm, sudo, chmod, kill, destructive curl)", () => {
@@ -20,6 +22,7 @@ describe("isHardEscalate", () => {
 
 	test("always escalates mcp tool calls", () => {
 		expect(isHardEscalate("mcp", {}, undefined)).toBeTruthy();
+		expect(isHardEscalate("mcp__github__create_issue", {}, undefined)).toBeTruthy();
 	});
 
 	test("does not flag benign bash commands or non-mcp tools", () => {
@@ -90,5 +93,98 @@ describe("parseClassifierVerdict", () => {
 		expect(parseClassifierVerdict("not json at all")).toBeUndefined();
 		expect(parseClassifierVerdict('{"confidence": 0.9}')).toBeUndefined();
 		expect(parseClassifierVerdict('{"decision": "maybe"}')).toBeUndefined();
+	});
+});
+
+describe("classifier model backend", () => {
+	const settings: ResolvedClassifierSettings = {
+		enabled: true,
+		provider: "typesafe",
+		model: "jev-latest",
+		confidenceThreshold: 0.9,
+		historyTurns: 0,
+		timeoutMs: 1_000,
+		maxTokens: 100,
+	};
+
+	const rule: Rule = { tool: "read", action: "ask", reason: "workspace-write" };
+
+	function classifierResult(overrides: Partial<ClassifierResult>): ClassifierResult {
+		return {
+			api: "system-one",
+			provider: "typesafe",
+			model: "jev-latest",
+			answers: {},
+			stopReason: "stop",
+			timestamp: 0,
+			...overrides,
+		} as unknown as ClassifierResult;
+	}
+
+	function choiceAnswer(choice: string, confidence: number) {
+		return { type: "choice" as const, choice, probabilities: { [choice]: confidence }, confidence };
+	}
+
+	function fakeContext(result?: ClassifierResult, found = true): ExtensionContext {
+		return {
+			signal: undefined,
+			sessionManager: {},
+			modelRegistry: {
+				findOfType: () => (found ? { id: "jev-latest" } : undefined),
+				find: () => undefined,
+				classify: async () => result,
+			},
+		} as unknown as ExtensionContext;
+	}
+
+	function classify(ctx: ExtensionContext) {
+		return classifyPermissionRequest({
+			toolName: "read",
+			input: { path: "src/index.ts" },
+			rule,
+			ctx,
+			settings,
+		});
+	}
+
+	test("allows when the classifier model is confident", async () => {
+		const verdict = await classify(
+			fakeContext(classifierResult({ answers: { decision: choiceAnswer("allow", 0.97) } })),
+		);
+		expect(verdict).toEqual({ decision: "allow", confidence: 0.97, rationale: "classifier allowed" });
+	});
+
+	test("escalates below the confidence threshold", async () => {
+		const verdict = await classify(
+			fakeContext(classifierResult({ answers: { decision: choiceAnswer("allow", 0.5) } })),
+		);
+		expect(verdict).toEqual({ decision: "escalate", rationale: "low confidence (0.50)" });
+	});
+
+	test("escalates on a non-allow choice", async () => {
+		const verdict = await classify(
+			fakeContext(classifierResult({ answers: { decision: choiceAnswer("escalate", 0.8) } })),
+		);
+		expect(verdict).toEqual({ decision: "escalate", rationale: "classifier escalated (escalate)" });
+	});
+
+	test("escalates when the classifier call fails", async () => {
+		const verdict = await classify(
+			fakeContext(classifierResult({ stopReason: "error", errorMessage: "typesafe returned 429" })),
+		);
+		expect(verdict).toEqual({ decision: "escalate", rationale: "typesafe returned 429" });
+	});
+
+	test("escalates when the model returns no usable decision", async () => {
+		const verdict = await classify(fakeContext(classifierResult({ answers: {} })));
+		expect(verdict).toEqual({ decision: "escalate", rationale: "classifier returned no decision" });
+	});
+
+	test("falls back to the chat model path when no classifier model exists", async () => {
+		const verdict = await classify(fakeContext(undefined, false));
+		expect(verdict).toEqual({
+			decision: "escalate",
+			rationale: "classifier model unavailable: typesafe/jev-latest",
+		});
 	});
 });
