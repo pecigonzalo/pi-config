@@ -1,6 +1,6 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import { defineTool, keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { defineTool, getMarkdownTheme, keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Markdown, Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import TurndownService from "turndown";
 import {
@@ -357,7 +357,7 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 			const displayUrl = clipText(args?.url ?? "(missing url)", 100);
 			return new Text(`${theme.fg("toolTitle", theme.bold("webfetch"))} ${theme.fg("accent", displayUrl)}`, 0, 0);
 		},
-		renderResult(result, { expanded, isPartial }, theme) {
+		renderResult(result, { expanded, isPartial }, theme, context) {
 			const textOutput = result.content
 				.filter((item) => item.type === "text")
 				.map((item) => item.text ?? "")
@@ -366,7 +366,9 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 			const details = result.details;
 
 			if (isPartial) {
-				return new Text(theme.fg("warning", textOutput || "Fetching URL content..."), 0, 0);
+				const component = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
+				component.setText(theme.fg("warning", textOutput || "Fetching URL content..."));
+				return component;
 			}
 
 			if (!expanded) {
@@ -378,14 +380,25 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 							` · ${details.warnings.length} warning${details.warnings.length === 1 ? "" : "s"}`,
 						)
 					: "";
-				return new Text(
-					`${theme.fg("success", "✓")} ${theme.fg("toolOutput", target)}${theme.fg("muted", format)}${warnings}${theme.fg("dim", ` (${keyHint("app.tools.expand", "to expand")})`)}`,
-					0,
-					0,
+				const component = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
+				component.setText(
+					`${theme.fg(context.isError ? "error" : "success", context.isError ? "✗" : "✓")} ${theme.fg("toolOutput", target)}${theme.fg("muted", format)}${warnings}${theme.fg("dim", ` (${keyHint("app.tools.expand", "to expand")})`)}`,
 				);
+				return component;
 			}
 
-			return new Text(theme.fg("toolOutput", textOutput || "(no output)"), 0, 0);
+			if (details?.appliedFormat === "markdown") {
+				const component =
+					context.lastComponent instanceof Markdown
+						? context.lastComponent
+						: new Markdown("", 0, 0, getMarkdownTheme());
+				component.setText(textOutput || "(no output)");
+				return component;
+			}
+
+			const component = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
+			component.setText(theme.fg("toolOutput", textOutput || "(no output)"));
+			return component;
 		},
 	});
 	pi.registerTool(tool);

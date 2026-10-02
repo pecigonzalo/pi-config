@@ -472,7 +472,7 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 				0,
 			);
 		},
-		renderResult(result, { expanded, isPartial }, theme) {
+		renderResult(result, { expanded, isPartial }, theme, context) {
 			const textOutput = result.content
 				.filter((item) => item.type === "text")
 				.map((item) => item.text ?? "")
@@ -481,7 +481,9 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 			const details = result.details;
 
 			if (isPartial) {
-				return new Text(theme.fg("warning", textOutput || "Searching the web..."), 0, 0);
+				const component = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
+				component.setText(theme.fg("warning", textOutput || "Searching the web..."));
+				return component;
 			}
 
 			if (!expanded) {
@@ -493,14 +495,16 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 							` · ${details.warnings.length} warning${details.warnings.length === 1 ? "" : "s"}`,
 						)
 					: "";
-				return new Text(
-					`${theme.fg("success", "✓")} ${theme.fg("toolOutput", `${count} result${count === 1 ? "" : "s"}${query}`)}${warnings}${theme.fg("dim", ` (${keyHint("app.tools.expand", "to expand")})`)}`,
-					0,
-					0,
+				const component = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
+				component.setText(
+					`${theme.fg(context.isError ? "error" : "success", context.isError ? "✗" : "✓")} ${theme.fg("toolOutput", `${count} result${count === 1 ? "" : "s"}${query}`)}${warnings}${theme.fg("dim", ` (${keyHint("app.tools.expand", "to expand")})`)}`,
 				);
+				return component;
 			}
 
-			return new Text(theme.fg("toolOutput", textOutput || "(no output)"), 0, 0);
+			const component = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
+			component.setText(theme.fg("toolOutput", textOutput || "(no output)"));
+			return component;
 		},
 	});
 	pi.registerTool(tool);
