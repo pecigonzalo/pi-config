@@ -9,6 +9,19 @@ import {
 	type LspManagerServiceRequest,
 } from "./service";
 
+async function findWorkspaceRoot(pi: ExtensionAPI, cwd: string): Promise<string> {
+	try {
+		const result = await pi.exec("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { timeout: 5000 });
+		if (result.code === 0) {
+			const root = result.stdout.trim();
+			if (root) return root;
+		}
+	} catch {
+		// Not a git work tree; confine to the session directory.
+	}
+	return cwd;
+}
+
 function publishService(pi: ExtensionAPI, service: LspManagerService): void {
 	pi.events.emit(LSP_MANAGER_READY_EVENT, service);
 }
@@ -69,7 +82,8 @@ export default function lspManagerExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (service) await service.shutdown();
-		service = new DefaultLspManagerService(ctx.cwd);
+		const workspaceRoot = await findWorkspaceRoot(pi, ctx.cwd);
+		service = new DefaultLspManagerService(ctx.cwd, { workspaceRoot });
 		publishService(pi, service);
 		if (ctx.hasUI) {
 			ctx.ui.setStatus("lsp-manager", ctx.ui.theme.fg("dim", "LSP: idle"));

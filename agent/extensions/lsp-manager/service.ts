@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	createMessageConnection,
@@ -185,8 +185,50 @@ function normalizePath(filePath: string): string {
 	try {
 		return realpathSync.native(absolute);
 	} catch {
-		return absolute;
+		// Realpath the deepest existing ancestor so nonexistent paths stay on the
+		// same canonical prefix (e.g. /var vs /private/var) as existing ones.
+		let current = absolute;
+		const remainder: string[] = [];
+		for (;;) {
+			try {
+				return join(realpathSync.native(current), ...remainder);
+			} catch {
+				const parent = dirname(current);
+				if (parent === current) return absolute;
+				remainder.unshift(basename(current));
+				current = parent;
+			}
+		}
 	}
+}
+
+function isWithinWorkspace(absolutePath: string, workspaceRoot: string): boolean {
+	const rel = relative(workspaceRoot, absolutePath);
+	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function isFileTooLarge(absolutePath: string, maxFileBytes: number): boolean {
+	if (maxFileBytes <= 0) return false;
+	try {
+		return statSync(absolutePath).size > maxFileBytes;
+	} catch {
+		return false;
+	}
+}
+
+function workspaceValidationError(
+	absolutePath: string,
+	workspaceRoot: string,
+	maxFileBytes: number,
+): string | undefined {
+	if (!isWithinWorkspace(absolutePath, workspaceRoot)) {
+		return `Path is outside the session workspace (${workspaceRoot}).`;
+	}
+	return isFileTooLarge(absolutePath, maxFileBytes) ? tooLargeError(maxFileBytes) : undefined;
+}
+
+function tooLargeError(maxFileBytes: number): string {
+	return `File is too large for LSP processing (limit ${maxFileBytes} bytes).`;
 }
 
 function uriToPath(uri: string): string {
@@ -551,16 +593,16 @@ export class DefaultLspManagerService implements LspManagerService {
 
 	constructor(
 		private readonly cwd: string,
-		options: { maxFileBytes?: number } = {},
+		options: { workspaceRoot?: string; maxFileBytes?: number } = {},
 	) {
-		this.workspaceRoot = normalizePath(cwd);
+		this.workspaceRoot = normalizePath(options.workspaceRoot ?? cwd);
 		this.maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
 	}
 
 	supportsFile(filePath: string): boolean {
 		if (this.shuttingDown) return false;
 		const absolutePath = this.resolvePath(filePath);
-		if (!this.isWithinWorkspace(absolutePath)) return false;
+		if (!isWithinWorkspace(absolutePath, this.workspaceRoot)) return false;
 		const server = serverForFile(absolutePath);
 		return !!server && commandExists(server.command);
 	}
@@ -568,7 +610,8 @@ export class DefaultLspManagerService implements LspManagerService {
 	async warmup(filePath: string, options: LspRequestOptions = {}): Promise<boolean> {
 		if (this.shuttingDown || isAborted(options.signal)) return false;
 		const absolutePath = this.resolvePath(filePath);
-		if (!this.isWithinWorkspace(absolutePath) || this.isFileTooLarge(absolutePath)) return false;
+		if (!isWithinWorkspace(absolutePath, this.workspaceRoot) || isFileTooLarge(absolutePath, this.maxFileBytes))
+			return false;
 		const client = await this.getClientForFile(absolutePath, options.signal).catch(() => undefined);
 		return !!client && !isAborted(options.signal);
 	}
@@ -578,7 +621,7 @@ export class DefaultLspManagerService implements LspManagerService {
 		if (this.shuttingDown || isAborted(options.signal)) {
 			return { file: absolutePath, status: "error", diagnostics: [], error: "LSP manager is shutting down." };
 		}
-		const workspaceIssue = this.workspaceValidationError(absolutePath);
+		const workspaceIssue = workspaceValidationError(absolutePath, this.workspaceRoot, this.maxFileBytes);
 		if (workspaceIssue) {
 			return { file: absolutePath, status: "error", diagnostics: [], error: workspaceIssue };
 		}
@@ -608,7 +651,12 @@ export class DefaultLspManagerService implements LspManagerService {
 		if (options.waitForDiagnostics === false) {
 			const opened = this.openOrUpdate(client, server, absolutePath);
 			if (opened === "too-large") {
-				return { file: absolutePath, status: "error", diagnostics: [], error: this.tooLargeError() };
+				return {
+					file: absolutePath,
+					status: "error",
+					diagnostics: [],
+					error: tooLargeError(this.maxFileBytes),
+				};
 			}
 			return { file: absolutePath, status: "ok", diagnostics: [] };
 		}
@@ -621,7 +669,7 @@ export class DefaultLspManagerService implements LspManagerService {
 			options.signal,
 		);
 		if (outcome === "too-large") {
-			return { file: absolutePath, status: "error", diagnostics: [], error: this.tooLargeError() };
+			return { file: absolutePath, status: "error", diagnostics: [], error: tooLargeError(this.maxFileBytes) };
 		}
 		const responded = outcome === "ok";
 		const diagnostics = (client.diagnostics.get(absolutePath) ?? []).map((diagnostic) =>
@@ -650,7 +698,7 @@ export class DefaultLspManagerService implements LspManagerService {
 		for (const filePath of [...new Set(filePaths)]) {
 			if (isAborted(options.signal)) break;
 			const absolutePath = this.resolvePath(filePath);
-			const workspaceIssue = this.workspaceValidationError(absolutePath);
+			const workspaceIssue = workspaceValidationError(absolutePath, this.workspaceRoot, this.maxFileBytes);
 			if (workspaceIssue) {
 				results.push({ file: absolutePath, status: "error", diagnostics: [], error: workspaceIssue });
 				continue;
@@ -688,7 +736,12 @@ export class DefaultLspManagerService implements LspManagerService {
 				options.severity,
 			);
 			if (outcome === "too-large") {
-				results.push({ file: absolutePath, status: "error", diagnostics: [], error: this.tooLargeError() });
+				results.push({
+					file: absolutePath,
+					status: "error",
+					diagnostics: [],
+					error: tooLargeError(this.maxFileBytes),
+				});
 				continue;
 			}
 			const responded = outcome === "ok";
@@ -841,31 +894,6 @@ export class DefaultLspManagerService implements LspManagerService {
 		return normalizePath(resolve(this.cwd, filePath));
 	}
 
-	private isWithinWorkspace(absolutePath: string): boolean {
-		const rel = relative(this.workspaceRoot, absolutePath);
-		return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-	}
-
-	private isFileTooLarge(absolutePath: string): boolean {
-		if (this.maxFileBytes <= 0) return false;
-		try {
-			return statSync(absolutePath).size > this.maxFileBytes;
-		} catch {
-			return false;
-		}
-	}
-
-	private workspaceValidationError(absolutePath: string): string | undefined {
-		if (!this.isWithinWorkspace(absolutePath)) {
-			return `Path is outside the session workspace (${this.workspaceRoot}).`;
-		}
-		return this.isFileTooLarge(absolutePath) ? this.tooLargeError() : undefined;
-	}
-
-	private tooLargeError(): string {
-		return `File is too large for LSP processing (limit ${this.maxFileBytes} bytes).`;
-	}
-
 	private sendNotification(client: LspClientState, method: unknown, params?: unknown): void {
 		if (this.shuttingDown || client.closed) return;
 		try {
@@ -884,7 +912,7 @@ export class DefaultLspManagerService implements LspManagerService {
 	private async getClientForFile(filePath: string, signal?: AbortSignal): Promise<LspClientState | undefined> {
 		if (this.shuttingDown || isAborted(signal)) return undefined;
 		const absolutePath = this.resolvePath(filePath);
-		if (!this.isWithinWorkspace(absolutePath)) return undefined;
+		if (!isWithinWorkspace(absolutePath, this.workspaceRoot)) return undefined;
 		const server = serverForFile(absolutePath);
 		if (!server) return undefined;
 		if (!commandExists(server.command)) return undefined;
@@ -1014,7 +1042,7 @@ export class DefaultLspManagerService implements LspManagerService {
 		absolutePath: string,
 	): "ok" | "too-large" | "ignored" {
 		if (this.shuttingDown || client.closed) return "ignored";
-		if (this.isFileTooLarge(absolutePath)) return "too-large";
+		if (isFileTooLarge(absolutePath, this.maxFileBytes)) return "too-large";
 		const content = readFileSync(absolutePath, "utf-8");
 		const uri = pathToFileURL(absolutePath).href;
 		const languageId = server.languageId(absolutePath);
@@ -1049,7 +1077,7 @@ export class DefaultLspManagerService implements LspManagerService {
 		if (this.shuttingDown || isAborted(signal)) return undefined;
 		const absolutePath = this.resolvePath(filePath);
 		if (!existsSync(absolutePath)) return undefined;
-		const workspaceIssue = this.workspaceValidationError(absolutePath);
+		const workspaceIssue = workspaceValidationError(absolutePath, this.workspaceRoot, this.maxFileBytes);
 		if (workspaceIssue) return undefined;
 		const server = serverForFile(absolutePath);
 		if (!server) return undefined;
@@ -1160,6 +1188,8 @@ export const __test__ = {
 	findNearestRoot,
 	collectUniqueClients,
 	isAborted,
+	isFileTooLarge,
+	isWithinWorkspace,
 	markClientClosed,
 	normalizePath,
 	processHasExited,
@@ -1168,6 +1198,8 @@ export const __test__ = {
 	serverForFile,
 	severityName,
 	terminateProcess,
+	tooLargeError,
 	waitForProcessExit,
 	withAbort,
+	workspaceValidationError,
 };

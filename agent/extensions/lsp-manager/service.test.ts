@@ -238,6 +238,45 @@ describe("lsp-manager process lifecycle", () => {
 	});
 });
 
+describe("lsp-manager workspace boundary options", () => {
+	it("confines to cwd by default", () => {
+		const workspace = makeTempProject();
+		const outside = join(tmpdir(), `pi-lsp-outside-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+		mkdirSync(outside, { recursive: true });
+		try {
+			expect(serviceTest.isWithinWorkspace(join(workspace, "src", "index.ts"), workspace)).toBe(true);
+			expect(serviceTest.isWithinWorkspace(join(outside, "main.go"), workspace)).toBe(false);
+		} finally {
+			rmSync(workspace, { recursive: true, force: true });
+			rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	it("extends containment to a provided workspace root", async () => {
+		const base = join(tmpdir(), `pi-lsp-root-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+		const workspace = join(base, "repo");
+		const cwd = join(workspace, "packages", "app");
+		mkdirSync(join(cwd, "src"), { recursive: true });
+		mkdirSync(join(workspace, "packages", "sibling"), { recursive: true });
+		try {
+			const service = new DefaultLspManagerService(cwd, { workspaceRoot: workspace });
+			// Inside the workspace root but outside cwd: not a containment error.
+			const sibling = await service.touchFile(join(workspace, "packages", "sibling", "x.ts"));
+			expect(sibling.error).not.toContain("outside the session workspace");
+			// Outside both cwd and the workspace root: rejected.
+			const outside = await service.touchFile(join(base, "elsewhere.ts"));
+			expect(outside.error).toContain("outside the session workspace");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
+	});
+
+	it("applies the configured byte limit to validation", () => {
+		expect(serviceTest.isFileTooLarge("/definitely/missing/file.ts", 1024)).toBe(false);
+		expect(serviceTest.workspaceValidationError("/tmp/missing/file.ts", "/tmp", 0)).toBeUndefined();
+	});
+});
+
 describe("lsp-manager workspace boundaries and size limits", () => {
 	it("reports files outside the workspace as unsupported", () => {
 		const workspace = makeTempProject();
