@@ -68,6 +68,30 @@ export interface WebsearchDetails {
 	warnings: string[];
 }
 
+export const WebsearchOutput = Type.Object(
+	{
+		query: Type.String({ description: "Query sent to the provider" }),
+		objective: Type.String({ description: "Objective sent to the provider" }),
+		domains: Type.Array(Type.String(), { description: "Client-side domain filters that were applied" }),
+		resultCount: Type.Number({ description: "Number of results returned" }),
+		warnings: Type.Array(Type.String(), { description: "Non-fatal issues encountered while searching" }),
+		results: Type.Array(
+			Type.Object(
+				{
+					title: Type.String(),
+					url: Type.String(),
+					snippet: Type.String(),
+					domain: Type.String(),
+					publishedDate: Type.Optional(Type.String()),
+				},
+				{ additionalProperties: false },
+			),
+			{ description: "Normalized search results" },
+		),
+	},
+	{ additionalProperties: false },
+);
+
 /** Text block shape returned by the built-in MCP integration. */
 export interface McpTextContent {
 	type: string;
@@ -282,7 +306,11 @@ function renderResults(query: string, domains: string[], results: WebsearchResul
 export async function executeWebsearch(
 	params: Static<typeof WebsearchParams>,
 	options: WebsearchOptions,
-): Promise<{ content: { type: "text"; text: string }[]; details: WebsearchDetails }> {
+): Promise<{
+	content: { type: "text"; text: string }[];
+	details: WebsearchDetails;
+	structuredContent: Static<typeof WebsearchOutput>;
+}> {
 	const query = normalizeQuery(params.query);
 	const appliedLimit = normalizeLimit(params.limit);
 	const domains = normalizeDomainFilters(params.domains).slice(0, MAX_DOMAINS);
@@ -365,9 +393,25 @@ export async function executeWebsearch(
 		warnings,
 	};
 
+	const structuredContent: Static<typeof WebsearchOutput> = {
+		query,
+		objective,
+		domains,
+		resultCount: results.length,
+		warnings,
+		results: results.map((result) => ({
+			title: result.title,
+			url: result.url,
+			snippet: result.snippet,
+			domain: result.domain,
+			...(result.publishedDate ? { publishedDate: result.publishedDate } : {}),
+		})),
+	};
+
 	return {
 		content: [{ type: "text", text: outputParts.filter(Boolean).join("\n\n") }],
 		details,
+		structuredContent,
 	};
 }
 
@@ -385,6 +429,7 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 			"Use websearch with objective to say which documents should rank first or which facts to extract.",
 		],
 		parameters: WebsearchParams,
+		outputSchema: WebsearchOutput,
 		annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			// Best-effort wait for a still-connecting server; if the tool is absent or excluded from

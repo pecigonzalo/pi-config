@@ -61,6 +61,43 @@ export interface WebfetchDetails {
 	warnings: string[];
 }
 
+export const WebfetchOutput = Type.Object(
+	{
+		url: Type.String({ description: "Requested URL" }),
+		finalUrl: Type.String({ description: "URL after redirects" }),
+		status: Type.Number({ description: "HTTP status code" }),
+		ok: Type.Boolean({ description: "Whether the response status is 2xx" }),
+		contentType: Type.String({ description: "Raw content-type header" }),
+		contentKind: StringEnum(["html", "text", "json", "xml", "unknown"] as const, {
+			description: "Content family inferred from the content type",
+		}),
+		appliedFormat: StringEnum(["markdown", "text", "html"] as const, {
+			description: "Format actually returned to the model",
+		}),
+		title: Type.Optional(Type.String({ description: "Document title when the response is HTML" })),
+		responseBytes: Type.Number({ description: "Bytes read from the response body" }),
+		responseTruncated: Type.Boolean({ description: "Whether the raw body hit the size cap" }),
+		warnings: Type.Array(Type.String(), { description: "Non-fatal issues encountered while fetching" }),
+	},
+	{ additionalProperties: false },
+);
+
+function toWebfetchOutput(details: WebfetchDetails): Static<typeof WebfetchOutput> {
+	return {
+		url: details.url,
+		finalUrl: details.finalUrl,
+		status: details.status,
+		ok: details.ok,
+		contentType: details.contentType,
+		contentKind: details.contentKind,
+		appliedFormat: details.appliedFormat,
+		...(details.title ? { title: details.title } : {}),
+		responseBytes: details.responseBytes,
+		responseTruncated: details.responseTruncated,
+		warnings: details.warnings,
+	};
+}
+
 const turndownService = new TurndownService({
 	headingStyle: "atx",
 	codeBlockStyle: "fenced",
@@ -159,7 +196,11 @@ export async function executeWebfetch(
 		signal?: AbortSignal;
 		fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 	},
-): Promise<{ content: { type: "text"; text: string }[]; details: WebfetchDetails }> {
+): Promise<{
+	content: { type: "text"; text: string }[];
+	details: WebfetchDetails;
+	structuredContent: Static<typeof WebfetchOutput>;
+}> {
 	const fetchImpl = options?.fetchImpl ?? fetch;
 	const parsedUrl = validateHttpUrl(params.url, "URL");
 	const timeoutSeconds = clampTimeout(params.timeout);
@@ -196,24 +237,26 @@ export async function executeWebfetch(
 				"Try another URL or use a tool meant for binary downloads.",
 			].join("\n");
 			const outputTruncation = truncateToolText(summary);
+			const details: WebfetchDetails = {
+				url: parsedUrl.toString(),
+				finalUrl: response.url || parsedUrl.toString(),
+				status: response.status,
+				statusText: response.statusText,
+				ok: response.ok,
+				contentType: contentType.raw || "",
+				contentKind,
+				requestedFormat,
+				appliedFormat,
+				timeoutSeconds,
+				responseBytes: 0,
+				responseTruncated: false,
+				outputTruncation,
+				warnings,
+			};
 			return {
 				content: [{ type: "text", text: outputTruncation.content }],
-				details: {
-					url: parsedUrl.toString(),
-					finalUrl: response.url || parsedUrl.toString(),
-					status: response.status,
-					statusText: response.statusText,
-					ok: response.ok,
-					contentType: contentType.raw || "",
-					contentKind,
-					requestedFormat,
-					appliedFormat,
-					timeoutSeconds,
-					responseBytes: 0,
-					responseTruncated: false,
-					outputTruncation,
-					warnings,
-				},
+				details,
+				structuredContent: toWebfetchOutput(details),
 			};
 		}
 
@@ -268,6 +311,7 @@ export async function executeWebfetch(
 		return {
 			content: [{ type: "text", text: outputParts.filter(Boolean).join("\n\n") }],
 			details,
+			structuredContent: toWebfetchOutput(details),
 		};
 	} finally {
 		timedSignal.cleanup();
@@ -287,6 +331,7 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 			"Use webfetch for one URL at a time; webfetch is read-only and does not perform search or recursive browsing.",
 		],
 		parameters: WebfetchParams,
+		outputSchema: WebfetchOutput,
 		annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 		async execute(_toolCallId, params, signal) {
 			return executeWebfetch(params, { signal });

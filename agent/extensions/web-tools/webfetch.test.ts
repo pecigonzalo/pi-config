@@ -29,6 +29,9 @@ describe("executeWebfetch", () => {
 
 		expect(result.details.appliedFormat).toBe("markdown");
 		expect(result.details.title).toBe("Example Docs");
+		expect(result.structuredContent.appliedFormat).toBe("markdown");
+		expect(result.structuredContent.finalUrl).toBe("https://example.com/docs");
+		expect(result.structuredContent.contentKind).toBe("html");
 		expect(result.content[0]?.text).toContain("# Hello");
 		expect(result.content[0]?.text).toContain("world");
 	});

@@ -63,6 +63,8 @@ describe("executeWebsearch", () => {
 		expect(result.details.resultCount).toBe(2);
 		expect(result.details.objective).toBe("pi coding agent");
 		expect(result.details.results[0]?.url).toBe("https://docs.example.com/pi");
+		expect(result.structuredContent.resultCount).toBe(2);
+		expect(result.structuredContent.results[0]?.url).toBe("https://docs.example.com/pi");
 		expect(result.content[0]?.text).toContain("Pi Docs");
 	});
 
