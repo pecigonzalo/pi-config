@@ -61,6 +61,26 @@ import type { ApprovalRecord, Rule, SandboxManagerLike, SandboxRuntimeConfigLike
 const execFile = promisify(execFileCallback);
 const TEST_SCRATCH_DIR = path.join(process.cwd(), ".tmp", "permissions-tests");
 
+/** Directory the mocked `getAgentDir()` resolves to for this test file. */
+const MOCKED_AGENT_DIR = "/tmp";
+const MOCKED_GLOBAL_CONFIG_PATH = path.join(MOCKED_AGENT_DIR, "permissions.jsonc");
+
+/**
+ * Writes the mocked global permissions config for the duration of `run`.
+ * `loadConfig` reads the global file from `getAgentDir()`, which this file mocks to /tmp, so this
+ * is how a test opts into project-local config or supplies global settings.
+ */
+async function withGlobalPermissionsConfig<T>(content: unknown, run: () => T | Promise<T>): Promise<T> {
+	const previous = await fs.readFile(MOCKED_GLOBAL_CONFIG_PATH, "utf8").catch(() => undefined);
+	await fs.writeFile(MOCKED_GLOBAL_CONFIG_PATH, JSON.stringify(content, null, 2), "utf8");
+	try {
+		return await run();
+	} finally {
+		if (previous === undefined) await fs.rm(MOCKED_GLOBAL_CONFIG_PATH, { force: true });
+		else await fs.writeFile(MOCKED_GLOBAL_CONFIG_PATH, previous, "utf8");
+	}
+}
+
 const GIT_REPOSITORY_ENV_KEYS = [
 	"GIT_DIR",
 	"GIT_WORK_TREE",
@@ -203,6 +223,34 @@ describe("permissions config merge", () => {
 			expect(rule?.action).toBe("block");
 			expect(rule?.reason).toBe("Git internals");
 		}
+	});
+
+	it("keeps protected resources and invariants when a layer opts out of inheritance", () => {
+		const policy = configModule.activePolicy(
+			{ profiles: { isolated: { inherit: false, mode: "plan", rules: [{ tool: "write", action: "allow" }] } } },
+			"default",
+			"isolated",
+		);
+		const gitObjectPath = path.join("/repo", ".git", "objects", "new-object");
+
+		for (const tool of ["write", "edit"] as const) {
+			expect(matchRule(policy.rules, tool, { path: gitObjectPath })?.action).toBe("block");
+		}
+		expect(matchRule(policy.rules, "read", { path: "/repo/.env" })?.action).toBe("block");
+		expect(matchRule(policy.rules, "write", { path: "/repo/.env" })?.action).toBe("block");
+	});
+
+	it("still lets protectedResources opt-outs unprotect those resources", () => {
+		const policy = configModule.activePolicy(
+			{
+				profiles: { isolated: { inherit: false, mode: "plan", rules: [{ tool: "write", action: "allow" }] } },
+				protectedResources: { unprotectWrite: ["\\.env(\\..+)?$"] },
+			},
+			"default",
+			"isolated",
+		);
+
+		expect(matchRule(policy.rules, "write", { path: "/repo/.env" })?.action).toBe("allow");
 	});
 
 	it("lets user-configured rules override builtin defaults", () => {
@@ -419,10 +467,77 @@ describe("permissions config merge", () => {
 		const warnings: string[] = [];
 
 		try {
-			configModule.loadConfig(tmp, { onWarning: (message) => warnings.push(message) });
+			await withGlobalPermissionsConfig({ projectConfig: "always" }, () => {
+				configModule.loadConfig(tmp, { onWarning: (message) => warnings.push(message) });
+			});
 			expect(
 				warnings.some((message) => message.includes(configPath) && message.includes("expected object root")),
 			).toBe(true);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("ignores project-local config by default so a repository cannot relax its own policy", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-config-project-"));
+		const configDir = path.join(tmp, ".pi");
+		await fs.mkdir(configDir, { recursive: true });
+		await fs.writeFile(
+			path.join(configDir, "permissions.jsonc"),
+			JSON.stringify({ default: { mode: "full-access" }, protectedResources: { enabled: false } }),
+			"utf8",
+		);
+		const warnings: string[] = [];
+
+		try {
+			const config = configModule.loadConfig(tmp, { onWarning: (message) => warnings.push(message) });
+			expect(config.default?.mode).toBeUndefined();
+			expect(config.protectedResources?.enabled).toBeUndefined();
+			expect(config.projectConfig).toBe("never");
+			expect(warnings.some((message) => message.includes("Ignoring project-local permissions config"))).toBe(
+				true,
+			);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("reads project-local config when the global config sets projectConfig to always", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-config-project-"));
+		const configDir = path.join(tmp, ".pi");
+		await fs.mkdir(configDir, { recursive: true });
+		await fs.writeFile(
+			path.join(configDir, "permissions.jsonc"),
+			JSON.stringify({ default: { mode: "full-access" } }),
+			"utf8",
+		);
+
+		try {
+			await withGlobalPermissionsConfig({ projectConfig: "always" }, () => {
+				const config = configModule.loadConfig(tmp, {});
+				expect(config.default?.mode).toBe("full-access");
+				expect(config.projectConfig).toBe("always");
+			});
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("requires project trust when projectConfig is trusted", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-config-project-"));
+		const configDir = path.join(tmp, ".pi");
+		await fs.mkdir(configDir, { recursive: true });
+		await fs.writeFile(
+			path.join(configDir, "permissions.jsonc"),
+			JSON.stringify({ default: { mode: "full-access" } }),
+			"utf8",
+		);
+
+		try {
+			await withGlobalPermissionsConfig({ projectConfig: "trusted" }, () => {
+				expect(configModule.loadConfig(tmp, {}).default?.mode).toBeUndefined();
+				expect(configModule.loadConfig(tmp, { projectTrusted: true }).default?.mode).toBe("full-access");
+			});
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
 		}
@@ -954,6 +1069,12 @@ describe("simple matcher shorthand", () => {
 		expect(ruleMatch(rule, "bash", "rg foo src")).toBe(true);
 		expect(ruleMatch(rule, "bash", "rg")).toBe(true);
 		expect(ruleMatch(rule, "bash", "grep foo src")).toBe(false);
+	});
+
+	it("matches an mcp rule against namespaced MCP tool names", () => {
+		const rule = { tool: "mcp", action: "ask" as const };
+		expect(matchRule([rule], "mcp__github__create_issue", {})).toBe(rule);
+		expect(matchRule([rule], "read", { path: "file.txt" })).toBeUndefined();
 	});
 
 	it("lets command-prefix shorthand match package version suffixes", () => {
@@ -1563,17 +1684,25 @@ describe("permissions extension sandbox lifecycle", () => {
 		approvalTitles?: string[];
 		writeApprovalFile?: () => void;
 		classifyPermissionRequest?: PermissionsExtensionDependencies["classifyPermissionRequest"];
+		branchEntries?: unknown[];
+		registeredTools?: unknown[];
+		hasUI?: boolean;
+		flags?: Record<string, boolean | string>;
+		config?: Record<string, unknown>;
 	}) {
 		await fs.mkdir(TEST_SCRATCH_DIR, { recursive: true });
 		const tmp = await fs.mkdtemp(path.join(TEST_SCRATCH_DIR, "perm-extension-probe-"));
 		const cwd = path.join(tmp, "repo");
 		const sandboxTmpDir = path.join(tmp, "sandbox-tmp");
+		const previousGlobalConfig = await fs.readFile(MOCKED_GLOBAL_CONFIG_PATH, "utf8").catch(() => undefined);
+		await fs.writeFile(MOCKED_GLOBAL_CONFIG_PATH, JSON.stringify({ projectConfig: "always" }), "utf8");
 		await fs.mkdir(path.join(cwd, ".pi"), { recursive: true });
 		await fs.writeFile(
 			path.join(cwd, ".pi", "permissions.jsonc"),
 			JSON.stringify({
 				default: { mode: options.mode, rules: options.rules },
 				sandbox: { enabled: true, tmpDir: sandboxTmpDir, ...(options.sandbox ?? {}) },
+				...(options.config ?? {}),
 			}),
 			"utf8",
 		);
@@ -1587,9 +1716,24 @@ describe("permissions extension sandbox lifecycle", () => {
 			string,
 			Array<(event: unknown, ctx: ExtensionContext) => Promise<unknown> | unknown>
 		>();
+		const registeredFlags: string[] = [];
+		const appendedEntries: Array<{ customType: string; data?: unknown }> = [];
+		const statusUpdates: Array<string | undefined> = [];
+		const emittedEvents: Array<{ channel: string; data: unknown }> = [];
 		const pi = {
-			registerFlag: () => {},
-			getFlag: () => false,
+			registerFlag: (name: string) => {
+				registeredFlags.push(name);
+			},
+			appendEntry: (customType: string, data?: unknown) => {
+				appendedEntries.push({ customType, data });
+			},
+			getAllTools: () => options.registeredTools ?? [],
+			events: {
+				emit: (channel: string, data: unknown) => {
+					emittedEvents.push({ channel, data });
+				},
+			},
+			getFlag: (name: string) => options.flags?.[name] ?? false,
 			registerTool: (tool: { name: string } & RegisteredTool) => {
 				tools.set(tool.name, tool);
 			},
@@ -1602,8 +1746,13 @@ describe("permissions extension sandbox lifecycle", () => {
 		} as unknown as ExtensionAPI;
 		const ctx = {
 			cwd,
-			hasUI: true,
+			hasUI: options.hasUI ?? true,
+			isProjectTrusted: () => true,
+			sessionManager: { getBranch: () => options.branchEntries ?? [] },
 			ui: {
+				setStatus: (_key: string, text: string | undefined) => {
+					statusUpdates.push(text);
+				},
 				notify: (message: string) => options.notifications?.push(message),
 				select: async (title: string, choices: string[]) => {
 					options.approvalTitles?.push(title);
@@ -1630,8 +1779,14 @@ describe("permissions extension sandbox lifecycle", () => {
 			tools,
 			commands,
 			handlers,
+			registeredFlags,
+			appendedEntries,
+			statusUpdates,
+			emittedEvents,
 			restore: async () => {
 				Date.now = originalDateNow;
+				if (previousGlobalConfig === undefined) await fs.rm(MOCKED_GLOBAL_CONFIG_PATH, { force: true });
+				else await fs.writeFile(MOCKED_GLOBAL_CONFIG_PATH, previousGlobalConfig, "utf8");
 				await fs.rm(tmp, { recursive: true, force: true });
 			},
 		};
@@ -2782,6 +2937,413 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 
 		expect(wrappedCommands).toContain("printf user-bash");
+	});
+
+	it("registers agent-name and no-sandbox but not a flag another extension owns", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			expect(harness.registeredFlags).toEqual(expect.arrayContaining(["agent-name", "no-sandbox"]));
+			// Pi rejects two extensions registering the same flag; the tasks extension owns this one.
+			expect(harness.registeredFlags).not.toContain("profile-name");
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("honors a profile-name flag registered by another extension", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			flags: { "profile-name": "read-only" },
+			config: { profiles: { "read-only": { inherit: true, mode: "plan" } } },
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const last = harness.statusUpdates[harness.statusUpdates.length - 1];
+			expect(last).toContain("plan");
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("restores a session mode override persisted on the branch", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			branchEntries: [{ type: "custom", customType: "permissions-state", data: { modeOverride: "plan" } }],
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const last = harness.statusUpdates[harness.statusUpdates.length - 1];
+			expect(last).toContain("plan");
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("ignores a malformed session state entry instead of throwing", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			branchEntries: [{ type: "custom", customType: "permissions-state", data: { modeOverride: "nonsense" } }],
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const last = harness.statusUpdates[harness.statusUpdates.length - 1];
+			expect(last).toContain("workspace-write");
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("persists session approvals so a reload can rebuild them", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			rules: [{ tool: "read", action: "ask" }],
+			now: () => 1_000,
+			approvalSelection: (choices) => choices.find((choice) => choice.startsWith("Allow file for this session")),
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const result = await toolCall({ toolName: "read", input: { path: "README.md" } }, harness.ctx);
+			expect(result).toBeUndefined();
+
+			const state = harness.appendedEntries.filter((entry) => entry.customType === "permissions-state").at(-1)
+				?.data as { pathApprovals?: unknown[] } | undefined;
+			expect(state?.pathApprovals).toHaveLength(1);
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("clears the footer status on session shutdown", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			expect(harness.statusUpdates.length).toBeGreaterThan(0);
+			for (const handler of harness.handlers.get("session_shutdown") ?? []) {
+				await handler({}, harness.ctx);
+			}
+			expect(harness.statusUpdates[harness.statusUpdates.length - 1]).toBeUndefined();
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("adds the sandbox hint as a prompt section instead of replacing the prompt", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const beforeAgentStart = harness.handlers.get("before_agent_start")?.[0];
+			if (!beforeAgentStart) throw new Error("before_agent_start handler was not registered");
+			const event = {
+				systemPrompt: "base prompt",
+				systemPromptOptions: { sections: {} as Record<string, string> },
+			};
+
+			const result = await beforeAgentStart(event, harness.ctx);
+
+			expect(result).toBeUndefined();
+			expect(event.systemPrompt).toBe("base prompt");
+			expect(event.systemPromptOptions.sections.sandbox).toContain("Sandbox hint for bash");
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("leaves the prompt untouched when no sandbox is active", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "full-access",
+			sandbox: { enabled: false },
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const beforeAgentStart = harness.handlers.get("before_agent_start")?.[0];
+			if (!beforeAgentStart) throw new Error("before_agent_start handler was not registered");
+			const event = {
+				systemPrompt: "base prompt",
+				systemPromptOptions: { sections: {} as Record<string, string> },
+			};
+
+			const result = await beforeAgentStart(event, harness.ctx);
+
+			expect(result).toBeUndefined();
+			expect(event.systemPromptOptions.sections.sandbox).toBeUndefined();
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("asks before an unclassified tool that declares no annotations", async () => {
+		const approvalTitles: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			approvalTitles,
+			approvalSelection: "Allow once",
+			registeredTools: [{ name: "some_extension_tool", parameters: { properties: {} } }],
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const result = await toolCall({ toolName: "some_extension_tool", input: {} }, harness.ctx);
+			expect(result).toBeUndefined();
+			expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("does not ask before an unclassified tool that declares readOnlyHint", async () => {
+		const approvalTitles: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			approvalTitles,
+			approvalSelection: "Block",
+			registeredTools: [
+				{ name: "mcp__docs__search", parameters: { properties: {} }, annotations: { readOnlyHint: true } },
+			],
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const result = await toolCall({ toolName: "mcp__docs__search", input: { query: "x" } }, harness.ctx);
+			expect(result).toBeUndefined();
+			expect(approvalTitles).toHaveLength(0);
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("asks before an unclassified tool that declares destructiveHint", async () => {
+		const approvalTitles: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			approvalTitles,
+			approvalSelection: "Allow once",
+			registeredTools: [
+				{ name: "purger", parameters: { properties: {} }, annotations: { destructiveHint: true } },
+			],
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const result = await toolCall({ toolName: "purger", input: {} }, harness.ctx);
+			expect(result).toBeUndefined();
+			expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("lets config disable the annotation default", async () => {
+		const approvalTitles: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			approvalTitles,
+			approvalSelection: "Block",
+			registeredTools: [{ name: "some_extension_tool", parameters: { properties: {} } }],
+			config: { annotations: { enabled: false } },
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const result = await toolCall({ toolName: "some_extension_tool", input: {} }, harness.ctx);
+			expect(result).toBeUndefined();
+			expect(approvalTitles).toHaveLength(0);
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("reports unclassified path tools in /permissions verbose", async () => {
+		const notifications: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			hasUI: false,
+			now: () => 0,
+			notifications,
+			registeredTools: [{ name: "custom_path_tool", parameters: { properties: { path: {} } } }],
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const command = harness.commands.get("permissions");
+			if (!command) throw new Error("/permissions command was not registered");
+			await command.handler("verbose", harness.ctx);
+			expect(notifications.some((message) => message.includes("unclassifiedPathTools=custom_path_tool"))).toBe(
+				true,
+			);
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("publishes policy changes on the shared event bus", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const events = harness.emittedEvents.filter((entry) => entry.channel === "permissions:policy-changed");
+			expect(events.length).toBeGreaterThan(0);
+			expect(events[events.length - 1]?.data).toMatchObject({
+				reason: "reload",
+				mode: "workspace-write",
+				projectConfig: "always",
+			});
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("asks before an unclassified MCP tool that declares no annotations", async () => {
+		const approvalTitles: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			approvalTitles,
+			approvalSelection: "Allow once",
+			registeredTools: [{ name: "mcp__github__create_issue", parameters: { properties: {} } }],
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			await toolCall({ toolName: "mcp__github__create_issue", input: { title: "x" } }, harness.ctx);
+			expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("lets an explicit mcp rule skip the annotation default", async () => {
+		const approvalTitles: string[] = [];
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			rules: [{ tool: "mcp", action: "allow" }],
+			now: () => 0,
+			approvalTitles,
+			approvalSelection: "Block",
+			registeredTools: [{ name: "mcp__github__create_issue", parameters: { properties: {} } }],
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const result = await toolCall(
+				{ toolName: "mcp__github__create_issue", input: { title: "x" } },
+				harness.ctx,
+			);
+			expect(result).toBeUndefined();
+			expect(approvalTitles).toHaveLength(0);
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("registers its policy skill through resources_discover", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const handler = harness.handlers.get("resources_discover")?.[0];
+			if (!handler) throw new Error("resources_discover handler was not registered");
+			const result = (await handler({}, harness.ctx)) as { skillPaths?: string[] } | undefined;
+			expect(result?.skillPaths?.[0]?.endsWith("SKILL.md")).toBe(true);
+		} finally {
+			await harness.restore();
+		}
 	});
 });
 

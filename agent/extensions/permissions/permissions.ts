@@ -5,17 +5,28 @@
  * Supports default rules, per-agent profile overrides, and an external-path
  * policy that restricts file operations to the current project directory.
  *
- * Config file locations (both are merged; project-local wins on conflict):
+ * Config files:
  *   ~/.pi/agent/permissions.jsonc    : global
- *   .pi/permissions.jsonc            : project-local
+ *   .pi/permissions.jsonc            : project-local, opt-in
  *
- * Agent name resolution (first match wins):
- *   1. PI_AGENT_NAME environment variable
- *   2. --agent-name CLI flag
- *   3. Runtime-selected main-session agent
- *   4. Falls back to "default" profile
+ * Project-local config applies only when the global config sets "projectConfig":
+ *   "never"   (default): the project file is ignored, so a repository cannot relax the
+ *                        policy that governs it by shipping a file
+ *   "trusted"          : the project file applies when Pi reports the project as trusted
+ *   "always"           : the project file always applies
+ * Pi treats a project with no other trust-requiring resources as trusted, so a repository
+ * whose only Pi resource is .pi/permissions.jsonc still counts as trusted under "trusted".
+ * Project values override global scalar fields; project rules are evaluated first.
  *
- * To wire up with the task extension, set PI_AGENT_NAME in the spawn env:
+ * Agent and profile name resolution (environment first, then CLI flag):
+ *   1. PI_AGENT_NAME / PI_PROFILE_NAME environment variables
+ *   2. --agent-name (registered here) and --profile-name (registered by the tasks extension)
+ *   3. "default" agent and no profile
+ * Only --agent-name is registered here: Pi rejects two extensions registering the same flag, so
+ * --profile-name is read from whichever extension owns it. Without that extension, set
+ * PI_PROFILE_NAME instead.
+ *
+ * To wire up with the task extension, set PI_AGENT_NAME and PI_PROFILE_NAME in the spawn env:
  *   proc = spawn(cmd, args, { env: { ...process.env, PI_AGENT_NAME: agent.name } })
  *
  * Config format:
@@ -82,11 +93,14 @@
  * are evaluated before them, safe defaults (e.g. the user skill catalog)
  * after them, so user rules can override the latter but not the former.
  *
- * Per-agent profiles:
- *   inherit     : true (default): agent rules are prepended to default rules
- *                  false: agent rules completely replace default rules
+ * Per-agent profiles and `agents` entries:
+ *   inherit     : true (default): layer rules are prepended to the configurable rules
+ *                  false: layer rules replace the configurable rules and mode defaults
  *   externalPath: overrides the default externalPath policy for this agent
  *                  (structured filesystem tools only)
+ *
+ * Protected-resource rules and built-in invariants are evaluated before every configurable
+ * rule and are not affected by `inherit`. Disable them through `protectedResources` instead.
  *
  * Auto mode ("mode": "auto"):
  *   NOT enabled by default — the default mode is "workspace-write". Switch
@@ -123,6 +137,26 @@
  *     }
  *   }
  *
+ *   The classifier uses a classifier model when the configured provider/model pair resolves to
+ *   one (for example opencode/jev-1.13-free or openrouter/typesafe/jev-1.13), and otherwise
+ *   falls back to a chat completion with a JSON contract. Classifier verdicts carry no free-text
+ *   rationale, so the audit log records a short synthesized one.
+ *
+ * Annotation default ("annotations" config section):
+ *   A tool that no rule classifies gets one last check against its declared tool annotations
+ *   (MCP readOnlyHint/destructiveHint/idempotentHint/openWorldHint; other extensions may set the
+ *   same fields). The tool is confirmed unless it declares readOnlyHint: true, or declares both
+ *   destructiveHint: false and openWorldHint: false. Filesystem tools and Pi's own bash,
+ *   powershell, codemode, and tool_search are excluded (codemode scripts reach the other tools
+ *   through the same gate). MCP tools are included, so a server that declares no annotations
+ *   prompts; an explicit `{ "tool": "mcp", "action": "allow" }` rule skips the check.
+ *     "annotations": { "enabled": true, "askWhenUnannotated": true }
+ *   Set "enabled": false to allow unclassified tools silently, or "askWhenUnannotated": false
+ *   to confirm only tools that actively declare risk.
+ *
+ * Other extensions can observe policy changes on the shared event bus:
+ *   pi.events.on("permissions:policy-changed", (data) => ...)
+ *
  *   Rule field `autoReview: false` forces a human prompt for that rule even
  *   in auto mode, regardless of classifier confidence.
  */
@@ -131,14 +165,24 @@ import type {
 	BashOperations,
 	ExtensionAPI,
 	ExtensionContext,
+	SessionEntry,
+	ToolAnnotations,
+	ToolInfo,
 	UserBashEventResult,
 } from "@earendil-works/pi-coding-agent";
-import { createBashTool, createLocalBashOperations, getAgentDir } from "@earendil-works/pi-coding-agent";
+import {
+	createBashTool,
+	createLocalBashOperations,
+	getAgentDir,
+	isToolCallEventType,
+} from "@earendil-works/pi-coding-agent";
 import { matchesKey, Key, Text } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	activePolicy,
+	getAnnotationPolicy,
 	getClassifierSettings,
 	loadConfig,
 	mergeDefaultConfig,
@@ -159,7 +203,6 @@ import {
 } from "./approvals";
 import {
 	asPermissionToolInput,
-	asPermissionToolName,
 	canonicalizePath,
 	canonicalizePathToken,
 	getCommandInput,
@@ -189,8 +232,10 @@ import {
 import { runSandboxedCommandAfterHealthCheck, SandboxHealthMonitor } from "./sandbox-lifecycle";
 import { formatPermissionPreview } from "./preview";
 import {
+	FILESYSTEM_TOOL_NAMES,
 	dedupeStrings,
 	isFilesystemToolName,
+	isMcpToolName,
 	type ApprovalRecord,
 	type PermissionMode,
 	type PermissionToolInput,
@@ -207,6 +252,19 @@ const PERMISSION_MODES = [
 	"auto",
 	"full-access",
 ] as const satisfies readonly PermissionMode[];
+
+/** Channel other extensions can subscribe to for policy changes. */
+export const PERMISSIONS_POLICY_CHANGED_EVENT = "permissions:policy-changed";
+
+/** Directory this extension was loaded from, used to register its skill. */
+const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Pi built-in tools that the rule set already covers, or that only reach the system through other
+ * gated tools. Everything else, including MCP tools, falls back to its declared annotations.
+ */
+const BUILTIN_NON_PATH_TOOL_NAMES = ["bash", "powershell", "codemode", "tool_search"] as const;
+const KNOWN_POLICY_TOOL_NAMES = new Set<string>([...FILESYSTEM_TOOL_NAMES, ...BUILTIN_NON_PATH_TOOL_NAMES]);
 
 type PermissionDecision = { action: "allow" } | { action: "block"; reason: string };
 
@@ -247,6 +305,15 @@ function detectProfileName(pi: ExtensionAPI): string | undefined {
 	const flagValue = pi.getFlag("profile-name");
 	if (typeof flagValue === "string" && flagValue.length > 0) return flagValue;
 	return undefined;
+}
+
+/** Project trust gates project-local config. Fail closed when the context cannot report it. */
+function isProjectTrusted(ctx: ExtensionContext): boolean {
+	try {
+		return ctx.isProjectTrusted() === true;
+	} catch {
+		return false;
+	}
 }
 
 function sanitizeMcpPathSegment(value: string): string {
@@ -407,6 +474,9 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 	pi.registerTool({
 		...bashToolTemplate,
 		label: "bash",
+		// Sandbox execution shares one global sandbox-runtime state, so keep bash calls serial
+		// instead of relying only on the adapter's lease to hide interleaving.
+		executionMode: "sequential",
 		async execute(id, params, signal, onUpdate, ctx) {
 			const localBash = createBashTool(ctx.cwd);
 			let active = activeSandboxState();
@@ -490,14 +560,131 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		}
 	};
 
+	/**
+	 * Session-scoped permission state. Persisted as a custom entry so `/reload`, resume, fork, and
+	 * `/tree` navigation reconstruct the policy the branch actually had instead of resetting it.
+	 */
+	interface PermissionsSessionState {
+		modeOverride?: PermissionMode;
+		sandboxDisabledForSession?: boolean;
+		sessionAllows?: string[];
+		pathApprovals?: ApprovalRecord[];
+		bashApprovals?: ApprovalRecord[];
+	}
+
+	const SESSION_STATE_ENTRY = "permissions-state";
+	const STATUS_KEY = "permissions";
+
+	function parseSessionApprovals(value: unknown): ApprovalRecord[] {
+		if (!Array.isArray(value)) return [];
+		return extractApprovalRecords({ approvals: value }, undefined, SESSION_STATE_ENTRY);
+	}
+
+	function readSessionState(value: unknown): PermissionsSessionState {
+		if (!value || typeof value !== "object") return {};
+		const record = value as PermissionsSessionState;
+		const mode = record.modeOverride;
+		return {
+			modeOverride: PERMISSION_MODES.includes(mode as PermissionMode) ? (mode as PermissionMode) : undefined,
+			sandboxDisabledForSession: record.sandboxDisabledForSession === true,
+			sessionAllows: Array.isArray(record.sessionAllows)
+				? record.sessionAllows.filter((name): name is string => typeof name === "string")
+				: [],
+			pathApprovals: parseSessionApprovals(record.pathApprovals),
+			bashApprovals: parseSessionApprovals(record.bashApprovals),
+		};
+	}
+
+	function persistSessionState() {
+		pi.appendEntry<PermissionsSessionState>(SESSION_STATE_ENTRY, {
+			modeOverride,
+			sandboxDisabledForSession,
+			sessionAllows: [...sessionAllows],
+			pathApprovals: sessionPathApprovals,
+			bashApprovals: sessionBashApprovals,
+		});
+	}
+
+	function reconstructSessionState(ctx: ExtensionContext) {
+		sessionAllows.clear();
+		sessionPathApprovals.length = 0;
+		sessionBashApprovals.length = 0;
+		modeOverride = undefined;
+		sandboxDisabledForSession = false;
+
+		let entries: SessionEntry[];
+		try {
+			entries = ctx.sessionManager.getBranch();
+		} catch {
+			return;
+		}
+
+		let state: PermissionsSessionState | undefined;
+		for (const entry of entries) {
+			if (entry.type === "custom" && entry.customType === SESSION_STATE_ENTRY) {
+				state = readSessionState(entry.data);
+			}
+		}
+		if (!state) return;
+
+		modeOverride = state.modeOverride;
+		sandboxDisabledForSession = state.sandboxDisabledForSession === true;
+		for (const tool of state.sessionAllows ?? []) sessionAllows.add(tool);
+		sessionPathApprovals.push(...(state.pathApprovals ?? []));
+		sessionBashApprovals.push(...(state.bashApprovals ?? []));
+	}
+
+	/** Persistent footer indicator for the active mode, sandbox, and shell parser state. */
+	function updatePermissionStatus(ctx: ExtensionContext) {
+		const ui = ctx.ui;
+		if (!ctx.hasUI || typeof ui.setStatus !== "function") return;
+
+		const policy = activePolicy(configWithModeOverride(), agentName, profileName);
+		const sandbox = sandboxState.kind === "active" ? "sandbox" : sandboxState.reason;
+		const parser = treeSitterReady ? "tree-sitter" : "no-parser";
+		let text = `${policy.mode} · ${sandbox} · ${parser}`;
+		try {
+			text = ui.theme.fg("accent", text);
+		} catch {
+			// Theme is unavailable outside interactive mode; keep the plain text.
+		}
+		ui.setStatus(STATUS_KEY, text);
+	}
+
+	/**
+	 * Notifies other extensions that the effective policy changed. Best effort: the event bus is
+	 * optional and a subscriber must never be able to affect a permission decision.
+	 */
+	function publishPolicyChange(ctx: ExtensionContext, reason: string) {
+		if (!pi.events || typeof pi.events.emit !== "function") return;
+		try {
+			const policy = activePolicy(configWithModeOverride(), agentName, profileName);
+			pi.events.emit(PERMISSIONS_POLICY_CHANGED_EVENT, {
+				reason,
+				cwd: ctx.cwd,
+				agentName,
+				profileName,
+				mode: policy.mode,
+				externalPath: policy.externalPath,
+				ruleCount: policy.rules.length,
+				sandbox: sandboxState.kind,
+				projectConfig: config.projectConfig ?? "never",
+			});
+		} catch {
+			// Publishing is advisory only.
+		}
+	}
+
 	const reload = (ctx: ExtensionContext) => {
 		config = loadConfig(ctx.cwd, {
 			onWarning: (message) => warnPermissionIssue(ctx, message),
+			projectTrusted: isProjectTrusted(ctx),
 		});
 		agentName = detectAgentName(pi);
 		profileName = detectProfileName(pi);
 		approvalsSettings = getApprovalsSettings(config);
 		loadApprovals(ctx);
+		publishPolicyChange(ctx, "reload");
 	};
 
 	const createPathApproval = (
@@ -517,6 +704,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		sessionPathApprovals.push(
 			...dedupeStrings(scopeValues).map((scopeValue) => createPathApproval(toolName, scopeValue, projectRoot)),
 		);
+		persistSessionState();
 	};
 
 	const savePathApprovals = (
@@ -695,6 +883,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 
 	async function disableSandboxForSession(ctx: ExtensionContext) {
 		sandboxDisabledForSession = true;
+		persistSessionState();
 		if (sandboxState.kind === "active" && sandboxRuntime) {
 			await resetSandboxRuntime(ctx, "while disabling");
 		}
@@ -707,15 +896,20 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			execution,
 		};
 		clearSandboxEnv();
+		updatePermissionStatus(ctx);
+		publishPolicyChange(ctx, "sandbox-disabled");
 	}
 
 	async function enableSandboxForSession(ctx: ExtensionContext) {
 		sandboxDisabledForSession = false;
+		persistSessionState();
 		if (sandboxState.kind === "active" && sandboxRuntime) {
 			await resetSandboxRuntime(ctx, "while re-enabling");
 		}
 
 		await initializeSandbox(ctx);
+		updatePermissionStatus(ctx);
+		publishPolicyChange(ctx, "sandbox-enabled");
 	}
 
 	function shellQuote(value: string): string {
@@ -908,38 +1102,40 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		throw new Error(`Bash sandbox automatic repair failed. ${repair.message}`);
 	};
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		sandboxLifecycleGeneration++;
-		sessionAllows.clear();
-		sessionPathApprovals.length = 0;
-		sessionBashApprovals.length = 0;
-		modeOverride = undefined;
-		sandboxDisabledForSession = false;
 		sandboxHealthMonitor.reset();
 		sandboxTmpDir = undefined;
 		sandboxTmpDirEphemeral = false;
 		reload(ctx);
+		reconstructSessionState(ctx);
 		treeSitterReady = await isTreeSitterAvailable();
 		if (ctx.hasUI) {
 			if (treeSitterReady) ctx.ui.notify("Shell parser active: tree-sitter", "info");
 			else ctx.ui.notify("Shell parser unavailable: bash commands will require confirmation", "warning");
 		}
 		await initializeSandbox(ctx);
+		updatePermissionStatus(ctx);
+		if (event.reason === "resume" && modeOverride !== undefined) {
+			ctx.ui.notify(`Restored session permission mode override: ${modeOverride}`, "info");
+		}
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
 		sandboxLifecycleGeneration++;
 		sandboxHealthMonitor.reset();
 		reload(ctx);
-		treeSitterReady = await isTreeSitterAvailable();
+		reconstructSessionState(ctx);
 		await initializeSandbox(ctx);
+		updatePermissionStatus(ctx);
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (_event, ctx) => {
 		sandboxLifecycleGeneration++;
 		const shouldResetSandbox = sandboxState.kind === "active" && sandboxRuntime !== undefined;
 		sandboxState = { kind: "inactive", reason: "inactive", fallbackMode: "normal" };
 		clearSandboxEnv();
+		if (typeof ctx.ui.setStatus === "function") ctx.ui.setStatus(STATUS_KEY, undefined);
 		if (shouldResetSandbox) {
 			await resetSandboxRuntime();
 		}
@@ -966,9 +1162,10 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			cwd: ctx.cwd,
 		});
 
-		return {
-			systemPrompt: `${event.systemPrompt}\n\n${hint}`,
-		};
+		// Mutate the structured section instead of replacing the whole prompt, so Pi keeps
+		// recording section-level transcript deltas and can cache unchanged sections.
+		event.systemPromptOptions.sections.sandbox = hint;
+		return undefined;
 	});
 
 	// ── Ask helper ────────────────────────────────────────────────────────────
@@ -1094,6 +1291,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 					agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
 					createdAt: Date.now(),
 				});
+				persistSessionState();
 				ctx.ui.notify(`✓ Bash session rule added: bash-exact:${approvalTarget}`, "info");
 			}
 
@@ -1150,6 +1348,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 						agentName: approvalsSettings.scopeByAgent ? agentName : undefined,
 						createdAt: Date.now(),
 					});
+					persistSessionState();
 					ctx.ui.notify(
 						`✓ Bash session rule added: bash-prefix:${selectedPrefix} (matches: ${selectedPrefix} *)`,
 						"info",
@@ -1205,6 +1404,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 
 		if (choice === "Allow tool for this session") {
 			sessionAllows.add(toolName);
+			persistSessionState();
 			ctx.ui.notify(`✓ ${toolName} allowed for the rest of this session`, "info");
 		}
 
@@ -1585,6 +1785,59 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		};
 	}
 
+	/** Tools whose inputs the policy already understands, so annotations add nothing. */
+	function isKnownPolicyTool(toolName: PermissionToolName): boolean {
+		return KNOWN_POLICY_TOOL_NAMES.has(toolName);
+	}
+
+	function toolAnnotations(toolName: string): ToolAnnotations | undefined {
+		if (typeof pi.getAllTools !== "function") return undefined;
+		try {
+			return pi.getAllTools().find((tool) => tool.name === toolName)?.annotations;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Mirrors the MCP annotation defaults: a tool is not read-only unless it declares otherwise,
+	 * and may be destructive or reach an open world. A declared read-only tool never prompts here.
+	 */
+	function annotationRiskReason(
+		annotations: ToolAnnotations | undefined,
+		askWhenUnannotated: boolean,
+	): string | undefined {
+		if (!annotations) return askWhenUnannotated ? "declares no tool annotations" : undefined;
+		if (annotations.destructiveHint === true) return "declares destructiveHint";
+		if (annotations.readOnlyHint !== true && (annotations.openWorldHint ?? true)) {
+			return "is not read-only and may reach an open world";
+		}
+		return undefined;
+	}
+
+	/**
+	 * Registered tools that take a path but fall outside the built-in filesystem tool names, for
+	 * example tools another extension added. The external-path policy cannot see them, so they are
+	 * reported by `/permissions verbose` instead of being confirmed silently.
+	 */
+	function unclassifiedPathTools(): string[] {
+		if (typeof pi.getAllTools !== "function") return [];
+		let tools: ToolInfo[];
+		try {
+			tools = pi.getAllTools();
+		} catch {
+			return [];
+		}
+
+		const found: string[] = [];
+		for (const tool of tools) {
+			if (KNOWN_POLICY_TOOL_NAMES.has(tool.name) || isMcpToolName(tool.name)) continue;
+			const properties = (tool.parameters as { properties?: Record<string, unknown> } | undefined)?.properties;
+			if (properties && ("path" in properties || "file_path" in properties)) found.push(tool.name);
+		}
+		return found;
+	}
+
 	async function checkToolPermission(
 		toolName: PermissionToolName,
 		input: PermissionToolInput,
@@ -1592,6 +1845,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		ctx: ExtensionContext,
 	): Promise<PermissionDecision> {
 		const policy = activePolicy(configWithModeOverride(), agentName, profileName);
+		const annotationPolicy = getAnnotationPolicy(config);
 
 		if (toolName === "bash") {
 			return checkBashPermission(getCommandInput(input) ?? "", input, projectRoot, ctx);
@@ -1697,6 +1951,19 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			}
 		}
 
+		// No rule classifies this tool. Its own annotations are the last risk signal available, and
+		// they cover tools registered by other extensions and by MCP servers.
+		if (annotationPolicy.enabled && !isKnownPolicyTool(toolName)) {
+			const reason = annotationRiskReason(toolAnnotations(toolName), annotationPolicy.askWhenUnannotated);
+			if (reason) {
+				const syntheticRule: Rule = { tool: toolName, action: "ask", reason: `Unclassified tool ${reason}` };
+				if (await maybeAutoApprove(toolName, input, syntheticRule, undefined, policy.mode, ctx)) {
+					return ALLOW_PERMISSION;
+				}
+				return askPermission(toolName, input, syntheticRule.reason, projectRoot, ctx);
+			}
+		}
+
 		return ALLOW_PERMISSION;
 	}
 
@@ -1717,11 +1984,30 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 	pi.on("tool_call", async (event, ctx) => {
 		agentName = detectAgentName(pi);
 		profileName = detectProfileName(pi);
-		const input = asPermissionToolInput(event.input);
-		const toolName = asPermissionToolName(event.toolName);
+		// `isToolCallEventType` narrows the input for built-in tools; direct `event.toolName`
+		// comparisons do not narrow because CustomToolCallEvent.toolName is `string`.
+		const input: PermissionToolInput = isToolCallEventType("bash", event)
+			? { command: event.input.command }
+			: asPermissionToolInput(event.input);
+		const toolName: PermissionToolName = event.toolName;
 		const projectRoot = canonicalizePath(ctx.cwd);
 		const decision = await checkToolPermission(toolName, input, projectRoot, ctx);
 		return toToolCallResult(decision);
+	});
+
+	pi.on("resources_discover", () => {
+		const skillPath = path.join(EXTENSION_DIR, "SKILL.md");
+		return fs.existsSync(skillPath) ? { skillPaths: [skillPath] } : undefined;
+	});
+
+	pi.on("mcp_servers_change", (event, ctx) => {
+		if (!ctx.hasUI) return;
+		const servers = event.servers.length;
+		const uncovered = unclassifiedPathTools();
+		ctx.ui.notify(
+			`Permissions: MCP configuration changed (${servers} registered server${servers === 1 ? "" : "s"}). MCP tool calls require confirmation unless a rule, an approval, or a readOnlyHint allows them.${uncovered.length > 0 ? ` ${uncovered.length} registered path tool(s) also fall outside built-in path handling.` : ""}`,
+			"info",
+		);
 	});
 
 	// ── /permissions command ──────────────────────────────────────────────────
@@ -1823,6 +2109,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			const bashExecutionMode = sandboxBashExecutionMode();
 			const sandboxConfig = sandboxPromptConfig();
 			const shellParserStatus = treeSitterReady ? "tree-sitter (active)" : "unavailable (ask-all bash)";
+			const uncoveredPathTools = unclassifiedPathTools();
 			const verbose = /^(verbose|full|debug|all)$/i.test((args || "").trim());
 			const sessionApprovalCount = sessionPathApprovals.length + sessionBashApprovals.length;
 			const actionCounts = {
@@ -1844,7 +2131,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			if (!ctx.hasUI) {
 				ctx.ui.notify(
 					verbose
-						? `Permissions (${profileLabel}): mode=${mode}, rules=${rules.length} (allow=${actionCounts.allow} ask=${actionCounts.ask} block=${actionCounts.block}), externalPath=${externalPath}, sandbox=${sandboxStatus}, bashMode=${bashExecutionMode}, shellParser=${shellParserStatus}, protected=read:${protectedResources.denyRead.length}/write:${protectedResources.denyWrite.length}, approvals=${sessionApprovalCount} session/${persistentApprovals.length} saved, sampleRules=${sampleRules.join("; ") || "none"}`
+						? `Permissions (${profileLabel}): mode=${mode}, rules=${rules.length} (allow=${actionCounts.allow} ask=${actionCounts.ask} block=${actionCounts.block}), externalPath=${externalPath}, sandbox=${sandboxStatus}, bashMode=${bashExecutionMode}, shellParser=${shellParserStatus}, protected=read:${protectedResources.denyRead.length}/write:${protectedResources.denyWrite.length}, approvals=${sessionApprovalCount} session/${persistentApprovals.length} saved, unclassifiedPathTools=${uncoveredPathTools.join(", ") || "none"}, sampleRules=${sampleRules.join("; ") || "none"}`
 						: `Permissions (${profileLabel}): mode=${mode}, externalPath=${externalPath}, sandbox=${sandboxStatus}, bashMode=${bashExecutionMode}, shellParser=${shellParserStatus}, rules=${rules.length} (allow=${actionCounts.allow} ask=${actionCounts.ask} block=${actionCounts.block}), approvals=${sessionApprovalCount} session/${persistentApprovals.length} saved`,
 					"info",
 				);
@@ -1964,6 +2251,11 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 					lines.push(
 						`  ${theme.fg("muted", "Shell parser:   ")}${theme.fg(treeSitterReady ? "success" : "warning", shellParserStatus)}${!treeSitterReady ? theme.fg("dim", ": bash commands require confirmation") : ""}`,
 					);
+					if (uncoveredPathTools.length > 0) {
+						lines.push(
+							`  ${theme.fg("muted", "Unclassified:  ")}${theme.fg("warning", `${uncoveredPathTools.length} path tool(s)`)}${theme.fg("dim", `: ${uncoveredPathTools.slice(0, 6).join(", ")}`)}`,
+						);
+					}
 					lines.push(
 						`  ${theme.fg("muted", "Sandbox TMPDIR: ")}${theme.fg("dim", sandboxTmpDir ?? getEffectiveSandboxTmpDir(ctx.cwd, config.sandbox))}${theme.fg("dim", sandboxTmpDirEphemeral ? " (session)" : " (shared)")}`,
 					);
@@ -2232,6 +2524,9 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		const resetPersistent = resetSaved || resetProject || resetAgent;
 		const saved = !resetPersistent || saveApprovals(ctx);
 		if (!saved) persistentApprovals = previousApprovals;
+		persistSessionState();
+		updatePermissionStatus(ctx);
+		publishPolicyChange(ctx, "reset");
 
 		const parts: string[] = [];
 		if (resetSession) parts.push("session approvals cleared");
@@ -2254,6 +2549,9 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 
 		if (requestedMode === "default" || requestedMode === "clear") {
 			modeOverride = undefined;
+			persistSessionState();
+			updatePermissionStatus(ctx);
+			publishPolicyChange(ctx, "mode-cleared");
 			const policy = activePolicy(config, agentName, profileName);
 			ctx.ui.notify(`✓ Session mode override cleared. Active permission mode: ${policy.mode}`, "info");
 			return;
@@ -2268,7 +2566,10 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 				return;
 			}
 			modeOverride = requestedMode as PermissionMode;
+			persistSessionState();
 			const policy = activePolicy(configWithModeOverride(), agentName, profileName);
+			updatePermissionStatus(ctx);
+			publishPolicyChange(ctx, "mode-changed");
 			if (policy.mode === modeOverride) {
 				ctx.ui.notify(`✓ Permission mode set to "${modeOverride}" for this session`, "info");
 			} else {

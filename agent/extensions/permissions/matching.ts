@@ -1,7 +1,13 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type PermissionToolInput, type PermissionToolName, type Rule, isFilesystemToolName } from "./shared";
+import {
+	type PermissionToolInput,
+	type PermissionToolName,
+	type Rule,
+	isFilesystemToolName,
+	isMcpToolName,
+} from "./shared";
 
 export function getCommandInput(input: PermissionToolInput): string | undefined {
 	return typeof input.command === "string" ? input.command : undefined;
@@ -16,10 +22,6 @@ export function getPathInput(input: PermissionToolInput): string | undefined {
 export function asPermissionToolInput(input: unknown): PermissionToolInput {
 	if (!input || typeof input !== "object") return {};
 	return input as PermissionToolInput;
-}
-
-export function asPermissionToolName(toolName: string): PermissionToolName {
-	return toolName;
 }
 
 export function getMatchTarget(toolName: PermissionToolName, input: PermissionToolInput): string | undefined {
@@ -104,7 +106,10 @@ export function matchRule(rules: Rule[], toolName: PermissionToolName, input: Pe
 	const target = getMatchTarget(toolName, input);
 
 	for (const rule of rules) {
-		if (rule.tool !== "*" && rule.tool !== toolName) continue;
+		// A rule written for "mcp" covers every `mcp__<server>__<tool>` registration.
+		const toolMatches =
+			rule.tool === "*" || rule.tool === toolName || (rule.tool === "mcp" && isMcpToolName(toolName));
+		if (!toolMatches) continue;
 		if (rule.match !== undefined) {
 			if (target === undefined) continue;
 			if (!ruleMatch(rule, toolName, target)) continue;

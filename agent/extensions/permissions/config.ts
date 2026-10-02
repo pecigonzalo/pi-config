@@ -10,6 +10,7 @@ import {
 	type ExternalPathPolicy,
 	type PermissionMode,
 	type PermissionsConfig,
+	type ResolvedAnnotationPolicySettings,
 	type ResolvedClassifierSettings,
 	type ResolvedProtectedResources,
 	type Rule,
@@ -310,24 +311,46 @@ function asObjectRecord(value: unknown): Record<string, unknown> | undefined {
 	return value as Record<string, unknown>;
 }
 
-export function loadConfig(cwd: string, options?: { onWarning?: (message: string) => void }): PermissionsConfig {
+export function loadConfig(
+	cwd: string,
+	options?: { onWarning?: (message: string) => void; projectTrusted?: boolean },
+): PermissionsConfig {
 	const globalPath = path.join(getAgentDir(), "permissions.jsonc");
 	const projectPath = path.join(cwd, ".pi", "permissions.jsonc");
 
 	const globalRaw = readJsonFile(globalPath, options);
-	const projectRaw = readJsonFile(projectPath, options);
 
 	if (globalRaw !== undefined && !asObjectRecord(globalRaw)) {
 		options?.onWarning?.(`Ignoring malformed permissions config at ${globalPath}: expected object root`);
 	}
-	if (projectRaw !== undefined && !asObjectRecord(projectRaw)) {
-		options?.onWarning?.(`Ignoring malformed permissions config at ${projectPath}: expected object root`);
-	}
 
 	const global = asObjectRecord(globalRaw) as PermissionsConfig | undefined;
-	const project = asObjectRecord(projectRaw) as PermissionsConfig | undefined;
+
+	// Project-local config is opt-in: a repository must not be able to relax the policy that
+	// governs it by shipping a file. `projectConfig` is read from the global config only.
+	const projectConfigPolicy = global?.projectConfig ?? "never";
+	const projectReadable =
+		projectConfigPolicy === "always" || (projectConfigPolicy === "trusted" && options?.projectTrusted === true);
+
+	let project: PermissionsConfig | undefined;
+	if (projectReadable) {
+		const projectRaw = readJsonFile(projectPath, options);
+		if (projectRaw !== undefined && !asObjectRecord(projectRaw)) {
+			options?.onWarning?.(`Ignoring malformed permissions config at ${projectPath}: expected object root`);
+		}
+		project = asObjectRecord(projectRaw) as PermissionsConfig | undefined;
+	} else if (fs.existsSync(projectPath)) {
+		const why =
+			projectConfigPolicy === "trusted"
+				? 'projectConfig is "trusted" and this project is not trusted'
+				: `projectConfig is \"${projectConfigPolicy}\"`;
+		options?.onWarning?.(
+			`Ignoring project-local permissions config at ${projectPath}: ${why}. Set "projectConfig" in ${globalPath} to change this.`,
+		);
+	}
 
 	return interpolateConfig({
+		projectConfig: projectConfigPolicy,
 		default: mergeDefaultConfig(global?.default, project?.default),
 		profiles: {
 			...(global?.profiles ?? {}),
@@ -348,6 +371,10 @@ export function loadConfig(cwd: string, options?: { onWarning?: (message: string
 		protectedResources: {
 			...(global?.protectedResources ?? {}),
 			...(project?.protectedResources ?? {}),
+		},
+		annotations: {
+			...(global?.annotations ?? {}),
+			...(project?.annotations ?? {}),
 		},
 		classifier: {
 			...(global?.classifier ?? {}),
@@ -456,6 +483,19 @@ export function getClassifierSettings(config: PermissionsConfig): ResolvedClassi
 	return { ...DEFAULT_CLASSIFIER_SETTINGS, ...config.classifier };
 }
 
+const DEFAULT_ANNOTATION_POLICY: ResolvedAnnotationPolicySettings = {
+	enabled: true,
+	askWhenUnannotated: true,
+};
+
+/**
+ * Resolves the annotation-based default policy. It only ever applies to tools that no rule
+ * classifies, so it cannot weaken an explicit rule.
+ */
+export function getAnnotationPolicy(config: PermissionsConfig): ResolvedAnnotationPolicySettings {
+	return { ...DEFAULT_ANNOTATION_POLICY, ...config.annotations };
+}
+
 function mergePolicyLayer(
 	base: { mode: PermissionMode; rules: Rule[]; externalPath: ExternalPathPolicy },
 	layer: AgentProfile | undefined,
@@ -471,27 +511,31 @@ function mergePolicyLayer(
 	return { mode, rules, externalPath };
 }
 
+/**
+ * Rules that no profile, agent, or user rule may remove: protected resources and built-in
+ * invariants. These are resolved from the config plus defaults and are therefore independent
+ * of `inherit`, `mode`, and user rule ordering.
+ */
+export function compileInvariantRules(config: PermissionsConfig): Rule[] {
+	const protectedRules = compileProtectedRules(resolveProtectedResources(config));
+	const builtinRules = getBuiltinPermissionRules(getInterpolationVariables().PI_PACKAGE_DIR);
+	return [...protectedRules, ...builtinRules.invariants];
+}
+
 export function activePolicy(config: PermissionsConfig, agentName: string, profileName?: string): EffectivePolicy {
 	const protectedResources = resolveProtectedResources(config);
-	const protectedRules = compileProtectedRules(protectedResources);
 	const defaultMode = config.default?.mode ?? "workspace-write";
 	const defaultCompiled = compileModeDefaults(defaultMode);
 	const builtinRules = getBuiltinPermissionRules(getInterpolationVariables().PI_PACKAGE_DIR);
-	// Rule layering (first matching rule wins):
-	//   1. protected-resource rules (invariants)
-	//   2. builtin invariants — not overridable by `default.rules`
-	//   3. user-configured `default.rules`
-	//   4. builtin defaults — safe defaults user rules can override
-	//   5. mode defaults (plan read-only, workspace-write bash ask, ...)
+	// Configurable rule layering (first matching rule wins):
+	//   1. user-configured `default.rules`
+	//   2. builtin safe defaults — user rules can override these
+	//   3. mode defaults (plan read-only, workspace-write bash ask, ...)
+	// Profile and agent layers are applied on top of this list. `inherit: false` replaces it,
+	// which is why invariant rules are prepended afterwards instead of participating here.
 	let effective = {
 		mode: defaultMode,
-		rules: [
-			...protectedRules,
-			...builtinRules.invariants,
-			...(config.default?.rules ?? []),
-			...builtinRules.defaults,
-			...defaultCompiled.rules,
-		],
+		rules: [...(config.default?.rules ?? []), ...builtinRules.defaults, ...defaultCompiled.rules],
 		externalPath: config.default?.externalPath ?? defaultCompiled.externalPath,
 	};
 
@@ -500,7 +544,7 @@ export function activePolicy(config: PermissionsConfig, agentName: string, profi
 
 	return {
 		mode: effective.mode,
-		rules: effective.rules,
+		rules: [...compileInvariantRules(config), ...effective.rules],
 		externalPath: effective.externalPath,
 		protectedResources,
 	};

@@ -47,7 +47,21 @@ export interface AgentProfile {
 	externalPath?: ExternalPathPolicy;
 }
 
+/**
+ * How `<cwd>/.pi/permissions.jsonc` is handled. Set in the global config only.
+ *
+ * - `"never"` (default): the project file is ignored, so a repository cannot change the
+ *   policy that governs it by shipping a file.
+ * - `"trusted"`: the project file applies only when Pi reports the project as trusted.
+ *   Pi treats a project with no other trust-requiring resources as trusted, so a repository
+ *   whose only Pi resource is `.pi/permissions.jsonc` still counts as trusted.
+ * - `"always"`: the project file always applies.
+ */
+export type ProjectConfigPolicy = "never" | "trusted" | "always";
+
 export interface PermissionsConfig {
+	/** Project-local config handling. Global config only; defaults to `"never"`. */
+	projectConfig?: ProjectConfigPolicy;
 	default?: {
 		mode?: PermissionMode;
 		rules?: Rule[];
@@ -58,6 +72,7 @@ export interface PermissionsConfig {
 	sandbox?: SandboxSettings;
 	approvals?: ApprovalsSettings;
 	protectedResources?: ProtectedResourcesSettings;
+	annotations?: AnnotationPolicySettings;
 	classifier?: ClassifierSettings;
 }
 
@@ -124,6 +139,19 @@ export interface ProtectedResourcesSettings {
 	addDenyWrite?: string[];
 	unprotectRead?: string[];
 	unprotectWrite?: string[];
+}
+
+/** Settings for the annotation-based default applied to tools no rule classifies. */
+export interface AnnotationPolicySettings {
+	/** Ask before unclassified tools whose annotations indicate risk. Defaults to true. */
+	enabled?: boolean;
+	/** Ask when an unclassified tool declares no annotations at all. Defaults to true. */
+	askWhenUnannotated?: boolean;
+}
+
+export interface ResolvedAnnotationPolicySettings {
+	enabled: boolean;
+	askWhenUnannotated: boolean;
 }
 
 export interface ResolvedProtectedResources {
@@ -212,6 +240,11 @@ export const FILESYSTEM_TOOLS = new Set<FilesystemToolName>(FILESYSTEM_TOOL_NAME
 
 export function isFilesystemToolName(toolName: PermissionToolName): toolName is FilesystemToolName {
 	return FILESYSTEM_TOOLS.has(toolName as FilesystemToolName);
+}
+
+/** MCP tools are registered as `mcp__<server>__<tool>`; a bare `mcp` name is also accepted. */
+export function isMcpToolName(toolName: string): boolean {
+	return toolName === "mcp" || toolName.startsWith("mcp__");
 }
 
 export function dedupeStrings(items: string[]): string[] {
