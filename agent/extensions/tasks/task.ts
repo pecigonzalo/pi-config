@@ -2846,7 +2846,9 @@ async function runSingleAgentViaRpc(
 			}
 			if (event.type === "agent_settled") {
 				controller.isStreaming = false;
-				controller.status = rpcAborted ? "aborted" : "completed";
+				// A child run cancelled from inside its own session (for example with Escape) reports it here,
+				// not through our RPC abort path, so both sources have to agree on the status.
+				controller.status = rpcAborted || event.aborted === true ? "aborted" : "completed";
 				controller.lastActivity = "agent_settled";
 				completionCoordinator.onAgentSettled();
 				return;
