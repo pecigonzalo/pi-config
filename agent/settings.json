@@ -10,9 +10,9 @@
     "-extensions/typescript/typescript.ts",
     "-extensions/langdock.ts"
   ],
-  "defaultProvider": "opencode",
-  "defaultModel": "opencode/deepseek-v4.1-flash",
-  "defaultThinkingLevel": "xhigh",
+  "defaultProvider": "opencode-go",
+  "defaultModel": "deepseek-v4.1-flash",
+  "defaultThinkingLevel": "high",
   "compaction": {
     "enabled": true
   },
@@ -61,8 +61,5 @@
   "terminal": {
     "showTerminalProgress": true
   },
-  "enableInstallTelemetry": false,
-  "modelThinkingLevels": {
-    "opencode-go/deepseek-v4.1-flash": "high"
-  }
+  "enableInstallTelemetry": false
 }
