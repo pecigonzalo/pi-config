@@ -363,6 +363,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event, _ctx) => {
 		knownSkills = buildKnownSkillIndex(event.systemPromptOptions.skills);
+		// Custom-message runs reach this event too, so only a user turn may consume the one-shot notice.
+		if (event.messageType !== "user") return undefined;
 		if (!pendingReload || activeSkills.size === 0) return undefined;
 
 		pendingReload = false;
