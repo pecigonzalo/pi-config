@@ -9,12 +9,12 @@
     "light": {
       "description": "Lower-cost lightweight reasoning model",
       "provider": "opencode-go",
-      "model": "deepseek-v4-flash"
+      "model": "deepseek-v4.1-flash"
     },
     "balanced": {
       "description": "Cost-effective default model for most tasks",
       "provider": "opencode-go",
-      "model": "deepseek-v4-flash",
+      "model": "deepseek-v4.1-flash",
       "thinkingLevel": "high"
     },
     "heavy": {
