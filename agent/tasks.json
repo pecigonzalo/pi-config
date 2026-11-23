@@ -3,7 +3,7 @@
     "smart": {
       "description": "A smarter thinking model for complex tasks and reasoning",
       "provider": "opencode-go",
-      "model": "gpt-5.6-luna",
+      "model": "gpt-6-luna",
       "thinkingLevel": "xhigh"
     },
     "light": {
@@ -20,7 +20,7 @@
     "heavy": {
       "description": "Heavier model for deep planning and hard tasks",
       "provider": "opencode-go",
-      "model": "gpt-5.6-luna",
+      "model": "gpt-6-luna",
       "thinkingLevel": "high"
     }
   }
