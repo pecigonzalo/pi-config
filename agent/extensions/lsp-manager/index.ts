@@ -85,14 +85,10 @@ export default function lspManagerExtension(pi: ExtensionAPI) {
 		const workspaceRoot = await findWorkspaceRoot(pi, ctx.cwd);
 		service = new DefaultLspManagerService(ctx.cwd, { workspaceRoot });
 		publishService(pi, service);
-		if (ctx.hasUI) {
-			ctx.ui.setStatus("lsp-manager", ctx.ui.theme.fg("dim", "LSP: idle"));
-		}
 	});
 
-	pi.on("session_shutdown", async (_event, ctx) => {
+	pi.on("session_shutdown", async () => {
 		clearService(pi, service);
-		if (ctx.hasUI) ctx.ui.setStatus("lsp-manager", undefined);
 		if (service) await service.shutdown();
 		service = undefined;
 	});
