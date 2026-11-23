@@ -1,7 +1,7 @@
-import { StringEnum } from "@earendil-works/pi-ai";
 import { keyHint, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { StringEnum } from "../shared/string-enum";
 import { storeDelete, storePatch, storeRead, storeWrite } from "./store";
 
 const StoreStatusSchema = StringEnum(["active", "archived", "deprecated"] as const, {

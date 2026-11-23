@@ -1,8 +1,8 @@
-import { StringEnum } from "@earendil-works/pi-ai";
-import { defineTool, getMarkdownTheme, keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { defineTool, getMarkdownTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import TurndownService from "turndown";
+import { StringEnum } from "../shared/string-enum";
 import {
 	clampTimeout,
 	createTimedSignal,
@@ -384,7 +384,7 @@ export function registerWebfetchTool(pi: ExtensionAPI) {
 					: "";
 				const component = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
 				component.setText(
-					`${theme.fg(context.isError ? "error" : "success", context.isError ? "✗" : "✓")} ${theme.fg("toolOutput", target)}${theme.fg("muted", format)}${warnings}${theme.fg("dim", ` (${keyHint("app.tools.expand", "to expand")})`)}`,
+					`${theme.fg(context.isError ? "error" : "success", context.isError ? "✗" : "✓")} ${theme.fg("toolOutput", target)}${theme.fg("muted", format)}${warnings}${theme.fg("dim", ` (${context.keyHint("app.tools.expand", "to expand")})`)}`,
 				);
 				return component;
 			}

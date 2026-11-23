@@ -1,4 +1,4 @@
-import { defineTool, keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import {
@@ -498,7 +498,7 @@ export function registerWebsearchTool(pi: ExtensionAPI) {
 					: "";
 				const component = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
 				component.setText(
-					`${theme.fg(context.isError ? "error" : "success", context.isError ? "✗" : "✓")} ${theme.fg("toolOutput", `${count} result${count === 1 ? "" : "s"}${query}`)}${warnings}${theme.fg("dim", ` (${keyHint("app.tools.expand", "to expand")})`)}`,
+					`${theme.fg(context.isError ? "error" : "success", context.isError ? "✗" : "✓")} ${theme.fg("toolOutput", `${count} result${count === 1 ? "" : "s"}${query}`)}${warnings}${theme.fg("dim", ` (${context.keyHint("app.tools.expand", "to expand")})`)}`,
 				);
 				return component;
 			}

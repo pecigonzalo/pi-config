@@ -68,7 +68,6 @@ beforeAll(async () => {
 		},
 		getAgentDir: () => testAgentDir,
 		getMarkdownTheme: () => ({}),
-		keyHint: (_binding: string, description: string) => `Ctrl+O ${description}`,
 		withFileMutationQueue: async (filePath: string, mutation: () => Promise<void>) => {
 			lastMutatedFilePath = filePath;
 			if (mockFileMutationError) throw mockFileMutationError;

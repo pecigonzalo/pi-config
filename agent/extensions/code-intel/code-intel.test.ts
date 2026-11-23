@@ -587,13 +587,12 @@ describe("code-intel workflow guidance", () => {
 
 	test("repo map shows every file's top symbol before deepening any file", () => {
 		const defs = ["alpha", "beta", "gamma"].flatMap((prefix) =>
-			[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(
-				(index): Definition =>
-					definition({
-						name: `${prefix}Symbol${index}`,
-						kind: "class",
-						file: `src/${prefix}.ts`,
-					}),
+			[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((index): Definition =>
+				definition({
+					name: `${prefix}Symbol${index}`,
+					kind: "class",
+					file: `src/${prefix}.ts`,
+				}),
 			),
 		);
 		const output = __test.renderRepoMap({

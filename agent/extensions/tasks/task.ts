@@ -20,7 +20,6 @@ import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
-import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	type ExtensionAPI,
 	type SessionEntry,
@@ -28,12 +27,12 @@ import {
 	ProjectTrustStore,
 	getAgentDir,
 	hasTrustRequiringProjectResources,
-	keyHint,
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { MAIN_SESSION_AGENT_CUSTOM_TYPE } from "../shared/agent-state";
+import { StringEnum } from "../shared/string-enum";
 import {
 	type AgentConfig,
 	type AgentScope,
@@ -5671,7 +5670,7 @@ export default function (pi: ExtensionAPI) {
 			return new Text(text, 0, 0);
 		},
 
-		renderResult(result, { expanded }, theme, _context) {
+		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as TaskDetails | undefined;
 			if (!details || details.results.length === 0) {
 				const text = result.content[0];
@@ -5782,7 +5781,7 @@ export default function (pi: ExtensionAPI) {
 				else {
 					text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
 					if (displayItems.length > COLLAPSED_ITEM_COUNT)
-						text += `\n${theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`)}`;
+						text += `\n${theme.fg("muted", `(${context.keyHint("app.tools.expand", "to expand")})`)}`;
 				}
 				const usageStr = formatUsageStats(r.usage, r.model);
 				if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
@@ -5878,7 +5877,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				const usageStr = formatUsageStats(aggregateUsage(details.results));
 				if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
-				text += `\n${theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`)}`;
+				text += `\n${theme.fg("muted", `(${context.keyHint("app.tools.expand", "to expand")})`)}`;
 				return new Text(text, 0, 0);
 			}
 
@@ -5965,7 +5964,8 @@ export default function (pi: ExtensionAPI) {
 					const usageStr = formatUsageStats(aggregateUsage(details.results));
 					if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
 				}
-				if (!expanded) text += `\n${theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`)}`;
+				if (!expanded)
+					text += `\n${theme.fg("muted", `(${context.keyHint("app.tools.expand", "to expand")})`)}`;
 				return new Text(text, 0, 0);
 			}
 

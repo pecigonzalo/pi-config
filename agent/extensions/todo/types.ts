@@ -1,5 +1,6 @@
-import { StringEnum, type JsonValue } from "@earendil-works/pi-ai";
+import { type JsonValue } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import { StringEnum } from "../shared/string-enum";
 
 export type TodoStatus = "todo" | "in-progress" | "done";
 export type TodoPriority = "low" | "med" | "high";
