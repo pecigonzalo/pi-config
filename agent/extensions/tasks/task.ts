@@ -31,7 +31,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { MAIN_SESSION_AGENT_CUSTOM_TYPE } from "../shared/agent-state";
 import { StringEnum } from "../shared/string-enum";
 import {
 	type AgentConfig,
@@ -126,6 +125,7 @@ const COLLAPSED_ITEM_COUNT = 10;
 const TASK_SESSION_VERSION_FALLBACK = 3;
 const TASK_CHILD_SESSION_CUSTOM_TYPE = "tasks.child-session";
 const TASK_CHILD_SESSION_METADATA_VERSION = 1;
+const MAIN_SESSION_AGENT_CUSTOM_TYPE = "tasks.main-agent";
 const TASKS_PARENT_SESSION_ROOT = path.join(getAgentDir(), "sessions");
 const TASKS_NO_CURRENT_RUNS_MESSAGE = "No task runs in current session.";
 const TASKS_BROWSER_SHORTCUT = "ctrl+shift+t";
