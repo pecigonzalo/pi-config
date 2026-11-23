@@ -3,13 +3,7 @@
   "lastChangelogVersion": "1.6.0",
   "theme": "dracula",
   "tuiMode": "regular",
-  "extensions": [
-    "-extensions/store/index.ts",
-    "-extensions/learning-review/index.ts",
-    "-extensions/mcp/index.ts",
-    "-extensions/typescript/typescript.ts",
-    "-extensions/langdock.ts"
-  ],
+  "extensions": ["-extensions/learning-review/index.ts"],
   "defaultProvider": "opencode-go",
   "defaultModel": "deepseek-v4.1-flash",
   "defaultThinkingLevel": "xhigh",
@@ -18,6 +12,7 @@
   },
   "hideThinkingBlock": false,
   "treeFilterMode": "no-tools",
+  "defaultTools": ["+codemode"],
   "collapseChangelog": true,
   "quietStartup": false,
   "enableSkillCommands": false,
