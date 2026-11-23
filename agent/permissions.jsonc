@@ -3,23 +3,23 @@
     // Named preset: plan | workspace-write | full-access
     "mode": "workspace-write",
     "rules": [
-      // Allow the global MCP config to be managed from this Pi config workspace.
+      // Allow the user-level MCP config to be managed from any project.
       // Protected resources are still enabled globally; only this file is unprotected below.
       {
         "tool": "read",
-        "match": "^${HOME}/\\.mcp\\.json$",
+        "match": "^${HOME}/\\.pi/agent/mcp\\.json$",
         "action": "allow",
         "externalPathAction": "allow",
       },
       {
         "tool": "write",
-        "match": "^${HOME}/\\.mcp\\.json$",
+        "match": "^${HOME}/\\.pi/agent/mcp\\.json$",
         "action": "allow",
         "externalPathAction": "allow",
       },
       {
         "tool": "edit",
-        "match": "^${HOME}/\\.mcp\\.json$",
+        "match": "^${HOME}/\\.pi/agent/mcp\\.json$",
         "action": "allow",
         "externalPathAction": "allow",
       },
@@ -346,13 +346,13 @@
     "enableWeakerNetworkIsolation": true,
     "allowSshAuthSock": true,
     "allowLocalBinding": true,
-    "addAllowWrite": ["~/.mcporter", "~/.mcp.json"],
+    "addAllowWrite": ["~/.mcporter", "~/.pi/agent/mcp.json"],
   },
   // Classifier used to auto-review "ask" rules when a policy's mode is "auto".
   // The stock default (anthropic/claude-haiku-4-5) has no auth configured here,
   // so point it at the default session model from agent/settings.json.
   "classifier": {
     "provider": "opencode-go",
-    "model": "deepseek-v4-flash",
+    "model": "deepseek-v4.1-flash",
   },
 }
