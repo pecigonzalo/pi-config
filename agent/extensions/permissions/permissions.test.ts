@@ -28,7 +28,7 @@ import {
 	matchRule,
 	ruleMatch,
 } from "./matching";
-import { isFilesystemToolName } from "./shared";
+import { formatPermissionStatus, isFilesystemToolName } from "./shared";
 import {
 	canAutoApproveParsedBash,
 	dangerReasonForCommandText,
@@ -3016,6 +3016,26 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 	});
 
+	it("keeps the footer status to the effective mode while the session is healthy", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const last = harness.statusUpdates[harness.statusUpdates.length - 1];
+			expect(last).toContain("workspace-write");
+			expect(last).not.toContain("sandbox");
+			expect(last).not.toContain("tree-sitter");
+		} finally {
+			await harness.restore();
+		}
+	});
+
 	it("persists session approvals so a reload can rebuild them", async () => {
 		const harness = await setupPermissionsHarness({
 			mode: "workspace-write",
@@ -4367,6 +4387,22 @@ test("permissions completions list all accepted subcommands", () => {
 test("permissions completions filter by prefix", () => {
 	const results = PERMISSIONS_COMPLETIONS.filter((s) => s.value.startsWith("ap"));
 	expect(results.map((s) => s.value)).toEqual(["approvals"]);
+});
+
+describe("permission footer status", () => {
+	it("renders only the mode for a healthy session", () => {
+		expect(formatPermissionStatus({ mode: "workspace-write", parserReady: true })).toBe("workspace-write");
+	});
+
+	it("appends the sandbox problem when the sandbox is not running", () => {
+		expect(formatPermissionStatus({ mode: "plan", sandboxProblem: "sandbox unavailable", parserReady: true })).toBe(
+			"plan · sandbox unavailable",
+		);
+	});
+
+	it("appends no-parser only when tree-sitter is unavailable", () => {
+		expect(formatPermissionStatus({ mode: "auto", parserReady: false })).toBe("auto · no-parser");
+	});
 });
 
 test("permissions completions return nothing for unrecognised prefix", () => {

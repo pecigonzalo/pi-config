@@ -250,3 +250,14 @@ export function isMcpToolName(toolName: string): boolean {
 export function dedupeStrings(items: string[]): string[] {
 	return [...new Set(items)];
 }
+
+/**
+ * Footer text for the permissions status. Only deviations from a healthy session are appended, so a
+ * normal session renders just the mode instead of `mode · sandbox · tree-sitter` noise.
+ */
+export function formatPermissionStatus(input: { mode: string; sandboxProblem?: string; parserReady: boolean }): string {
+	const parts = [input.mode];
+	if (input.sandboxProblem) parts.push(input.sandboxProblem);
+	if (!input.parserReady) parts.push("no-parser");
+	return parts.join(" · ");
+}

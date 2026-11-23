@@ -241,6 +241,7 @@ import { formatPermissionPreview } from "./preview";
 import {
 	FILESYSTEM_TOOL_NAMES,
 	dedupeStrings,
+	formatPermissionStatus,
 	isFilesystemToolName,
 	isMcpToolName,
 	type ApprovalRecord,
@@ -641,15 +642,17 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		sessionBashApprovals.push(...(state.bashApprovals ?? []));
 	}
 
-	/** Persistent footer indicator for the active mode, sandbox, and shell parser state. */
+	/** Footer indicator for the active mode; sandbox and parser state only appear when degraded. */
 	function updatePermissionStatus(ctx: ExtensionContext) {
 		const ui = ctx.ui;
 		if (!ctx.hasUI || typeof ui.setStatus !== "function") return;
 
 		const policy = activePolicy(configWithModeOverride(), agentName, profileName);
-		const sandbox = sandboxState.kind === "active" ? "sandbox" : sandboxState.reason;
-		const parser = treeSitterReady ? "tree-sitter" : "no-parser";
-		let text = `${policy.mode} · ${sandbox} · ${parser}`;
+		const sandboxProblem =
+			sandboxState.kind === "disabled" || sandboxState.kind === "unavailable" || sandboxState.kind === "failed"
+				? sandboxState.reason
+				: undefined;
+		let text = formatPermissionStatus({ mode: policy.mode, sandboxProblem, parserReady: treeSitterReady });
 		try {
 			text = ui.theme.fg("accent", text);
 		} catch {
