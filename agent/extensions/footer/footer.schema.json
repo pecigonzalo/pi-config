@@ -173,6 +173,18 @@
           "minimum": -9007199254740991,
           "maximum": 9007199254740991,
           "description": "Sort order within the row section."
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991,
+          "description": "Width-pressure priority. Higher values survive longer; lower-priority items are dropped first when the row does not fit."
+        },
+        "maxWidth": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Maximum visible width for the item; longer output is truncated with an ellipsis."
         }
       },
       "additionalProperties": false

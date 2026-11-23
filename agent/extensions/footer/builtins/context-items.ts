@@ -14,48 +14,48 @@ const pathModes: Record<FooterLayoutName, PathMode> = {
 
 const defaultPlacements: Record<SegmentId, Partial<Record<FooterLayoutName, FooterPlacement>>> = {
 	path: {
-		default: { row: "context", section: "a", order: 10 },
-		minimal: { row: "context", section: "a", order: 10 },
-		compact: { row: "context", section: "a", order: 10 },
-		full: { row: "context", section: "a", order: 10 },
+		default: { row: "context", section: "a", order: 10, priority: 100 },
+		minimal: { row: "context", section: "a", order: 10, priority: 100 },
+		compact: { row: "context", section: "a", order: 10, priority: 100 },
+		full: { row: "context", section: "a", order: 10, priority: 100 },
 	},
 	git: {
-		default: { row: "context", section: "b", order: 10 },
-		minimal: { row: "context", section: "b", order: 10 },
-		compact: { row: "context", section: "b", order: 10 },
-		full: { row: "context", section: "b", order: 10 },
+		default: { row: "context", section: "b", order: 10, priority: 95 },
+		minimal: { row: "context", section: "b", order: 10, priority: 95 },
+		compact: { row: "context", section: "b", order: 10, priority: 95 },
+		full: { row: "context", section: "b", order: 10, priority: 95 },
 	},
 	agent: {
-		default: { row: "context", section: "c", order: 10 },
-		compact: { row: "context", section: "c", order: 10 },
-		full: { row: "context", section: "c", order: 10 },
+		default: { row: "context", section: "c", order: 10, priority: 40 },
+		compact: { row: "context", section: "c", order: 10, priority: 40 },
+		full: { row: "context", section: "c", order: 10, priority: 40 },
 	},
 	model: {
-		default: { row: "context", section: "c", order: 20 },
-		compact: { row: "context", section: "c", order: 20 },
-		full: { row: "context", section: "c", order: 20 },
+		default: { row: "context", section: "c", order: 20, priority: 80, maxWidth: 34 },
+		compact: { row: "context", section: "c", order: 20, priority: 80, maxWidth: 34 },
+		full: { row: "context", section: "c", order: 20, priority: 80, maxWidth: 34 },
 	},
 	thinking: {
-		default: { row: "context", section: "c", order: 30 },
-		full: { row: "context", section: "c", order: 30 },
+		default: { row: "context", section: "c", order: 30, priority: 30 },
+		full: { row: "context", section: "c", order: 30, priority: 30 },
 	},
 	context: {
-		default: { row: "context", section: "x", order: 10 },
-		minimal: { row: "context", section: "z", order: 10 },
-		compact: { row: "context", section: "y", order: 10 },
-		full: { row: "context", section: "x", order: 10 },
+		default: { row: "context", section: "x", order: 10, priority: 90 },
+		minimal: { row: "context", section: "z", order: 10, priority: 90 },
+		compact: { row: "context", section: "y", order: 10, priority: 90 },
+		full: { row: "context", section: "x", order: 10, priority: 90 },
 	},
 	tokens: {
-		default: { row: "context", section: "y", order: 10 },
-		full: { row: "context", section: "y", order: 10 },
+		default: { row: "context", section: "y", order: 10, priority: 20 },
+		full: { row: "context", section: "y", order: 10, priority: 20 },
 	},
 	cost: {
-		default: { row: "context", section: "z", order: 10 },
-		compact: { row: "context", section: "z", order: 10 },
-		full: { row: "context", section: "z", order: 10 },
+		default: { row: "context", section: "z", order: 10, priority: 10 },
+		compact: { row: "context", section: "z", order: 10, priority: 10 },
+		full: { row: "context", section: "z", order: 10, priority: 10 },
 	},
 	time_spent: {
-		full: { row: "context", section: "z", order: 20 },
+		full: { row: "context", section: "z", order: 20, priority: 15 },
 	},
 };
 
@@ -79,6 +79,7 @@ function shouldHideForStarship(
 		row: "context",
 		section: "a",
 		order: 5,
+		priority: 100,
 	});
 	const isLeftSide =
 		starshipPlacement?.row === "context" &&

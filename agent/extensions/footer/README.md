@@ -160,7 +160,46 @@ Example:
   `sectionSeparator`, optional `rightSectionSeparator`) and order, or add a
   new custom row
 - `layouts.<name>.items.<itemId>`: override `enabled`, `row`, `section`,
-  `order`
+  `order`, `priority`, `maxWidth`
+
+### Width degradation
+
+Each item can declare a `priority` and a `maxWidth`. When a row does not fit
+the terminal, the footer drops whole priority tiers, lowest first, instead of
+truncating the left side. The highest-priority tier is always kept, so a row
+never disappears; if even that tier is too wide it is truncated as before.
+
+Default priorities (higher survives longer):
+
+| Item | Priority |
+| --- | --- |
+| `starship`, `path` | 100 |
+| `git` | 95 |
+| `context` | 90 |
+| `model` | 80 |
+| `agent` | 40 |
+| `thinking` | 30 |
+| `tokens` | 20 |
+| `time_spent` | 15 |
+| `cost` | 10 |
+| `extension-statuses` | 5 |
+
+`model` defaults to `maxWidth: 34` and `extension-statuses` to `maxWidth: 64`.
+Items without a priority share the default tier `0`; when every item has the
+same priority nothing is dropped and the row falls back to truncation.
+
+```jsonc
+{
+  "layouts": {
+    "default": {
+      "items": {
+        "cost": { "priority": 40 },
+        "model": { "maxWidth": 24 },
+      },
+    },
+  },
+}
+```
 
 ## Status filters
 
@@ -240,9 +279,18 @@ If Starship is missing or fails, the footer falls back to the built-in
 - `extension-statuses`
 
 The `tokens` and `cost` items total usage from assistant and tool-result
-messages, cache-warming usage entries, compaction, and branch summaries.
-Cache reads and writes appear as `R` and `W` beside the in/out totals when
-nonzero.
+messages, cache-warming usage entries, compaction, and branch summaries. Cache
+reads and writes appear as `R` and `W` beside the in/out totals only when the
+session has cache writes; input and output totals render otherwise.
+
+Defaults that carry no information are suppressed instead of padded:
+
+- `agent` renders only when the agent name is not `default`
+- `thinking` renders only when the level differs from the level captured at
+  session start
+- `context` renders as an integer percentage below 90%, then adds the context
+  window (`92%/1.0M`) in the warning and error range
+- `cost` renders with two decimals
 
 ## See also
 

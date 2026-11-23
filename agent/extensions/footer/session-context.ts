@@ -280,6 +280,7 @@ export interface SessionContextController {
 export function createSessionContextController(pi: ExtensionAPI): SessionContextController {
 	let requestRender: (() => void) | undefined;
 	let sessionStart = Date.now();
+	let baselineThinkingLevel: string | undefined;
 	let cachedUsageTotals: { leafId: unknown; totals: ReturnType<typeof getUsageTotals> } | undefined;
 	const delayedRenderTimers = new Set<ReturnType<typeof setTimeout>>();
 
@@ -316,6 +317,7 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
 
 		onSessionStart() {
 			sessionStart = Date.now();
+			baselineThinkingLevel = pi.getThinkingLevel();
 			gitInvalidate();
 			invalidateUsageTotals();
 			requestRender?.();
@@ -385,20 +387,21 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
 				}
 
 				case "agent": {
-					const label = getDisplayedAgentName(pi) || "default";
-					return theme.fg(label === "default" ? "dim" : "accent", `${icons.agent} ${label}`.trim());
+					const label = getDisplayedAgentName(pi);
+					if (label === "default") return null;
+					return theme.fg("accent", `${icons.agent} ${label}`.trim());
 				}
 
 				case "model": {
 					if (!ctx.model) return null;
-					let id = ctx.model.id.replace(/^claude-/, "").replace(/-\d{8}$/, "");
-					if (id.length > 22) id = `${id.slice(0, 21)}…`;
+					const id = ctx.model.id.replace(/^claude-/, "").replace(/-\d{8}$/, "");
 					return hexFg(modelColor, `${icons.model} ${ctx.model.provider}/${id}`);
 				}
 
 				case "thinking": {
 					const thinkingLevel = pi.getThinkingLevel();
 					if (thinkingLevel === "off") return null;
+					if (thinkingLevel === baselineThinkingLevel) return null;
 					const label: Record<string, string> = {
 						minimal: "min",
 						low: "low",
@@ -427,7 +430,8 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
 						usage?.tokens != null && ctxMax ? Math.min(100, (usage.tokens / ctxMax) * 100) : null;
 					if (ctxPct === null) return null;
 					const color = ctxPct >= 90 ? "error" : ctxPct >= 70 ? "warning" : "dim";
-					const label = ctxMax ? `${ctxPct.toFixed(1)}%/${fmtNum(ctxMax)}` : `${ctxPct.toFixed(1)}%`;
+					const label =
+						ctxMax && ctxPct >= 90 ? `${Math.round(ctxPct)}%/${fmtNum(ctxMax)}` : `${Math.round(ctxPct)}%`;
 					return theme.fg(color, `${icons.ctx} ${label}`);
 				}
 
@@ -435,7 +439,7 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
 					const { tokIn, tokOut, cacheRead, cacheWrite } = getCachedUsageTotals(ctx);
 					if (!tokIn && !tokOut) return null;
 					const parts = [`${icons.tokIn} ${fmtNum(tokIn)}`, `${icons.tokOut} ${fmtNum(tokOut)}`];
-					if (cacheRead > 0 || cacheWrite > 0) {
+					if (cacheWrite > 0) {
 						parts.push(`R${fmtNum(cacheRead)}`, `W${fmtNum(cacheWrite)}`);
 					}
 					return theme.fg("muted", parts.join(" "));
@@ -443,7 +447,7 @@ export function createSessionContextController(pi: ExtensionAPI): SessionContext
 
 				case "cost": {
 					const { cost } = getCachedUsageTotals(ctx);
-					return cost ? theme.fg("text", `${icons.cost}${cost.toFixed(3)}`) : null;
+					return cost ? theme.fg("text", `${icons.cost}${cost.toFixed(2)}`) : null;
 				}
 
 				case "time_spent": {

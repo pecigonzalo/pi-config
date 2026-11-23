@@ -13,6 +13,10 @@ export interface FooterPlacement {
 	row: string;
 	section: FooterSection;
 	order?: number;
+	/** Width-pressure priority. Higher values survive while lower values are dropped first. */
+	priority?: number;
+	/** Maximum visible width for the rendered item; longer output is truncated with an ellipsis. */
+	maxWidth?: number;
 }
 
 export interface FooterRowDefinition {

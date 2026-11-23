@@ -24,6 +24,21 @@ export const footerItemOverrideSchema = z.object({
 	row: z.string().describe("Row id where the item should render.").optional().catch(undefined),
 	section: footerSectionSchema.describe("Footer section for this item.").optional().catch(undefined),
 	order: z.number().int().describe("Sort order within the row section.").optional().catch(undefined),
+	priority: z
+		.number()
+		.int()
+		.describe(
+			"Width-pressure priority. Higher values survive longer; lower-priority items are dropped first when the row does not fit.",
+		)
+		.optional()
+		.catch(undefined),
+	maxWidth: z
+		.number()
+		.int()
+		.positive()
+		.describe("Maximum visible width for the item; longer output is truncated with an ellipsis.")
+		.optional()
+		.catch(undefined),
 });
 
 export const footerRowOverrideSchema = z.object({

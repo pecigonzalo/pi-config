@@ -5,10 +5,10 @@ import type { StarshipController } from "../starship";
 const owner = "footer";
 
 const defaultPlacements: Record<FooterLayoutName, FooterPlacement> = {
-	default: { row: "context", section: "a", order: 5 },
-	minimal: { row: "context", section: "a", order: 5 },
-	compact: { row: "context", section: "a", order: 5 },
-	full: { row: "context", section: "a", order: 5 },
+	default: { row: "context", section: "a", order: 5, priority: 100 },
+	minimal: { row: "context", section: "a", order: 5, priority: 100 },
+	compact: { row: "context", section: "a", order: 5, priority: 100 },
+	full: { row: "context", section: "a", order: 5, priority: 100 },
 };
 
 export function createStarshipItems(starship: StarshipController, config: FooterConfigController): FooterItem[] {

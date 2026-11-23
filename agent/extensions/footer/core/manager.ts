@@ -111,6 +111,8 @@ function createExtensionStatusItem(footerData: ReadonlyFooterDataProvider, confi
 				row: "context",
 				section: "z",
 				order: 1000,
+				priority: 5,
+				maxWidth: 64,
 			}),
 		render: ({ theme }) => {
 			const statuses = formatExtensionStatuses(footerData.getExtensionStatuses(), config.getStatusFilter());

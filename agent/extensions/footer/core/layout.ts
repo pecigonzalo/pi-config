@@ -10,13 +10,18 @@ import type {
 
 const LEFT_SECTIONS: FooterSection[] = ["a", "b", "c"];
 const RIGHT_SECTIONS: FooterSection[] = ["x", "y", "z"];
+const ELLIPSIS = "…";
 
 interface PositionedFooterItem {
 	item: FooterItem;
 	placement: FooterPlacement;
 }
 
-function sortPositionedItems(items: PositionedFooterItem[]): PositionedFooterItem[] {
+interface RenderedFooterItem extends PositionedFooterItem {
+	text: string;
+}
+
+function sortPositionedItems<T extends PositionedFooterItem>(items: T[]): T[] {
 	return [...items].sort((left, right) => {
 		const leftOrder = left.placement.order ?? 0;
 		const rightOrder = right.placement.order ?? 0;
@@ -25,16 +30,10 @@ function sortPositionedItems(items: PositionedFooterItem[]): PositionedFooterIte
 	});
 }
 
-function renderSection(
-	items: PositionedFooterItem[],
-	row: FooterRowDefinition,
-	renderContext: FooterItemRenderContext,
-): string {
-	const parts = sortPositionedItems(items)
-		.map(({ item }) => item.render(renderContext))
-		.filter((part): part is string => Boolean(part));
-
-	return parts.join(row.itemSeparator);
+function renderSection(items: RenderedFooterItem[], row: FooterRowDefinition): string {
+	return sortPositionedItems(items)
+		.map(({ text }) => text)
+		.join(row.itemSeparator);
 }
 
 function collectRowItems(
@@ -51,51 +50,95 @@ function collectRowItems(
 	return positioned;
 }
 
-function buildRowContent(
+function renderRowItems(
 	items: Iterable<FooterItem>,
 	layout: FooterLayoutDefinition,
 	row: FooterRowDefinition,
 	renderContext: FooterItemRenderContext,
-): string {
-	const positionedItems = collectRowItems(items, layout, row);
-	const sections = new Map<FooterSection, PositionedFooterItem[]>();
+): RenderedFooterItem[] {
+	const rendered: RenderedFooterItem[] = [];
 
-	for (const positioned of positionedItems) {
+	for (const positioned of collectRowItems(items, layout, row)) {
+		const text = positioned.item.render(renderContext);
+		if (!text) continue;
+
+		const maxWidth = positioned.placement.maxWidth;
+		rendered.push({ ...positioned, text: maxWidth ? truncateToWidth(text, maxWidth, ELLIPSIS) : text });
+	}
+
+	return rendered;
+}
+
+function composeSections(rendered: RenderedFooterItem[], row: FooterRowDefinition): { left: string; right: string } {
+	const sections = new Map<FooterSection, RenderedFooterItem[]>();
+
+	for (const positioned of rendered) {
 		const sectionItems = sections.get(positioned.placement.section) ?? [];
 		sectionItems.push(positioned);
 		sections.set(positioned.placement.section, sectionItems);
 	}
 
-	const left = LEFT_SECTIONS.map((section) => renderSection(sections.get(section) ?? [], row, renderContext))
+	const left = LEFT_SECTIONS.map((section) => renderSection(sections.get(section) ?? [], row))
 		.filter(Boolean)
 		.join(row.sectionSeparator);
-	const right = RIGHT_SECTIONS.map((section) => renderSection(sections.get(section) ?? [], row, renderContext))
+	const right = RIGHT_SECTIONS.map((section) => renderSection(sections.get(section) ?? [], row))
 		.filter(Boolean)
 		.join(row.rightSectionSeparator ?? row.sectionSeparator);
 
-	if (left && right) return `${left}\u0000${right}`;
-	return left || right;
+	return { left, right };
 }
 
-function fitRowContent(content: string, width: number): string {
+function priorityOf(placement: FooterPlacement): number {
+	return placement.priority ?? 0;
+}
+
+function fitsWithin(left: string, right: string, contentWidth: number): boolean {
+	if (left && right) return visibleWidth(left) + 1 + visibleWidth(right) <= contentWidth;
+	return visibleWidth(left || right) <= contentWidth;
+}
+
+/**
+ * Drop whole priority tiers until the row fits. The highest-priority tier is
+ * always kept, so a row never disappears; if even that tier is too wide the
+ * caller falls back to truncation.
+ */
+function fitByPriority(
+	rendered: RenderedFooterItem[],
+	row: FooterRowDefinition,
+	contentWidth: number,
+): { left: string; right: string } {
+	const priorities = [...new Set(rendered.map(({ placement }) => priorityOf(placement)))].sort(
+		(left, right) => left - right,
+	);
+	let active = rendered;
+
+	for (let dropped = 0; ; dropped++) {
+		const composed = composeSections(active, row);
+		if (fitsWithin(composed.left, composed.right, contentWidth)) return composed;
+		if (dropped >= priorities.length - 1) return composed;
+
+		const droppedPriority = priorities[dropped];
+		active = active.filter(({ placement }) => priorityOf(placement) !== droppedPriority);
+	}
+}
+
+function padRight(text: string, width: number): string {
+	return `${text}${" ".repeat(Math.max(0, width - visibleWidth(text)))}`;
+}
+
+function fitRowContent(left: string, right: string, width: number): string {
 	if (width <= 0) return "";
 	if (width === 1) return " ";
 
 	const contentWidth = Math.max(0, width - 2);
-	if (!content.includes("\u0000")) {
-		const single = truncateToWidth(content, contentWidth);
-		return ` ${single}`.padEnd(width, " ");
-	}
-
-	const [rawLeft, rawRight] = content.split("\u0000", 2);
-	const left = rawLeft ?? "";
-	const right = rawRight ?? "";
-
 	if (contentWidth <= 0) return " ".repeat(width);
+	if (!left && !right) return " ".repeat(width);
+	if (!right) return padRight(` ${truncateToWidth(left, contentWidth)}`, width);
+	if (!left) return padRight(` ${truncateToWidth(right, contentWidth)}`, width);
 
 	const rightWidth = visibleWidth(right);
 	if (rightWidth >= contentWidth) {
-		return ` ${truncateToWidth(right, contentWidth)}`.padEnd(width, " ");
+		return padRight(` ${truncateToWidth(right, contentWidth)}`, width);
 	}
 
 	const maxLeftWidth = Math.max(0, contentWidth - rightWidth - 1);
@@ -103,7 +146,7 @@ function fitRowContent(content: string, width: number): string {
 	const gapWidth = Math.max(1, contentWidth - visibleWidth(fittedLeft) - rightWidth);
 	const combined = `${fittedLeft}${" ".repeat(gapWidth)}${right}`;
 
-	return ` ${truncateToWidth(combined, contentWidth)}`.padEnd(width, " ");
+	return padRight(` ${truncateToWidth(combined, contentWidth)}`, width);
 }
 
 export function renderFooterLines(
@@ -113,11 +156,13 @@ export function renderFooterLines(
 	width: number,
 ): string[] {
 	const itemList = [...items];
+	const contentWidth = Math.max(0, width - 2);
 
 	return [...layout.rows]
 		.sort((left, right) => (left.order ?? 0) - (right.order ?? 0))
 		.map((row) => {
-			const content = buildRowContent(itemList, layout, row, { ...renderContext, rowId: row.id, width });
-			return fitRowContent(content || "", width);
+			const rendered = renderRowItems(itemList, layout, row, { ...renderContext, rowId: row.id, width });
+			const { left, right } = fitByPriority(rendered, row, contentWidth);
+			return fitRowContent(left, right, width);
 		});
 }

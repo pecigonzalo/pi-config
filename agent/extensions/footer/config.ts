@@ -156,6 +156,8 @@ function mergeItemOverride(
 		row: override?.row ?? base?.row,
 		section: override?.section ?? base?.section,
 		order: override?.order ?? base?.order,
+		priority: override?.priority ?? base?.priority,
+		maxWidth: override?.maxWidth ?? base?.maxWidth,
 	};
 }
 
@@ -295,8 +297,10 @@ export class FooterConfigController {
 		const row = override.row ?? fallback?.row;
 		const section = override.section ?? fallback?.section;
 		const order = override.order ?? fallback?.order;
+		const priority = override.priority ?? fallback?.priority;
+		const maxWidth = override.maxWidth ?? fallback?.maxWidth;
 
-		return row && section ? { row, section, order } : fallback;
+		return row && section ? { row, section, order, priority, maxWidth } : fallback;
 	}
 
 	getResolvedLayouts(baseLayouts: FooterLayoutDefinition[]): FooterLayoutDefinition[] {
