@@ -3,7 +3,6 @@
   "lastChangelogVersion": "1.6.0",
   "theme": "dracula",
   "tuiMode": "regular",
-  "extensions": ["-extensions/learning-review/index.ts"],
   "defaultProvider": "opencode-go",
   "defaultModel": "deepseek-v4.1-flash",
   "defaultThinkingLevel": "xhigh",
