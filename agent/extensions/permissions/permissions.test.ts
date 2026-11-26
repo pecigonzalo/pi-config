@@ -121,6 +121,12 @@ const DEFAULT_PROTECTED_RESOURCES = {
 	envWriteAction: "ask" as const,
 };
 
+const noopSandboxManager = {
+	initialize: async () => {},
+	reset: async () => {},
+	wrapWithSandbox: async (command: string) => command,
+};
+
 let configModule: typeof import("./config");
 
 beforeAll(async () => {
@@ -1936,15 +1942,10 @@ describe("permissions extension sandbox lifecycle", () => {
 			approvalSelection,
 			blockReason,
 			approvalOptions,
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			const result = (await toolCall({ toolName: "read", input: { path: "README.md" } }, harness.ctx)) as
 				| { block: true; reason: string }
 				| undefined;
@@ -1954,21 +1955,17 @@ describe("permissions extension sandbox lifecycle", () => {
 		}
 	}
 
-	const noopSandboxManager = {
-		initialize: async () => {},
-		reset: async () => {},
-		wrapWithSandbox: async (command: string) => command,
+	const firstToolCall = (harness: Awaited<ReturnType<typeof setupPermissionsHarness>>) => {
+		const handler = harness.handlers.get("tool_call")?.[0];
+		if (!handler) throw new Error("tool_call handler was not registered");
+		return handler;
 	};
 
 	const callTool = async (
 		harness: Awaited<ReturnType<typeof setupPermissionsHarness>>,
 		toolName: string,
 		input: Record<string, unknown>,
-	): Promise<unknown> => {
-		const handler = harness.handlers.get("tool_call")?.[0];
-		if (!handler) throw new Error("tool_call handler was not registered");
-		return handler({ toolName, input }, harness.ctx);
-	};
+	): Promise<unknown> => firstToolCall(harness)({ toolName, input }, harness.ctx);
 
 	it("read-exempts env templates at the tool_call boundary", async () => {
 		const approvalTitles: string[] = [];
@@ -2175,11 +2172,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			mode: "full-access",
 			rules: [{ tool: "read", action: "ask" }],
 			now: () => 0,
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			try {
@@ -2191,8 +2184,7 @@ describe("permissions extension sandbox lifecycle", () => {
 				throw error;
 			}
 
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			await expect(
 				toolCall({ toolName: "read", input: { path: "cycle-a/secret.txt" } }, harness.ctx),
 			).rejects.toThrow("Unable to safely resolve symlink chain");
@@ -2242,8 +2234,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			},
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
 			expect(approvalTitles[0]).toContain(`Command:\n  ${command}`);
 			expect(approvalTitles[0]).toContain(`Unapproved segment:\n  ${dangerousSuffix}`);
@@ -2279,8 +2270,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			},
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
 
 			const title = approvalTitles[0] ?? "";
@@ -2317,8 +2307,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			},
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
 			const title = approvalTitles[0] ?? "";
 			expect(title).toContain("Command:\n");
@@ -2352,8 +2341,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			},
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
 			const title = approvalTitles[0] ?? "";
 			expect(title).toContain(`\n  ${finalLine}\n\nUnapproved segment:\n  printf `);
@@ -2386,8 +2374,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			},
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
 			const title = approvalTitles[0] ?? "";
 			const options = approvalOptions[0] ?? [];
@@ -2427,8 +2414,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			},
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			await toolCall({ toolName: "bash", input: { command: `echo ${"x".repeat(2_000)}` } }, harness.ctx);
 			await toolCall({ toolName: "mcp", input: { command: "y".repeat(2_000) } }, harness.ctx);
 			expect(approvalTitles).toHaveLength(2);
@@ -2475,15 +2461,10 @@ describe("permissions extension sandbox lifecycle", () => {
 				writeApprovalFile: () => {
 					throw new Error("injected save failure");
 				},
-				sandboxManager: {
-					initialize: async () => {},
-					reset: async () => {},
-					wrapWithSandbox: async (command: string) => command,
-				},
+				sandboxManager: noopSandboxManager,
 			});
 			try {
-				const toolCall = harness.handlers.get("tool_call")?.[0];
-				if (!toolCall) throw new Error("tool_call handler was not registered");
+				const toolCall = firstToolCall(harness);
 				await toolCall({ toolName, input }, harness.ctx);
 				await toolCall({ toolName, input }, harness.ctx);
 
@@ -2517,15 +2498,10 @@ describe("permissions extension sandbox lifecycle", () => {
 				writes++;
 				if (writes > 1) throw new Error("reset save failure");
 			},
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			await toolCall({ toolName: "read", input: { path: "reset-save-failure.txt" } }, harness.ctx);
 			await harness.commands.get("permissions")?.handler("reset saved", harness.ctx);
 
@@ -2555,11 +2531,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			mode: "workspace-write",
 			now: () => now,
 			notifications,
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			await harness.commands.get("permissions")?.handler("sandbox status", harness.ctx);
@@ -2576,7 +2548,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			mode: "workspace-write",
 			now: () => 0,
 			notifications,
-			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (c) => c },
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			await harness.commands.get("permissions")?.handler("mode", harness.ctx);
@@ -2593,7 +2565,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			mode: "workspace-write",
 			now: () => 0,
 			notifications,
-			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (c) => c },
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			await harness.commands.get("permissions")?.handler("mode auto", harness.ctx);
@@ -2612,7 +2584,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			mode: "workspace-write",
 			now: () => 0,
 			notifications,
-			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (c) => c },
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			await harness.commands.get("permissions")?.handler("mode bogus", harness.ctx);
@@ -2631,7 +2603,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			mode: "workspace-write",
 			now: () => 0,
 			notifications,
-			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (c) => c },
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			await harness.commands.get("permissions")?.handler("mode auto", harness.ctx);
@@ -2656,11 +2628,10 @@ describe("permissions extension sandbox lifecycle", () => {
 				confidence: 0.97,
 				rationale: "matches the requested build step",
 			}),
-			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (c) => c },
+			sandboxManager: noopSandboxManager,
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			const result = await toolCall(
 				{ toolName: "bash", input: { command: "some-uncommon-tool --version" } },
 				harness.ctx,
@@ -2679,7 +2650,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			mode: "workspace-write",
 			now: () => 0,
 			notifications,
-			sandboxManager: { initialize: async () => {}, reset: async () => {}, wrapWithSandbox: async (c) => c },
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			await harness.commands.get("permissions")?.handler("mode auto", harness.ctx);
@@ -2699,11 +2670,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			mode: "plan",
 			now: () => now,
 			notifications,
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			await harness.commands.get("permissions")?.handler("sandbox disable", harness.ctx);
@@ -3172,11 +3139,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		const harness = await setupPermissionsHarness({
 			mode: "workspace-write",
 			now: () => now,
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			const userBash = harness.handlers.get("user_bash")?.[0];
@@ -3237,11 +3200,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		const harness = await setupPermissionsHarness({
 			mode: "full-access",
 			now: () => 0,
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			await harness.commands.get("permissions")?.handler("sandbox disable", harness.ctx);
@@ -3331,11 +3290,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		const harness = await setupPermissionsHarness({
 			mode: "workspace-write",
 			now: () => 0,
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			expect(harness.registeredFlags).toEqual(expect.arrayContaining(["agent-name", "no-sandbox"]));
@@ -3352,11 +3307,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			now: () => 0,
 			flags: { "profile-name": "read-only" },
 			config: { profiles: { "read-only": { inherit: true, mode: "plan" } } },
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			const last = harness.statusUpdates[harness.statusUpdates.length - 1];
@@ -3371,11 +3322,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			mode: "workspace-write",
 			now: () => 0,
 			branchEntries: [{ type: "custom", customType: "permissions-state", data: { modeOverride: "plan" } }],
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			const last = harness.statusUpdates[harness.statusUpdates.length - 1];
@@ -3390,11 +3337,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			mode: "workspace-write",
 			now: () => 0,
 			branchEntries: [{ type: "custom", customType: "permissions-state", data: { modeOverride: "nonsense" } }],
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			const last = harness.statusUpdates[harness.statusUpdates.length - 1];
@@ -3408,11 +3351,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		const harness = await setupPermissionsHarness({
 			mode: "workspace-write",
 			now: () => 0,
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			const last = harness.statusUpdates[harness.statusUpdates.length - 1];
@@ -3430,15 +3369,10 @@ describe("permissions extension sandbox lifecycle", () => {
 			rules: [{ tool: "read", action: "ask" }],
 			now: () => 1_000,
 			approvalSelection: (choices) => choices.find((choice) => choice.startsWith("Allow file for this session")),
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			const result = await toolCall({ toolName: "read", input: { path: "README.md" } }, harness.ctx);
 			expect(result).toBeUndefined();
 
@@ -3454,11 +3388,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		const harness = await setupPermissionsHarness({
 			mode: "workspace-write",
 			now: () => 0,
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			expect(harness.statusUpdates.length).toBeGreaterThan(0);
@@ -3475,11 +3405,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		const harness = await setupPermissionsHarness({
 			mode: "workspace-write",
 			now: () => 0,
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			const beforeAgentStart = harness.handlers.get("before_agent_start")?.[0];
@@ -3504,11 +3430,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			mode: "full-access",
 			sandbox: { enabled: false },
 			now: () => 0,
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			const beforeAgentStart = harness.handlers.get("before_agent_start")?.[0];
@@ -3535,15 +3457,10 @@ describe("permissions extension sandbox lifecycle", () => {
 			approvalTitles,
 			approvalSelection: "Allow once",
 			registeredTools: [{ name: "some_extension_tool", parameters: { properties: {} } }],
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			const result = await toolCall({ toolName: "some_extension_tool", input: {} }, harness.ctx);
 			expect(result).toBeUndefined();
 			expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
@@ -3562,15 +3479,10 @@ describe("permissions extension sandbox lifecycle", () => {
 			registeredTools: [
 				{ name: "mcp__docs__search", parameters: { properties: {} }, annotations: { readOnlyHint: true } },
 			],
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			const result = await toolCall({ toolName: "mcp__docs__search", input: { query: "x" } }, harness.ctx);
 			expect(result).toBeUndefined();
 			expect(approvalTitles).toHaveLength(0);
@@ -3589,15 +3501,10 @@ describe("permissions extension sandbox lifecycle", () => {
 			registeredTools: [
 				{ name: "purger", parameters: { properties: {} }, annotations: { destructiveHint: true } },
 			],
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			const result = await toolCall({ toolName: "purger", input: {} }, harness.ctx);
 			expect(result).toBeUndefined();
 			expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
@@ -3653,15 +3560,10 @@ describe("permissions extension sandbox lifecycle", () => {
 				approvalTitles,
 				approvalSelection: "Allow once",
 				registeredTools: [{ name: toolName, parameters: { properties: {} }, annotations }],
-				sandboxManager: {
-					initialize: async () => {},
-					reset: async () => {},
-					wrapWithSandbox: async (command: string) => command,
-				},
+				sandboxManager: noopSandboxManager,
 			});
 			try {
-				const toolCall = harness.handlers.get("tool_call")?.[0];
-				if (!toolCall) throw new Error("tool_call handler was not registered");
+				const toolCall = firstToolCall(harness);
 				const result = await toolCall({ toolName, input: {} }, harness.ctx);
 				expect(result).toBeUndefined();
 				if (expectPrompt) {
@@ -3684,15 +3586,10 @@ describe("permissions extension sandbox lifecycle", () => {
 			approvalSelection: "Block",
 			registeredTools: [{ name: "some_extension_tool", parameters: { properties: {} } }],
 			config: { annotations: { enabled: false } },
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			const result = await toolCall({ toolName: "some_extension_tool", input: {} }, harness.ctx);
 			expect(result).toBeUndefined();
 			expect(approvalTitles).toHaveLength(0);
@@ -3709,11 +3606,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			now: () => 0,
 			notifications,
 			registeredTools: [{ name: "custom_path_tool", parameters: { properties: { path: {} } } }],
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			const command = harness.commands.get("permissions");
@@ -3731,11 +3624,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		const harness = await setupPermissionsHarness({
 			mode: "workspace-write",
 			now: () => 0,
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			const events = harness.emittedEvents.filter((entry) => entry.channel === "permissions:policy-changed");
@@ -3758,15 +3647,10 @@ describe("permissions extension sandbox lifecycle", () => {
 			approvalTitles,
 			approvalSelection: "Allow once",
 			registeredTools: [{ name: "mcp__github__create_issue", parameters: { properties: {} } }],
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			await toolCall({ toolName: "mcp__github__create_issue", input: { title: "x" } }, harness.ctx);
 			expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
 		} finally {
@@ -3783,15 +3667,10 @@ describe("permissions extension sandbox lifecycle", () => {
 			approvalTitles,
 			approvalSelection: "Block",
 			registeredTools: [{ name: "mcp__github__create_issue", parameters: { properties: {} } }],
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
-			const toolCall = harness.handlers.get("tool_call")?.[0];
-			if (!toolCall) throw new Error("tool_call handler was not registered");
+			const toolCall = firstToolCall(harness);
 			const result = await toolCall(
 				{ toolName: "mcp__github__create_issue", input: { title: "x" } },
 				harness.ctx,
@@ -3807,11 +3686,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		const harness = await setupPermissionsHarness({
 			mode: "workspace-write",
 			now: () => 0,
-			sandboxManager: {
-				initialize: async () => {},
-				reset: async () => {},
-				wrapWithSandbox: async (command: string) => command,
-			},
+			sandboxManager: noopSandboxManager,
 		});
 		try {
 			const handler = harness.handlers.get("resources_discover")?.[0];
