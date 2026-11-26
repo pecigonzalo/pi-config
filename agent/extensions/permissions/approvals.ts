@@ -188,3 +188,20 @@ export function approvalsCoverBash(
 	if (!command.trim()) return false;
 	return approvals.some((a) => bashApprovalMatches(a, command, projectRoot, agentName, settings));
 }
+
+/**
+ * Whole-command approval: exact matches only. A `bash-prefix` approval scopes one parsed
+ * segment, never a chain, so `cd *` cannot approve `cd /x && rm -rf y` as a whole.
+ */
+export function approvalsCoverBashCommand(
+	approvals: ApprovalRecord[],
+	command: string,
+	projectRoot: string,
+	agentName: string,
+	settings: ResolvedApprovalsSettings,
+): boolean {
+	if (!command.trim()) return false;
+	return approvals.some(
+		(a) => a.scopeType === "bash-exact" && bashApprovalMatches(a, command, projectRoot, agentName, settings),
+	);
+}

@@ -281,6 +281,7 @@ function unwrapCommand(cmd: ParsedCommand): ParsedCommand | undefined {
 //   - expansions/substitutions make the value unknowable → not safe
 //   - bare `set` dumps the environment; wrappers with a target (`command foo`) are
 //     not safe here — unwrapCommand evaluates the inner command instead
+//   - a directory change is safe on its own: anything chained after it is a separate segment
 
 const SAFE_SLEEP_MAX_SECONDS = 600; // generous for build waits; blocks `sleep 999999`
 const SLEEP_DURATION_RE = /^([0-9]+(?:\.[0-9]+)?)([smhd])?$/i;
@@ -326,6 +327,14 @@ function isSafeCommandLookup(tokens: string[]): boolean {
 	return sawLookupFlag;
 }
 
+function isSafeCd(tokens: string[]): boolean {
+	// A directory change writes nothing, runs no code, and does not outlive this single shell
+	// invocation. Commands chained after it (`cd /x && rm y`) are separate parsed segments and
+	// are still judged individually, so skipping `cd` cannot smuggle a side effect through.
+	// More than one target is a shell usage error, which is harmless.
+	return tokens.length <= 2;
+}
+
 /**
  * True when the parsed segment is statically provable to be side-effect-free or
  * trivially bounded and reversible: safe even without any matching allow rule.
@@ -340,6 +349,8 @@ export function isSafeShellSegment(cmd: ParsedCommand): boolean {
 			return isSafeSet(cmd.tokens);
 		case "command":
 			return isSafeCommandLookup(cmd.tokens);
+		case "cd":
+			return isSafeCd(cmd.tokens);
 		case "true":
 		case "false":
 		case ":":

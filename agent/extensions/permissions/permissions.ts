@@ -205,6 +205,7 @@ import { writeApprovalFileAtomic } from "./approval-store";
 import { classifyPermissionRequest as classifyPermissionRequestDefault } from "./classifier";
 import {
 	approvalsCoverBash,
+	approvalsCoverBashCommand,
 	approvalsCoverPaths,
 	approvalsCoverTool,
 	dedupeApprovals,
@@ -1235,13 +1236,17 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 
 		if (toolName === "bash") {
 			const command = getCommandInput(input) ?? "";
-			const approvalTarget = bashFocusCommand?.trim() ? bashFocusCommand.trim() : command;
-			// Use tree-sitter arity-based prefix when available, fall back to simple first-word
-			const uniquePrefixCandidates = parsedFocusCommand
-				? dedupeStrings([parsedFocusCommand.prefixTokens.join(" ")].filter(Boolean))
-				: dedupeStrings(
-						[approvalTarget.trim().split(/\s+/)[0]].filter((value): value is string => Boolean(value)),
-					);
+			const focusSegment = bashFocusCommand?.trim();
+			const approvalTarget = focusSegment ?? command;
+			// A reusable prefix only makes sense for a concrete unapproved segment. Complex commands
+			// (loops, subshells) ask without one, and deriving a prefix from the whole command text
+			// would offer e.g. `cd *`, which reads as "approve cd" and covers far more than intended.
+			// Use tree-sitter arity-based prefix when available, fall back to simple first-word.
+			const uniquePrefixCandidates = focusSegment
+				? parsedFocusCommand
+					? dedupeStrings([parsedFocusCommand.prefixTokens.join(" ")].filter(Boolean))
+					: dedupeStrings([focusSegment.split(/\s+/)[0]].filter((value): value is string => Boolean(value)))
+				: [];
 			const segmentNote = `Unapproved shell segment: ${approvalTarget}`;
 			const displayNote = note && note !== segmentNote ? note : undefined;
 
@@ -1647,7 +1652,9 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 	): Promise<PermissionDecision> {
 		const policy = activePolicy(configWithModeOverride(), agentName, profileName);
 		const bashApprovals = [...persistentApprovals, ...sessionBashApprovals];
-		if (approvalsCoverBash(bashApprovals, command, projectRoot, agentName, approvalsSettings)) {
+		// Approvals are checked per parsed segment below, so prefix approvals cannot widen to the
+		// whole chain here; only an exact approval for this command short-circuits.
+		if (approvalsCoverBashCommand(bashApprovals, command, projectRoot, agentName, approvalsSettings)) {
 			return ALLOW_PERMISSION;
 		}
 		const isApprovedBashSegment = (candidate: string) =>

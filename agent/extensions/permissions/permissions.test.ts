@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import {
 	APPROVAL_CLOCK_SKEW_MS,
 	approvalsCoverBash,
+	approvalsCoverBashCommand,
 	approvalsCoverPaths,
 	approvalsCoverTool,
 	extractApprovalRecords,
@@ -972,6 +973,43 @@ describe("scoped approvals", () => {
 
 		expect(approvalsCoverBash(approvals, "sed -n '1,200p'", "/repo-a", "default", settings)).toBe(true);
 		expect(approvalsCoverBash(approvals, "rg foo | sed -n '1,200p'", "/repo-a", "default", settings)).toBe(false);
+	});
+
+	it("never applies a prefix approval to a whole chain", () => {
+		const settings = getApprovalsSettings({ approvals: { scopeByProject: true, scopeByAgent: true } });
+		const approvals = [
+			{
+				tool: "bash",
+				scopeType: "bash-prefix" as const,
+				scopeValue: "cd",
+				projectRoot: "/repo-a",
+				agentName: "default",
+				createdAt: Date.now(),
+			},
+		];
+
+		expect(approvalsCoverBash(approvals, "cd /repo-a/src", "/repo-a", "default", settings)).toBe(true);
+		expect(
+			approvalsCoverBashCommand(approvals, "cd /repo-a/src && rm -rf build", "/repo-a", "default", settings),
+		).toBe(false);
+		expect(approvalsCoverBashCommand(approvals, "cd /repo-a/src", "/repo-a", "default", settings)).toBe(false);
+	});
+
+	it("lets an exact approval cover the whole command", () => {
+		const settings = getApprovalsSettings({ approvals: { scopeByProject: true, scopeByAgent: true } });
+		const command = "cd /repo-a/src && for f in a b; do sed -n '1,2p' $f; done";
+		const approvals = [
+			{
+				tool: "bash",
+				scopeType: "bash-exact" as const,
+				scopeValue: command,
+				projectRoot: "/repo-a",
+				agentName: "default",
+				createdAt: Date.now(),
+			},
+		];
+
+		expect(approvalsCoverBashCommand(approvals, command, "/repo-a", "default", settings)).toBe(true);
 	});
 });
 
@@ -2048,6 +2086,46 @@ describe("permissions extension sandbox lifecycle", () => {
 			expect(approvalTitles[0]).not.toContain("Note:\n  Unapproved shell segment:");
 			expect(approvalTitles[0]).toContain("Reusable prefix:\n  rm *\n\nProfile: default");
 			expect(approvalOptions[0]?.[0]).toBe("Allow once");
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("offers no reusable prefix for a complex command with no unapproved segment", async () => {
+		const approvalTitles: string[] = [];
+		const approvalOptions: string[][] = [];
+		const command =
+			'cd /repo/apps/api && for spec in "app/a.py:1:2" "app/b.py:3:4"; do echo "=== $spec ==="; sed -n "$spec" app/a.py; done';
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			rules: [
+				{ tool: "bash", match: "^cd\\b", action: "allow" },
+				{ tool: "bash", match: "^echo\\b", action: "allow" },
+				{ tool: "bash", match: "^sed\\b", action: "allow" },
+				{ tool: "bash", action: "ask" },
+			],
+			now: () => 0,
+			approvalSelection: "Allow once",
+			approvalOptions,
+			approvalTitles,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (value: string) => value,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
+
+			const title = approvalTitles[0] ?? "";
+			const options = approvalOptions[0] ?? [];
+			expect(title).toContain("Note:\n  Complex shell command requires confirmation");
+			expect(title).not.toContain("Reusable prefix");
+			expect(title).not.toContain("Unapproved segment");
+			expect(options).toContain("Allow this exact command for this session");
+			expect(options.some((option) => option.includes("`cd *`"))).toBe(false);
 		} finally {
 			await harness.restore();
 		}
@@ -4521,6 +4599,21 @@ describe("safe bash segment skipping", () => {
 		}
 	});
 
+	it("treats a directory change as a safe segment", async () => {
+		for (const command of ["cd /tmp", "cd", "cd ..", "cd ~/project"]) {
+			const parsed = await parseBashCommand(command);
+			expect(isParsedCommandAllowed(commandAt(parsed, 0), catchAllAsk)).toBe(true);
+		}
+	});
+
+	it("does not let a directory change hide the commands after it", async () => {
+		const parsed = await parseBashCommand("cd /tmp && rm -rf build");
+		expect(getFirstUnapprovedParsedCommand(parsed, catchAllAsk)?.name).toBe("rm");
+
+		const substituted = await parseBashCommand("cd $(rm -rf /)");
+		expect(getFirstUnapprovedParsedCommand(substituted, catchAllAsk)?.name).toBe("rm");
+	});
+
 	it("respects explicit rules over the safe segment list", async () => {
 		const askSleep: Rule[] = [{ tool: "bash", match: "sleep *", action: "ask" }];
 		const parsed = await parseBashCommand("sleep 30");
@@ -4548,7 +4641,7 @@ describe("safe bash segment skipping", () => {
 
 	it("does not let safe segments bypass block-all-bash rules", async () => {
 		const blockAll: Rule[] = [{ tool: "bash", action: "block" }];
-		for (const command of ["sleep 1", "set -euo pipefail", "command -v node", "true"]) {
+		for (const command of ["sleep 1", "set -euo pipefail", "command -v node", "true", "cd /tmp"]) {
 			const parsed = await parseBashCommand(command);
 			expect(isParsedCommandAllowed(commandAt(parsed, 0), blockAll)).toBe(false);
 			expect(canAutoApproveParsedBash(parsed, blockAll)).toBe(false);

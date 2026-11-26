@@ -19,6 +19,7 @@
 - If LSP is available, prefer LSP operations `findReferences`, `gotoDefinition`, `goToImplementation`, `incomingCalls`, `outgoingCalls` than raw grep/ripgrep
 - Prefer `codemode` for `todo` and `todo_query`: batch independent reads and mutations in one script with `Promise.allSettled` instead of separate tool calls, and sequence status changes when the WIP limit matters (finish one `in-progress` before promoting the next)
 - Never use `playwright` to try and open local files
+- Bash calls already start in the session cwd. Never prefix commands with `cd <dir> &&`; use paths relative to cwd
 - For long-running commands, pass the bash tool's `timeout` parameter (seconds) instead of wrapping the command in `timeout ...`; the wrapper hides the inner command from permission matching and forces approval prompts
 
 # Style
