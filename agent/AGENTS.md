@@ -4,7 +4,7 @@
   - Prefer updating existing files like README.md
 - Keep documents brief
 - Do not manually wrap Markdown prose at a fixed line length; use semantic paragraphs and let the display render it.
-- Prefer to use tools other than `bash` for exploration and editing
+- Prefer `read`, `code_intel`, `edit`, and `write` over `bash` for exploration and editing: shelling out to `cat`, `grep`, or `sed` skips the truncation, path checks, and sandbox rules those tools apply
 - Prefer task runners (task, makefile, etc) over raw build/test calls
 - Prefer GNU tool's argument variants to macOS variants
 - Always pipe long outputs from plain bash calls (like `go test -v`) to a file and filter its terminal output (like `2>&1 | tee <some-file> | tail -n 20`) for later processing as output can be really long, or alternatively use grep/rg to filter its output
