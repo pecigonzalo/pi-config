@@ -113,6 +113,14 @@ function commandAt(parsed: ParsedBashCommand, index: number): ParsedBashSubcomma
 	return command;
 }
 
+function expectBlocked(result: unknown, reason?: string | RegExp): void {
+	const blocked = result as { block?: boolean; reason?: string } | undefined;
+	expect(blocked?.block).toBe(true);
+	if (reason === undefined) return;
+	if (typeof reason === "string") expect(blocked?.reason).toBe(reason);
+	else expect(blocked?.reason).toMatch(reason);
+}
+
 const DEFAULT_PROTECTED_RESOURCES = {
 	denyRead: [] as string[],
 	denyWrite: [] as string[],
@@ -2019,7 +2027,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		const result = (await callTool(harness, "read", { path: path.join(harness.cwd, ".env") })) as
 			| { block: true; reason: string }
 			| undefined;
-		expect(result?.reason).toBe("Blocked by protected resource policy");
+		expectBlocked(result, "Blocked by protected resource policy");
 		expect(approvalTitles).toHaveLength(0);
 	});
 
@@ -2031,8 +2039,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		const result = (await callTool(harness, "read", { path: path.join(harness.cwd, ".env.example") })) as
 			| { block: true; reason: string }
 			| undefined;
-		expect(result?.block).toBe(true);
-		expect(result?.reason).toBe("team policy");
+		expectBlocked(result, "team policy");
 	});
 
 	it("asks before protected env writes", async () => {
@@ -2060,8 +2067,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			path: path.join(harness.cwd, ".env"),
 			content: "A=1\n",
 		})) as { block: true; reason: string } | undefined;
-		expect(result?.block).toBe(true);
-		expect(result?.reason).toBe("Plan mode is read-only");
+		expectBlocked(result, "Plan mode is read-only");
 		expect(approvalTitles).toHaveLength(0);
 	});
 
@@ -2106,8 +2112,7 @@ describe("permissions extension sandbox lifecycle", () => {
 			const result = (await callTool(harness, "bash", { command })) as
 				| { block: true; reason: string }
 				| undefined;
-			expect(result?.block).toBe(true);
-			expect(result?.reason).toContain("Blocked by protected resource policy");
+			expectBlocked(result, /Blocked by protected resource policy/);
 			expect(approvalTitles).toHaveLength(0);
 		} finally {
 			await fs.rm(envDir, { recursive: true, force: true });
@@ -2124,7 +2129,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		const result = (await callTool(harness, "read", { path: path.join(harness.cwd, "..", ".env") })) as
 			| { block: true; reason: string }
 			| undefined;
-		expect(result?.reason).toContain("Path is outside the current project");
+		expectBlocked(result, /Path is outside the current project/);
 		expect(approvalTitles).toHaveLength(0);
 	});
 
@@ -2151,13 +2156,13 @@ describe("permissions extension sandbox lifecycle", () => {
 	it("blocks when an approval selection is dismissed", async () => {
 		const { result } = await requestReadApproval(undefined);
 
-		expect(result).toEqual({ block: true, reason: "Blocked by user" });
+		expectBlocked(result, "Blocked by user");
 	});
 
 	it("blocks an unknown approval selection", async () => {
 		const { result } = await requestReadApproval("Unexpected selection");
 
-		expect(result).toEqual({ block: true, reason: "Blocked by user" });
+		expectBlocked(result, "Blocked by user");
 	});
 
 	it("allows an explicit Allow once selection", async () => {
@@ -2428,13 +2433,13 @@ describe("permissions extension sandbox lifecycle", () => {
 	it("blocks an explicit Block selection", async () => {
 		const { result } = await requestReadApproval("Block");
 
-		expect(result).toEqual({ block: true, reason: "Blocked by user" });
+		expectBlocked(result, "Blocked by user");
 	});
 
 	it("blocks and steers with the supplied reason", async () => {
 		const { result } = await requestReadApproval("Block and steer agent", "Use a read-only alternative");
 
-		expect(result).toEqual({ block: true, reason: "Use a read-only alternative" });
+		expectBlocked(result, "Use a read-only alternative");
 	});
 
 	it("reports active sandbox status through the permissions command", async () => {
