@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, it, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, it, expect, mock, test } from "bun:test";
 import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile as execFileCallback } from "node:child_process";
@@ -130,6 +130,8 @@ const noopSandboxManager = {
 let configModule: typeof import("./config");
 
 beforeAll(async () => {
+	// A timed-out test can leave the mocked global config behind; start from a clean slate.
+	await fs.rm(MOCKED_GLOBAL_CONFIG_PATH, { force: true });
 	const td = process.env.TMPDIR || os.tmpdir();
 	await fs.mkdir(td, { recursive: true });
 	await fs.rm(TEST_SCRATCH_DIR, { recursive: true, force: true });
@@ -1809,12 +1811,12 @@ describe("permissions extension sandbox lifecycle", () => {
 		mode: "plan" | "workspace-write" | "full-access" | "auto";
 		rules?: Rule[];
 		sandbox?: Record<string, unknown>;
-		sandboxManager: {
+		sandboxManager?: {
 			initialize: () => Promise<void>;
 			reset: () => Promise<void>;
 			wrapWithSandbox: (command: string) => Promise<string>;
 		};
-		now: () => number;
+		now?: () => number;
 		notifications?: string[];
 		approvalSelection?: string | ((choices: string[]) => string | undefined);
 		blockReason?: string;
@@ -1844,10 +1846,12 @@ describe("permissions extension sandbox lifecycle", () => {
 			}),
 			"utf8",
 		);
-		mock.module("@anthropic-ai/sandbox-runtime", () => ({ SandboxManager: options.sandboxManager }));
+		mock.module("@anthropic-ai/sandbox-runtime", () => ({
+			SandboxManager: options.sandboxManager ?? noopSandboxManager,
+		}));
 
 		const originalDateNow = Date.now;
-		Date.now = options.now;
+		Date.now = options.now ?? (() => 0);
 		const tools = new Map<string, RegisteredTool>();
 		const commands = new Map<string, RegisteredCommand>();
 		const handlers = new Map<
@@ -1930,166 +1934,135 @@ describe("permissions extension sandbox lifecycle", () => {
 		};
 	}
 
+	type Harness = Awaited<ReturnType<typeof setupPermissionsHarness>>;
+	type HarnessOptions = Parameters<typeof setupPermissionsHarness>[0];
+
+	const activeHarnesses: Harness[] = [];
+	afterEach(async () => {
+		for (const harness of activeHarnesses.splice(0)) await harness.restore();
+	});
+
+	async function createHarness(options: HarnessOptions): Promise<Harness> {
+		const harness = await setupPermissionsHarness(options);
+		activeHarnesses.push(harness);
+		return harness;
+	}
+
 	async function requestReadApproval(
 		approvalSelection: string | undefined,
 		blockReason?: string,
 	): Promise<{ result: { block: true; reason: string } | undefined; approvalOptions: string[][] }> {
 		const approvalOptions: string[][] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			rules: [{ tool: "read", action: "ask" }],
-			now: () => 0,
 			approvalSelection,
 			blockReason,
 			approvalOptions,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			const result = (await toolCall({ toolName: "read", input: { path: "README.md" } }, harness.ctx)) as
-				| { block: true; reason: string }
-				| undefined;
-			return { result, approvalOptions };
-		} finally {
-			await harness.restore();
-		}
+		const toolCall = firstToolCall(harness);
+		const result = (await toolCall({ toolName: "read", input: { path: "README.md" } }, harness.ctx)) as
+			| { block: true; reason: string }
+			| undefined;
+		return { result, approvalOptions };
 	}
 
-	const firstToolCall = (harness: Awaited<ReturnType<typeof setupPermissionsHarness>>) => {
+	const firstToolCall = (harness: Harness) => {
 		const handler = harness.handlers.get("tool_call")?.[0];
 		if (!handler) throw new Error("tool_call handler was not registered");
 		return handler;
 	};
 
-	const callTool = async (
-		harness: Awaited<ReturnType<typeof setupPermissionsHarness>>,
-		toolName: string,
-		input: Record<string, unknown>,
-	): Promise<unknown> => firstToolCall(harness)({ toolName, input }, harness.ctx);
+	const callTool = async (harness: Harness, toolName: string, input: Record<string, unknown>): Promise<unknown> =>
+		firstToolCall(harness)({ toolName, input }, harness.ctx);
 
 	it("read-exempts env templates at the tool_call boundary", async () => {
 		const approvalTitles: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			approvalSelection: "Allow once",
 			approvalTitles,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			expect(await callTool(harness, "read", { path: path.join(harness.cwd, ".env.example") })).toBeUndefined();
-			expect(await callTool(harness, "read", { path: ".env.example" })).toBeUndefined();
-			expect(approvalTitles).toHaveLength(0);
+		expect(await callTool(harness, "read", { path: path.join(harness.cwd, ".env.example") })).toBeUndefined();
+		expect(await callTool(harness, "read", { path: ".env.example" })).toBeUndefined();
+		expect(approvalTitles).toHaveLength(0);
 
-			expect(await callTool(harness, "read", { path: path.join(harness.cwd, ".env") })).toBeUndefined();
-			expect(approvalTitles).toHaveLength(1);
-			expect(approvalTitles[0]).toContain(".env");
-		} finally {
-			await harness.restore();
-		}
+		expect(await callTool(harness, "read", { path: path.join(harness.cwd, ".env") })).toBeUndefined();
+		expect(approvalTitles).toHaveLength(1);
+		expect(approvalTitles[0]).toContain(".env");
 	});
 
 	it("asks before protected reads outside the workspace", async () => {
 		const approvalTitles: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			approvalTitles,
 			config: { protectedResources: { workspaceRead: ["**/.env"] } },
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			expect(await callTool(harness, "read", { path: path.join(harness.cwd, ".env") })).toBeUndefined();
-			expect(approvalTitles).toHaveLength(0);
+		expect(await callTool(harness, "read", { path: path.join(harness.cwd, ".env") })).toBeUndefined();
+		expect(approvalTitles).toHaveLength(0);
 
-			const blocked = (await callTool(harness, "read", { path: path.join(harness.cwd, "..", ".env") })) as
-				| { block: true; reason: string }
-				| undefined;
-			expect(blocked?.block).toBe(true);
-			expect(approvalTitles).toHaveLength(1);
-		} finally {
-			await harness.restore();
-		}
+		const blocked = (await callTool(harness, "read", { path: path.join(harness.cwd, "..", ".env") })) as
+			| { block: true; reason: string }
+			| undefined;
+		expect(blocked?.block).toBe(true);
+		expect(approvalTitles).toHaveLength(1);
 	});
 
 	it("honours readAction block for protected reads", async () => {
 		const approvalTitles: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			approvalTitles,
 			config: { protectedResources: { readAction: "block" } },
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const result = (await callTool(harness, "read", { path: path.join(harness.cwd, ".env") })) as
-				| { block: true; reason: string }
-				| undefined;
-			expect(result?.reason).toBe("Blocked by protected resource policy");
-			expect(approvalTitles).toHaveLength(0);
-		} finally {
-			await harness.restore();
-		}
+		const result = (await callTool(harness, "read", { path: path.join(harness.cwd, ".env") })) as
+			| { block: true; reason: string }
+			| undefined;
+		expect(result?.reason).toBe("Blocked by protected resource policy");
+		expect(approvalTitles).toHaveLength(0);
 	});
 
 	it("keeps user block rules ahead of builtin read exceptions", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			rules: [{ tool: "read", match: "\\.env\\.example$", action: "block", reason: "team policy" }],
-			now: () => 0,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const result = (await callTool(harness, "read", { path: path.join(harness.cwd, ".env.example") })) as
-				| { block: true; reason: string }
-				| undefined;
-			expect(result?.block).toBe(true);
-			expect(result?.reason).toBe("team policy");
-		} finally {
-			await harness.restore();
-		}
+		const result = (await callTool(harness, "read", { path: path.join(harness.cwd, ".env.example") })) as
+			| { block: true; reason: string }
+			| undefined;
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toBe("team policy");
 	});
 
 	it("asks before protected env writes", async () => {
 		const approvalTitles: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			approvalSelection: "Allow once",
 			approvalTitles,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			expect(
-				await callTool(harness, "write", { path: path.join(harness.cwd, ".env"), content: "A=1\n" }),
-			).toBeUndefined();
-			expect(approvalTitles).toHaveLength(1);
-			expect(approvalTitles[0]).toContain(".env");
-		} finally {
-			await harness.restore();
-		}
+		expect(
+			await callTool(harness, "write", { path: path.join(harness.cwd, ".env"), content: "A=1\n" }),
+		).toBeUndefined();
+		expect(approvalTitles).toHaveLength(1);
+		expect(approvalTitles[0]).toContain(".env");
 	});
 
 	it("keeps plan mode above protected env write prompts", async () => {
 		const approvalTitles: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "plan",
-			now: () => 0,
 			approvalSelection: "Allow once",
 			approvalTitles,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const result = (await callTool(harness, "write", {
-				path: path.join(harness.cwd, ".env"),
-				content: "A=1\n",
-			})) as { block: true; reason: string } | undefined;
-			expect(result?.block).toBe(true);
-			expect(result?.reason).toBe("Plan mode is read-only");
-			expect(approvalTitles).toHaveLength(0);
-		} finally {
-			await harness.restore();
-		}
+		const result = (await callTool(harness, "write", {
+			path: path.join(harness.cwd, ".env"),
+			content: "A=1\n",
+		})) as { block: true; reason: string } | undefined;
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toBe("Plan mode is read-only");
+		expect(approvalTitles).toHaveLength(0);
 	});
 
 	it("asks before bash env reads even when cat is allowed", async () => {
@@ -2097,13 +2070,11 @@ describe("permissions extension sandbox lifecycle", () => {
 		const envDir = await fs.mkdtemp(path.join(os.tmpdir(), "perm-bash-env-hit-"));
 		await fs.writeFile(path.join(envDir, ".env"), "SECRET=1\n");
 		await fs.writeFile(path.join(envDir, ".env.example"), "SECRET=\n");
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			rules: [{ tool: "bash", match: "^cat\\b", action: "allow" }],
-			now: () => 0,
 			approvalSelection: "Allow once",
 			approvalTitles,
-			sandboxManager: noopSandboxManager,
 		});
 		try {
 			const envCommand = `cat ${JSON.stringify(path.join(envDir, ".env"))}`;
@@ -2115,7 +2086,6 @@ describe("permissions extension sandbox lifecycle", () => {
 			expect(await callTool(harness, "bash", { command: templateCommand })).toBeUndefined();
 			expect(approvalTitles).toHaveLength(1);
 		} finally {
-			await harness.restore();
 			await fs.rm(envDir, { recursive: true, force: true });
 		}
 	});
@@ -2124,14 +2094,12 @@ describe("permissions extension sandbox lifecycle", () => {
 		const approvalTitles: string[] = [];
 		const envDir = await fs.mkdtemp(path.join(os.tmpdir(), "perm-bash-env-block-"));
 		await fs.writeFile(path.join(envDir, ".env"), "SECRET=1\n");
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			rules: [{ tool: "bash", match: "^cat\\b", action: "allow" }],
 			config: { protectedResources: { readAction: "block" } },
-			now: () => 0,
 			approvalSelection: "Allow once",
 			approvalTitles,
-			sandboxManager: noopSandboxManager,
 		});
 		try {
 			const command = `cat ${JSON.stringify(path.join(envDir, ".env"))}`;
@@ -2142,55 +2110,42 @@ describe("permissions extension sandbox lifecycle", () => {
 			expect(result?.reason).toContain("Blocked by protected resource policy");
 			expect(approvalTitles).toHaveLength(0);
 		} finally {
-			await harness.restore();
 			await fs.rm(envDir, { recursive: true, force: true });
 		}
 	});
 
 	it("keeps a hard external-path policy ahead of protected read prompts", async () => {
 		const approvalTitles: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "plan",
-			now: () => 0,
 			approvalSelection: "Allow once",
 			approvalTitles,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const result = (await callTool(harness, "read", { path: path.join(harness.cwd, "..", ".env") })) as
-				| { block: true; reason: string }
-				| undefined;
-			expect(result?.reason).toContain("Path is outside the current project");
-			expect(approvalTitles).toHaveLength(0);
-		} finally {
-			await harness.restore();
-		}
+		const result = (await callTool(harness, "read", { path: path.join(harness.cwd, "..", ".env") })) as
+			| { block: true; reason: string }
+			| undefined;
+		expect(result?.reason).toContain("Path is outside the current project");
+		expect(approvalTitles).toHaveLength(0);
 	});
 
 	it("fails closed at the registered filesystem tool_call boundary for a cyclic path", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			rules: [{ tool: "read", action: "ask" }],
-			now: () => 0,
-			sandboxManager: noopSandboxManager,
 		});
 		try {
-			try {
-				await fs.symlink("cycle-b", path.join(harness.cwd, "cycle-a"), "dir");
-				await fs.symlink("cycle-a", path.join(harness.cwd, "cycle-b"), "dir");
-			} catch (error) {
-				const code = (error as NodeJS.ErrnoException).code;
-				if (["EPERM", "EACCES", "ENOTSUP"].includes(code ?? "")) return;
-				throw error;
-			}
-
-			const toolCall = firstToolCall(harness);
-			await expect(
-				toolCall({ toolName: "read", input: { path: "cycle-a/secret.txt" } }, harness.ctx),
-			).rejects.toThrow("Unable to safely resolve symlink chain");
-		} finally {
-			await harness.restore();
+			await fs.symlink("cycle-b", path.join(harness.cwd, "cycle-a"), "dir");
+			await fs.symlink("cycle-a", path.join(harness.cwd, "cycle-b"), "dir");
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (["EPERM", "EACCES", "ENOTSUP"].includes(code ?? "")) return;
+			throw error;
 		}
+
+		const toolCall = firstToolCall(harness);
+		await expect(
+			toolCall({ toolName: "read", input: { path: "cycle-a/secret.txt" } }, harness.ctx),
+		).rejects.toThrow("Unable to safely resolve symlink chain");
 	});
 
 	it("blocks when an approval selection is dismissed", async () => {
@@ -2217,13 +2172,12 @@ describe("permissions extension sandbox lifecycle", () => {
 		const approvalOptions: string[][] = [];
 		const dangerousSuffix = "rm -rf /dangerous-suffix";
 		const command = `echo safe && ${dangerousSuffix}`;
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			rules: [
 				{ tool: "bash", match: "^echo\\b", action: "allow" },
 				{ tool: "bash", action: "ask" },
 			],
-			now: () => 0,
 			approvalSelection: "Allow once",
 			approvalOptions,
 			approvalTitles,
@@ -2233,17 +2187,13 @@ describe("permissions extension sandbox lifecycle", () => {
 				wrapWithSandbox: async (value: string) => value,
 			},
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
-			expect(approvalTitles[0]).toContain(`Command:\n  ${command}`);
-			expect(approvalTitles[0]).toContain(`Unapproved segment:\n  ${dangerousSuffix}`);
-			expect(approvalTitles[0]).not.toContain("Note:\n  Unapproved shell segment:");
-			expect(approvalTitles[0]).toContain("Reusable prefix:\n  rm *\n\nProfile: default");
-			expect(approvalOptions[0]?.[0]).toBe("Allow once");
-		} finally {
-			await harness.restore();
-		}
+		const toolCall = firstToolCall(harness);
+		await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
+		expect(approvalTitles[0]).toContain(`Command:\n  ${command}`);
+		expect(approvalTitles[0]).toContain(`Unapproved segment:\n  ${dangerousSuffix}`);
+		expect(approvalTitles[0]).not.toContain("Note:\n  Unapproved shell segment:");
+		expect(approvalTitles[0]).toContain("Reusable prefix:\n  rm *\n\nProfile: default");
+		expect(approvalOptions[0]?.[0]).toBe("Allow once");
 	});
 
 	it("offers no reusable prefix for a complex command with no unapproved segment", async () => {
@@ -2251,7 +2201,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		const approvalOptions: string[][] = [];
 		const command =
 			'cd /repo/apps/api && for spec in "app/a.py:1:2" "app/b.py:3:4"; do echo "=== $spec ==="; sed -n "$spec" app/a.py; done';
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			rules: [
 				{ tool: "bash", match: "^cd\\b", action: "allow" },
@@ -2259,7 +2209,6 @@ describe("permissions extension sandbox lifecycle", () => {
 				{ tool: "bash", match: "^sed\\b", action: "allow" },
 				{ tool: "bash", action: "ask" },
 			],
-			now: () => 0,
 			approvalSelection: "Allow once",
 			approvalOptions,
 			approvalTitles,
@@ -2269,20 +2218,16 @@ describe("permissions extension sandbox lifecycle", () => {
 				wrapWithSandbox: async (value: string) => value,
 			},
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
+		const toolCall = firstToolCall(harness);
+		await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
 
-			const title = approvalTitles[0] ?? "";
-			const options = approvalOptions[0] ?? [];
-			expect(title).toContain("Note:\n  Complex shell command requires confirmation");
-			expect(title).not.toContain("Reusable prefix");
-			expect(title).not.toContain("Unapproved segment");
-			expect(options).toContain("Allow this exact command for this session");
-			expect(options.some((option) => option.includes("`cd *`"))).toBe(false);
-		} finally {
-			await harness.restore();
-		}
+		const title = approvalTitles[0] ?? "";
+		const options = approvalOptions[0] ?? [];
+		expect(title).toContain("Note:\n  Complex shell command requires confirmation");
+		expect(title).not.toContain("Reusable prefix");
+		expect(title).not.toContain("Unapproved segment");
+		expect(options).toContain("Allow this exact command for this session");
+		expect(options.some((option) => option.includes("`cd *`"))).toBe(false);
 	});
 
 	it("keeps a distinct approval target visible after a huge full command", async () => {
@@ -2290,13 +2235,12 @@ describe("permissions extension sandbox lifecycle", () => {
 		const approvalOptions: string[][] = [];
 		const target = "rm -rf /still-visible";
 		const command = `echo ${"x".repeat(20_000)} && ${target}`;
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			rules: [
 				{ tool: "bash", match: "^echo\\b", action: "allow" },
 				{ tool: "bash", action: "ask" },
 			],
-			now: () => 0,
 			approvalSelection: "Allow once",
 			approvalOptions,
 			approvalTitles,
@@ -2306,32 +2250,27 @@ describe("permissions extension sandbox lifecycle", () => {
 				wrapWithSandbox: async (value: string) => value,
 			},
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
-			const title = approvalTitles[0] ?? "";
-			expect(title).toContain("Command:\n");
-			expect(title).toContain("[Preview shortened: omitted");
-			expect(title).toContain(`&& ${target}\n\nUnapproved segment:\n  ${target}`);
-			expect(title.length).toBeLessThan(2_000);
-			expect(approvalOptions[0]?.[0]).toBe("Allow once");
-			expect(approvalOptions[0]).toContain("Allow this exact segment for this session");
-		} finally {
-			await harness.restore();
-		}
+		const toolCall = firstToolCall(harness);
+		await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
+		const title = approvalTitles[0] ?? "";
+		expect(title).toContain("Command:\n");
+		expect(title).toContain("[Preview shortened: omitted");
+		expect(title).toContain(`&& ${target}\n\nUnapproved segment:\n  ${target}`);
+		expect(title.length).toBeLessThan(2_000);
+		expect(approvalOptions[0]?.[0]).toBe("Allow once");
+		expect(approvalOptions[0]).toContain("Allow this exact segment for this session");
 	});
 
 	it("keeps a dangerous final line visible in full command and exact approval target sections", async () => {
 		const approvalTitles: string[] = [];
 		const finalLine = "rm -rf /dangerous-final-line";
 		const command = `echo safe && printf '${"x".repeat(20_000)}'\n${finalLine}`;
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			rules: [
 				{ tool: "bash", match: "^echo\\b", action: "allow" },
 				{ tool: "bash", action: "ask" },
 			],
-			now: () => 0,
 			approvalSelection: "Allow once",
 			approvalTitles,
 			sandboxManager: {
@@ -2340,17 +2279,13 @@ describe("permissions extension sandbox lifecycle", () => {
 				wrapWithSandbox: async (value: string) => value,
 			},
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
-			const title = approvalTitles[0] ?? "";
-			expect(title).toContain(`\n  ${finalLine}\n\nUnapproved segment:\n  printf `);
-			expect(title).toContain("\n\nProfile: default");
-			expect(title).toContain("[Preview shortened: omitted");
-			expect(title.length).toBeLessThan(3_000);
-		} finally {
-			await harness.restore();
-		}
+		const toolCall = firstToolCall(harness);
+		await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
+		const title = approvalTitles[0] ?? "";
+		expect(title).toContain(`\n  ${finalLine}\n\nUnapproved segment:\n  printf `);
+		expect(title).toContain("\n\nProfile: default");
+		expect(title).toContain("[Preview shortened: omitted");
+		expect(title.length).toBeLessThan(3_000);
 	});
 
 	it("bounds multiline reusable prefixes and includes their value in option labels", async () => {
@@ -2359,10 +2294,9 @@ describe("permissions extension sandbox lifecycle", () => {
 		const notifications: string[] = [];
 		const candidate = `tool-${"p".repeat(600)}\nsecond-line`;
 		const command = `${JSON.stringify(candidate)} argument`;
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			rules: [{ tool: "bash", action: "ask" }],
-			now: () => 0,
 			approvalSelection: (choices) => choices.find((choice) => choice.startsWith("Allow `tool-")),
 			approvalOptions,
 			approvalTitles,
@@ -2373,38 +2307,33 @@ describe("permissions extension sandbox lifecycle", () => {
 				wrapWithSandbox: async (value: string) => value,
 			},
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
-			const title = approvalTitles[0] ?? "";
-			const options = approvalOptions[0] ?? [];
-			expect(title).toContain("Reusable prefix:\n  ");
-			expect(title).toContain("[Preview shortened: omitted");
-			expect(options[0]).toBe("Allow once");
-			expect(
-				options.some((option) => option.startsWith("Allow `tool-") && option.endsWith("` for this session")),
-			).toBe(true);
-			expect(options.some((option) => option.startsWith("Save `tool-") && option.endsWith("` permanently"))).toBe(
-				true,
-			);
-			expect(Math.max(...options.map((option) => option.length))).toBeLessThan(80);
-			const prefixNotification = notifications.find((message) => message.includes("bash-prefix:"));
-			expect(prefixNotification).toContain("tool-");
-			expect(prefixNotification).toContain("second-line");
-		} finally {
-			await harness.restore();
-		}
+		const toolCall = firstToolCall(harness);
+		await toolCall({ toolName: "bash", input: { command } }, harness.ctx);
+		const title = approvalTitles[0] ?? "";
+		const options = approvalOptions[0] ?? [];
+		expect(title).toContain("Reusable prefix:\n  ");
+		expect(title).toContain("[Preview shortened: omitted");
+		expect(options[0]).toBe("Allow once");
+		expect(
+			options.some((option) => option.startsWith("Allow `tool-") && option.endsWith("` for this session")),
+		).toBe(true);
+		expect(options.some((option) => option.startsWith("Save `tool-") && option.endsWith("` permanently"))).toBe(
+			true,
+		);
+		expect(Math.max(...options.map((option) => option.length))).toBeLessThan(80);
+		const prefixNotification = notifications.find((message) => message.includes("bash-prefix:"));
+		expect(prefixNotification).toContain("tool-");
+		expect(prefixNotification).toContain("second-line");
 	});
 
 	it("shows explicit truncation notices for large Bash commands and generic details", async () => {
 		const approvalTitles: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			rules: [
 				{ tool: "bash", action: "ask" },
 				{ tool: "mcp", action: "ask" },
 			],
-			now: () => 0,
 			approvalSelection: "Block",
 			approvalTitles,
 			sandboxManager: {
@@ -2413,15 +2342,11 @@ describe("permissions extension sandbox lifecycle", () => {
 				wrapWithSandbox: async (value: string) => value,
 			},
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			await toolCall({ toolName: "bash", input: { command: `echo ${"x".repeat(2_000)}` } }, harness.ctx);
-			await toolCall({ toolName: "mcp", input: { command: "y".repeat(2_000) } }, harness.ctx);
-			expect(approvalTitles).toHaveLength(2);
-			expect(approvalTitles.every((title) => title.includes("[Preview shortened: omitted"))).toBe(true);
-		} finally {
-			await harness.restore();
-		}
+		const toolCall = firstToolCall(harness);
+		await toolCall({ toolName: "bash", input: { command: `echo ${"x".repeat(2_000)}` } }, harness.ctx);
+		await toolCall({ toolName: "mcp", input: { command: "y".repeat(2_000) } }, harness.ctx);
+		expect(approvalTitles).toHaveLength(2);
+		expect(approvalTitles.every((title) => title.includes("[Preview shortened: omitted"))).toBe(true);
 	});
 
 	it.each([
@@ -2451,65 +2376,53 @@ describe("permissions extension sandbox lifecycle", () => {
 		async ({ toolName, input, rules, pick }) => {
 			const notifications: string[] = [];
 			const approvalOptions: string[][] = [];
-			const harness = await setupPermissionsHarness({
+			const harness = await createHarness({
 				mode: "full-access",
 				rules,
-				now: () => 0,
 				notifications,
 				approvalOptions,
 				approvalSelection: pick,
 				writeApprovalFile: () => {
 					throw new Error("injected save failure");
 				},
-				sandboxManager: noopSandboxManager,
 			});
-			try {
-				const toolCall = firstToolCall(harness);
-				await toolCall({ toolName, input }, harness.ctx);
-				await toolCall({ toolName, input }, harness.ctx);
+			const toolCall = firstToolCall(harness);
+			await toolCall({ toolName, input }, harness.ctx);
+			await toolCall({ toolName, input }, harness.ctx);
 
-				expect(approvalOptions).toHaveLength(2);
-				expect(notifications.filter((message) => message.includes("Failed to save approvals"))).toHaveLength(2);
-				expect(notifications.some((message) => message.includes("injected save failure"))).toBe(true);
-				expect(
-					notifications.some(
-						(message) =>
-							message.includes("saved permanently") ||
-							message.includes("allowed permanently") ||
-							message.includes("approved permanently"),
-					),
-				).toBe(false);
-			} finally {
-				await harness.restore();
-			}
+			expect(approvalOptions).toHaveLength(2);
+			expect(notifications.filter((message) => message.includes("Failed to save approvals"))).toHaveLength(2);
+			expect(notifications.some((message) => message.includes("injected save failure"))).toBe(true);
+			expect(
+				notifications.some(
+					(message) =>
+						message.includes("saved permanently") ||
+						message.includes("allowed permanently") ||
+						message.includes("approved permanently"),
+				),
+			).toBe(false);
 		},
 	);
 
 	it("does not claim saved approvals were cleared when reset persistence fails", async () => {
 		const notifications: string[] = [];
 		let writes = 0;
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			rules: [{ tool: "read", action: "ask" }],
-			now: () => 0,
 			notifications,
 			approvalSelection: (choices) => choices.find((choice) => choice === "Allow tool permanently"),
 			writeApprovalFile: () => {
 				writes++;
 				if (writes > 1) throw new Error("reset save failure");
 			},
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			await toolCall({ toolName: "read", input: { path: "reset-save-failure.txt" } }, harness.ctx);
-			await harness.commands.get("permissions")?.handler("reset saved", harness.ctx);
+		const toolCall = firstToolCall(harness);
+		await toolCall({ toolName: "read", input: { path: "reset-save-failure.txt" } }, harness.ctx);
+		await harness.commands.get("permissions")?.handler("reset saved", harness.ctx);
 
-			expect(notifications.some((message) => message.includes("reset save failure"))).toBe(true);
-			expect(notifications.some((message) => message.includes("saved approvals cleared"))).toBe(false);
-		} finally {
-			await harness.restore();
-		}
+		expect(notifications.some((message) => message.includes("reset save failure"))).toBe(true);
+		expect(notifications.some((message) => message.includes("saved approvals cleared"))).toBe(false);
 	});
 
 	it("blocks an explicit Block selection", async () => {
@@ -2527,52 +2440,35 @@ describe("permissions extension sandbox lifecycle", () => {
 	it("reports active sandbox status through the permissions command", async () => {
 		let now = 0;
 		const notifications: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			now: () => now,
 			notifications,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			await harness.commands.get("permissions")?.handler("sandbox status", harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await harness.commands.get("permissions")?.handler("sandbox status", harness.ctx);
 
 		expect(notifications).toContain("Bash sandbox: active; bash exec mode: sandboxed");
 	});
 
 	it("shows the config-derived mode with no session override", async () => {
 		const notifications: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			notifications,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			await harness.commands.get("permissions")?.handler("mode", harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await harness.commands.get("permissions")?.handler("mode", harness.ctx);
 
 		expect(notifications).toContain("Active permission mode: workspace-write");
 	});
 
 	it("sets a session override via /permissions mode <mode>", async () => {
 		const notifications: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			notifications,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			await harness.commands.get("permissions")?.handler("mode auto", harness.ctx);
-			await harness.commands.get("permissions")?.handler("mode", harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await harness.commands.get("permissions")?.handler("mode auto", harness.ctx);
+		await harness.commands.get("permissions")?.handler("mode", harness.ctx);
 
 		expect(notifications).toContain('✓ Permission mode set to "auto" for this session');
 		expect(notifications).toContain("Active permission mode: auto (session override)");
@@ -2580,18 +2476,12 @@ describe("permissions extension sandbox lifecycle", () => {
 
 	it("rejects an unknown mode without changing the active mode", async () => {
 		const notifications: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			notifications,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			await harness.commands.get("permissions")?.handler("mode bogus", harness.ctx);
-			await harness.commands.get("permissions")?.handler("mode", harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await harness.commands.get("permissions")?.handler("mode bogus", harness.ctx);
+		await harness.commands.get("permissions")?.handler("mode", harness.ctx);
 
 		expect(notifications.some((message) => message.startsWith('Unknown mode "bogus"'))).toBe(true);
 		expect(notifications).toContain("Active permission mode: workspace-write");
@@ -2599,19 +2489,13 @@ describe("permissions extension sandbox lifecycle", () => {
 
 	it("clears a session override via /permissions mode default", async () => {
 		const notifications: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			notifications,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			await harness.commands.get("permissions")?.handler("mode auto", harness.ctx);
-			await harness.commands.get("permissions")?.handler("mode default", harness.ctx);
-			await harness.commands.get("permissions")?.handler("mode", harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await harness.commands.get("permissions")?.handler("mode auto", harness.ctx);
+		await harness.commands.get("permissions")?.handler("mode default", harness.ctx);
+		await harness.commands.get("permissions")?.handler("mode", harness.ctx);
 
 		expect(notifications).toContain("✓ Session mode override cleared. Active permission mode: workspace-write");
 		expect(notifications).toContain("Active permission mode: workspace-write");
@@ -2619,46 +2503,34 @@ describe("permissions extension sandbox lifecycle", () => {
 
 	it("notifies live when the classifier auto-approves an ask-worthy bash command", async () => {
 		const notifications: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "auto",
-			now: () => 0,
 			notifications,
 			classifyPermissionRequest: async () => ({
 				decision: "allow",
 				confidence: 0.97,
 				rationale: "matches the requested build step",
 			}),
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			const result = await toolCall(
-				{ toolName: "bash", input: { command: "some-uncommon-tool --version" } },
-				harness.ctx,
-			);
-			expect(result).toBeUndefined(); // no block result → allowed
-		} finally {
-			await harness.restore();
-		}
+		const toolCall = firstToolCall(harness);
+		const result = await toolCall(
+			{ toolName: "bash", input: { command: "some-uncommon-tool --version" } },
+			harness.ctx,
+		);
+		expect(result).toBeUndefined(); // no block result → allowed
 
 		expect(notifications).toContain("✓ Auto-approved bash (0.97): matches the requested build step");
 	});
 
 	it("clears the session mode override on a new session", async () => {
 		const notifications: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			notifications,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			await harness.commands.get("permissions")?.handler("mode auto", harness.ctx);
-			for (const handler of harness.handlers.get("session_start") ?? []) await handler({}, harness.ctx);
-			await harness.commands.get("permissions")?.handler("mode", harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await harness.commands.get("permissions")?.handler("mode auto", harness.ctx);
+		for (const handler of harness.handlers.get("session_start") ?? []) await handler({}, harness.ctx);
+		await harness.commands.get("permissions")?.handler("mode", harness.ctx);
 
 		expect(notifications).toContain("Active permission mode: workspace-write");
 	});
@@ -2666,17 +2538,12 @@ describe("permissions extension sandbox lifecycle", () => {
 	it("reports fallback execution mode after the sandbox is disabled", async () => {
 		let now = 0;
 		const notifications: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "plan",
 			now: () => now,
 			notifications,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			await harness.commands.get("permissions")?.handler("sandbox disable", harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await harness.commands.get("permissions")?.handler("sandbox disable", harness.ctx);
 
 		expect(notifications).toContain(
 			"Bash sandbox disabled for this session; bash exec mode: local (block-all-bash)",
@@ -2688,7 +2555,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		let initializeCount = 0;
 		const notifications: string[] = [];
 		const wrappedCommands: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			now: () => now,
 			notifications,
@@ -2703,16 +2570,12 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			await harness.commands.get("permissions")?.handler("sandbox disable", harness.ctx);
-			const bashTool = harness.tools.get("bash");
-			if (!bashTool) throw new Error("bash tool was not registered");
+		await harness.commands.get("permissions")?.handler("sandbox disable", harness.ctx);
+		const bashTool = harness.tools.get("bash");
+		if (!bashTool) throw new Error("bash tool was not registered");
 
-			await bashTool.execute("disabled-sandbox-test", { command: "true" }, undefined, undefined, harness.ctx);
-			await harness.commands.get("permissions")?.handler("sandbox status", harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await bashTool.execute("disabled-sandbox-test", { command: "true" }, undefined, undefined, harness.ctx);
+		await harness.commands.get("permissions")?.handler("sandbox status", harness.ctx);
 
 		expect(initializeCount).toBe(1);
 		expect(wrappedCommands).toEqual([]);
@@ -2725,7 +2588,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		let now = 0;
 		const notifications: string[] = [];
 		const wrappedCommands: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			rules: [{ tool: "bash", match: "^printf\\s+bypass$", action: "allow", sandbox: false }],
 			now: () => now,
@@ -2739,14 +2602,10 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			const bashTool = harness.tools.get("bash");
-			if (!bashTool) throw new Error("bash tool was not registered");
+		const bashTool = harness.tools.get("bash");
+		if (!bashTool) throw new Error("bash tool was not registered");
 
-			await bashTool.execute("bypass-test", { command: "printf bypass" }, undefined, undefined, harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await bashTool.execute("bypass-test", { command: "printf bypass" }, undefined, undefined, harness.ctx);
 
 		expect(wrappedCommands).toEqual([]);
 		expect(notifications).toContain(
@@ -2757,7 +2616,7 @@ describe("permissions extension sandbox lifecycle", () => {
 	it("keeps non-matching commands sandboxed when sandbox=false rules are configured", async () => {
 		let now = 0;
 		const wrappedCommands: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			rules: [{ tool: "bash", match: "^printf\\s+bypass$", action: "allow", sandbox: false }],
 			now: () => now,
@@ -2770,20 +2629,10 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			const bashTool = harness.tools.get("bash");
-			if (!bashTool) throw new Error("bash tool was not registered");
+		const bashTool = harness.tools.get("bash");
+		if (!bashTool) throw new Error("bash tool was not registered");
 
-			await bashTool.execute(
-				"sandboxed-test",
-				{ command: "printf sandboxed" },
-				undefined,
-				undefined,
-				harness.ctx,
-			);
-		} finally {
-			await harness.restore();
-		}
+		await bashTool.execute("sandboxed-test", { command: "printf sandboxed" }, undefined, undefined, harness.ctx);
 
 		expect(wrappedCommands).toContain("printf sandboxed");
 	});
@@ -2792,7 +2641,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		let now = 0;
 		const notifications: string[] = [];
 		const wrappedCommands: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			rules: [{ tool: "bash", match: "printf bypass *", action: "allow", sandbox: false }],
 			now: () => now,
@@ -2806,20 +2655,16 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			const bashTool = harness.tools.get("bash");
-			if (!bashTool) throw new Error("bash tool was not registered");
+		const bashTool = harness.tools.get("bash");
+		if (!bashTool) throw new Error("bash tool was not registered");
 
-			await bashTool.execute(
-				"compound-bypass-test",
-				{ command: "set -euo pipefail\nprintf setup\nprintf bypass >/tmp/mcpc.json\nprintf done" },
-				undefined,
-				undefined,
-				harness.ctx,
-			);
-		} finally {
-			await harness.restore();
-		}
+		await bashTool.execute(
+			"compound-bypass-test",
+			{ command: "set -euo pipefail\nprintf setup\nprintf bypass >/tmp/mcpc.json\nprintf done" },
+			undefined,
+			undefined,
+			harness.ctx,
+		);
 
 		expect(wrappedCommands).toEqual([]);
 		expect(notifications).toContain(
@@ -2832,7 +2677,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		let resetCount = 0;
 		let initializeCount = 0;
 		const notifications: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			now: () => now,
 			notifications,
@@ -2846,11 +2691,7 @@ describe("permissions extension sandbox lifecycle", () => {
 				wrapWithSandbox: async (command: string) => command,
 			},
 		});
-		try {
-			await harness.commands.get("permissions")?.handler("sandbox repair", harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await harness.commands.get("permissions")?.handler("sandbox repair", harness.ctx);
 
 		expect(resetCount).toBeGreaterThanOrEqual(2);
 		expect(initializeCount).toBeGreaterThanOrEqual(2);
@@ -2860,7 +2701,7 @@ describe("permissions extension sandbox lifecycle", () => {
 	it("uses tmpdir rather than cwd writes for idle health probes in plan mode", async () => {
 		let now = 0;
 		const wrappedCommands: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "plan",
 			now: () => now,
 			sandboxManager: {
@@ -2872,14 +2713,10 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			now = 5 * 60 * 1000;
-			const bashTool = harness.tools.get("bash");
-			if (!bashTool) throw new Error("bash tool was not registered");
-			await bashTool.execute("probe-test", { command: "true" }, undefined, undefined, harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		now = 5 * 60 * 1000;
+		const bashTool = harness.tools.get("bash");
+		if (!bashTool) throw new Error("bash tool was not registered");
+		await bashTool.execute("probe-test", { command: "true" }, undefined, undefined, harness.ctx);
 
 		expect(
 			wrappedCommands.some((command) =>
@@ -2895,7 +2732,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		let now = 0;
 		const notifications: string[] = [];
 		const wrappedCommands: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			now: () => now,
 			notifications,
@@ -2908,11 +2745,7 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			await harness.commands.get("permissions")?.handler("sandbox probe", harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await harness.commands.get("permissions")?.handler("sandbox probe", harness.ctx);
 
 		expect(notifications.some((message) => message.includes("TMPDIR writes are allowed"))).toBe(true);
 		expect(
@@ -2929,7 +2762,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		let now = 0;
 		const notifications: string[] = [];
 		const wrappedCommands: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			now: () => now,
 			notifications,
@@ -2942,11 +2775,7 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			await harness.commands.get("permissions")?.handler("sandbox probe workspace", harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await harness.commands.get("permissions")?.handler("sandbox probe workspace", harness.ctx);
 
 		expect(notifications.some((message) => message.includes("workspace writes are allowed"))).toBe(true);
 		expect(
@@ -2958,7 +2787,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		let now = 0;
 		const notifications: string[] = [];
 		const wrappedCommands: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "plan",
 			now: () => now,
 			notifications,
@@ -2971,11 +2800,7 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			await harness.commands.get("permissions")?.handler("sandbox probe workspace", harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await harness.commands.get("permissions")?.handler("sandbox probe workspace", harness.ctx);
 
 		expect(notifications.some((message) => message.includes("workspace write check skipped"))).toBe(true);
 		expect(
@@ -2985,9 +2810,8 @@ describe("permissions extension sandbox lifecycle", () => {
 
 	it("blocks local fallback when sandbox state disappears before execution", async () => {
 		let commandCount = 0;
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			sandboxManager: {
 				initialize: async () => {},
 				reset: async () => {},
@@ -2997,34 +2821,23 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			const bashTool = harness.tools.get("bash");
-			if (!bashTool) throw new Error("bash tool was not registered");
+		const bashTool = harness.tools.get("bash");
+		if (!bashTool) throw new Error("bash tool was not registered");
 
-			const execution = bashTool.execute(
-				"state-loss-test",
-				{ command: "true" },
-				undefined,
-				undefined,
-				harness.ctx,
-			);
-			for (const handler of harness.handlers.get("session_shutdown") ?? []) {
-				await handler({}, harness.ctx);
-			}
-
-			await expect(execution).rejects.toThrow("blocked local fallback");
-		} finally {
-			await harness.restore();
+		const execution = bashTool.execute("state-loss-test", { command: "true" }, undefined, undefined, harness.ctx);
+		for (const handler of harness.handlers.get("session_shutdown") ?? []) {
+			await handler({}, harness.ctx);
 		}
+
+		await expect(execution).rejects.toThrow("blocked local fallback");
 
 		expect(commandCount).toBe(0);
 	});
 
 	it("blocks execution when sandbox state is replaced before execution", async () => {
 		let commandCount = 0;
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			sandboxManager: {
 				initialize: async () => {},
 				reset: async () => {},
@@ -3034,28 +2847,24 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			const bashTool = harness.tools.get("bash");
-			if (!bashTool) throw new Error("bash tool was not registered");
+		const bashTool = harness.tools.get("bash");
+		if (!bashTool) throw new Error("bash tool was not registered");
 
-			const execution = bashTool.execute(
-				"state-replacement-test",
-				{ command: "true" },
-				undefined,
-				undefined,
-				harness.ctx,
-			);
-			for (const handler of harness.handlers.get("session_shutdown") ?? []) {
-				await handler({}, harness.ctx);
-			}
-			for (const handler of harness.handlers.get("session_start") ?? []) {
-				await handler({}, harness.ctx);
-			}
-
-			await expect(execution).rejects.toThrow("blocked local fallback");
-		} finally {
-			await harness.restore();
+		const execution = bashTool.execute(
+			"state-replacement-test",
+			{ command: "true" },
+			undefined,
+			undefined,
+			harness.ctx,
+		);
+		for (const handler of harness.handlers.get("session_shutdown") ?? []) {
+			await handler({}, harness.ctx);
 		}
+		for (const handler of harness.handlers.get("session_start") ?? []) {
+			await handler({}, harness.ctx);
+		}
+
+		await expect(execution).rejects.toThrow("blocked local fallback");
 
 		expect(commandCount).toBe(0);
 	});
@@ -3064,7 +2873,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		let now = 0;
 		let probeCount = 0;
 		let commandCount = 0;
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			now: () => now,
 			sandboxManager: {
@@ -3080,20 +2889,16 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			now = 5 * 60 * 1000;
-			const bashTool = harness.tools.get("bash");
-			if (!bashTool) throw new Error("bash tool was not registered");
+		now = 5 * 60 * 1000;
+		const bashTool = harness.tools.get("bash");
+		if (!bashTool) throw new Error("bash tool was not registered");
 
-			await expect(
-				bashTool.execute("probe-test-1", { command: "true" }, undefined, undefined, harness.ctx),
-			).rejects.toThrow("automatic repair failed");
-			await expect(
-				bashTool.execute("probe-test-2", { command: "true" }, undefined, undefined, harness.ctx),
-			).rejects.toThrow("automatic repair failed");
-		} finally {
-			await harness.restore();
-		}
+		await expect(
+			bashTool.execute("probe-test-1", { command: "true" }, undefined, undefined, harness.ctx),
+		).rejects.toThrow("automatic repair failed");
+		await expect(
+			bashTool.execute("probe-test-2", { command: "true" }, undefined, undefined, harness.ctx),
+		).rejects.toThrow("automatic repair failed");
 
 		expect(probeCount).toBe(4);
 		expect(commandCount).toBe(0);
@@ -3103,7 +2908,7 @@ describe("permissions extension sandbox lifecycle", () => {
 		let now = 0;
 		let probeCount = 0;
 		let commandCount = 0;
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			now: () => now,
 			sandboxManager: {
@@ -3120,15 +2925,11 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			now = 5 * 60 * 1000;
-			const bashTool = harness.tools.get("bash");
-			if (!bashTool) throw new Error("bash tool was not registered");
+		now = 5 * 60 * 1000;
+		const bashTool = harness.tools.get("bash");
+		if (!bashTool) throw new Error("bash tool was not registered");
 
-			await bashTool.execute("probe-test", { command: "true" }, undefined, undefined, harness.ctx);
-		} finally {
-			await harness.restore();
-		}
+		await bashTool.execute("probe-test", { command: "true" }, undefined, undefined, harness.ctx);
 
 		expect(probeCount).toBe(2);
 		expect(commandCount).toBe(1);
@@ -3136,33 +2937,27 @@ describe("permissions extension sandbox lifecycle", () => {
 
 	it("blocks user bash when policy requires confirmation without UI", async () => {
 		let now = 0;
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			now: () => now,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const userBash = harness.handlers.get("user_bash")?.[0];
-			if (!userBash) throw new Error("user_bash handler was not registered");
-			const ctx = { ...harness.ctx, hasUI: false } as ExtensionContext;
+		const userBash = harness.handlers.get("user_bash")?.[0];
+		if (!userBash) throw new Error("user_bash handler was not registered");
+		const ctx = { ...harness.ctx, hasUI: false } as ExtensionContext;
 
-			const result = (await userBash(
-				{ command: "npm test", excludeFromContext: true, cwd: harness.cwd },
-				ctx,
-			)) as { result?: { output?: string; exitCode?: number } } | undefined;
+		const result = (await userBash({ command: "npm test", excludeFromContext: true, cwd: harness.cwd }, ctx)) as
+			| { result?: { output?: string; exitCode?: number } }
+			| undefined;
 
-			expect(result?.result?.exitCode).toBe(1);
-			expect(result?.result?.output).toContain("Requires confirmation for bash but no UI is available");
-		} finally {
-			await harness.restore();
-		}
+		expect(result?.result?.exitCode).toBe(1);
+		expect(result?.result?.output).toContain("Requires confirmation for bash but no UI is available");
 	});
 
 	it("runs user bash rules with sandbox=false without wrapping them", async () => {
 		let now = 0;
 		const notifications: string[] = [];
 		const wrappedCommands: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			rules: [{ tool: "bash", match: "^printf\\s+user-bypass$", action: "allow", sandbox: false }],
 			now: () => now,
@@ -3176,19 +2971,15 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			const userBash = harness.handlers.get("user_bash")?.[0];
-			if (!userBash) throw new Error("user_bash handler was not registered");
-			const result = (await userBash(
-				{ command: "printf user-bypass", excludeFromContext: false, cwd: harness.cwd },
-				harness.ctx,
-			)) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
+		const userBash = harness.handlers.get("user_bash")?.[0];
+		if (!userBash) throw new Error("user_bash handler was not registered");
+		const result = (await userBash(
+			{ command: "printf user-bypass", excludeFromContext: false, cwd: harness.cwd },
+			harness.ctx,
+		)) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
 
-			expect(result?.operations).toBeDefined();
-			await result!.operations!.exec("printf user-bypass", harness.cwd, { onData: () => {} });
-		} finally {
-			await harness.restore();
-		}
+		expect(result?.operations).toBeDefined();
+		await result!.operations!.exec("printf user-bypass", harness.cwd, { onData: () => {} });
 
 		expect(wrappedCommands).toEqual([]);
 		expect(notifications).toContain(
@@ -3197,32 +2988,25 @@ describe("permissions extension sandbox lifecycle", () => {
 	});
 
 	it("keeps intentionally disabled user bash execution local", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
-			now: () => 0,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			await harness.commands.get("permissions")?.handler("sandbox disable", harness.ctx);
-			const userBash = harness.handlers.get("user_bash")?.[0];
-			if (!userBash) throw new Error("user_bash handler was not registered");
+		await harness.commands.get("permissions")?.handler("sandbox disable", harness.ctx);
+		const userBash = harness.handlers.get("user_bash")?.[0];
+		if (!userBash) throw new Error("user_bash handler was not registered");
 
-			const result = await userBash(
-				{ command: "printf local-user-bash", excludeFromContext: false, cwd: harness.cwd },
-				harness.ctx,
-			);
+		const result = await userBash(
+			{ command: "printf local-user-bash", excludeFromContext: false, cwd: harness.cwd },
+			harness.ctx,
+		);
 
-			expect(result).toBeUndefined();
-		} finally {
-			await harness.restore();
-		}
+		expect(result).toBeUndefined();
 	});
 
 	it("blocks local user bash fallback when sandbox state disappears before execution", async () => {
 		let commandCount = 0;
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
-			now: () => 0,
 			sandboxManager: {
 				initialize: async () => {},
 				reset: async () => {},
@@ -3232,24 +3016,20 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			const userBash = harness.handlers.get("user_bash")?.[0];
-			if (!userBash) throw new Error("user_bash handler was not registered");
-			const result = (await userBash(
-				{ command: "true", excludeFromContext: false, cwd: harness.cwd },
-				harness.ctx,
-			)) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
-			if (!result?.operations) throw new Error("sandboxed user bash operations were not returned");
+		const userBash = harness.handlers.get("user_bash")?.[0];
+		if (!userBash) throw new Error("user_bash handler was not registered");
+		const result = (await userBash(
+			{ command: "true", excludeFromContext: false, cwd: harness.cwd },
+			harness.ctx,
+		)) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
+		if (!result?.operations) throw new Error("sandboxed user bash operations were not returned");
 
-			for (const handler of harness.handlers.get("session_shutdown") ?? []) {
-				await handler({}, harness.ctx);
-			}
-
-			const execution = result.operations.exec("true", harness.cwd, { onData: () => {} });
-			await expect(execution).rejects.toThrow("blocked local fallback");
-		} finally {
-			await harness.restore();
+		for (const handler of harness.handlers.get("session_shutdown") ?? []) {
+			await handler({}, harness.ctx);
 		}
+
+		const execution = result.operations.exec("true", harness.cwd, { onData: () => {} });
+		await expect(execution).rejects.toThrow("blocked local fallback");
 
 		expect(commandCount).toBe(0);
 	});
@@ -3257,7 +3037,7 @@ describe("permissions extension sandbox lifecycle", () => {
 	it("runs user bash through active sandbox operations", async () => {
 		let now = 0;
 		const wrappedCommands: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			now: () => now,
 			sandboxManager: {
@@ -3269,248 +3049,173 @@ describe("permissions extension sandbox lifecycle", () => {
 				},
 			},
 		});
-		try {
-			const userBash = harness.handlers.get("user_bash")?.[0];
-			if (!userBash) throw new Error("user_bash handler was not registered");
-			const result = (await userBash(
-				{ command: "printf user-bash", excludeFromContext: false, cwd: harness.cwd },
-				harness.ctx,
-			)) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
+		const userBash = harness.handlers.get("user_bash")?.[0];
+		if (!userBash) throw new Error("user_bash handler was not registered");
+		const result = (await userBash(
+			{ command: "printf user-bash", excludeFromContext: false, cwd: harness.cwd },
+			harness.ctx,
+		)) as { operations?: { exec: (...args: any[]) => Promise<unknown> } } | undefined;
 
-			expect(result?.operations).toBeDefined();
-			await result!.operations!.exec("printf user-bash", harness.cwd, { onData: () => {} });
-		} finally {
-			await harness.restore();
-		}
+		expect(result?.operations).toBeDefined();
+		await result!.operations!.exec("printf user-bash", harness.cwd, { onData: () => {} });
 
 		expect(wrappedCommands).toContain("printf user-bash");
 	});
 
 	it("registers agent-name and no-sandbox but not a flag another extension owns", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			expect(harness.registeredFlags).toEqual(expect.arrayContaining(["agent-name", "no-sandbox"]));
-			// Pi rejects two extensions registering the same flag; the tasks extension owns this one.
-			expect(harness.registeredFlags).not.toContain("profile-name");
-		} finally {
-			await harness.restore();
-		}
+		expect(harness.registeredFlags).toEqual(expect.arrayContaining(["agent-name", "no-sandbox"]));
+		// Pi rejects two extensions registering the same flag; the tasks extension owns this one.
+		expect(harness.registeredFlags).not.toContain("profile-name");
 	});
 
 	it("honors a profile-name flag registered by another extension", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			flags: { "profile-name": "read-only" },
 			config: { profiles: { "read-only": { inherit: true, mode: "plan" } } },
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const last = harness.statusUpdates[harness.statusUpdates.length - 1];
-			expect(last).toContain("plan");
-		} finally {
-			await harness.restore();
-		}
+		const last = harness.statusUpdates[harness.statusUpdates.length - 1];
+		expect(last).toContain("plan");
 	});
 
 	it("restores a session mode override persisted on the branch", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			branchEntries: [{ type: "custom", customType: "permissions-state", data: { modeOverride: "plan" } }],
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const last = harness.statusUpdates[harness.statusUpdates.length - 1];
-			expect(last).toContain("plan");
-		} finally {
-			await harness.restore();
-		}
+		const last = harness.statusUpdates[harness.statusUpdates.length - 1];
+		expect(last).toContain("plan");
 	});
 
 	it("ignores a malformed session state entry instead of throwing", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			branchEntries: [{ type: "custom", customType: "permissions-state", data: { modeOverride: "nonsense" } }],
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const last = harness.statusUpdates[harness.statusUpdates.length - 1];
-			expect(last).toContain("workspace-write");
-		} finally {
-			await harness.restore();
-		}
+		const last = harness.statusUpdates[harness.statusUpdates.length - 1];
+		expect(last).toContain("workspace-write");
 	});
 
 	it("keeps the footer status to the effective mode while the session is healthy", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const last = harness.statusUpdates[harness.statusUpdates.length - 1];
-			expect(last).toContain("workspace-write");
-			expect(last).not.toContain("sandbox");
-			expect(last).not.toContain("tree-sitter");
-		} finally {
-			await harness.restore();
-		}
+		const last = harness.statusUpdates[harness.statusUpdates.length - 1];
+		expect(last).toContain("workspace-write");
+		expect(last).not.toContain("sandbox");
+		expect(last).not.toContain("tree-sitter");
 	});
 
 	it("persists session approvals so a reload can rebuild them", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			rules: [{ tool: "read", action: "ask" }],
 			now: () => 1_000,
 			approvalSelection: (choices) => choices.find((choice) => choice.startsWith("Allow file for this session")),
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			const result = await toolCall({ toolName: "read", input: { path: "README.md" } }, harness.ctx);
-			expect(result).toBeUndefined();
+		const toolCall = firstToolCall(harness);
+		const result = await toolCall({ toolName: "read", input: { path: "README.md" } }, harness.ctx);
+		expect(result).toBeUndefined();
 
-			const state = harness.appendedEntries.filter((entry) => entry.customType === "permissions-state").at(-1)
-				?.data as { pathApprovals?: unknown[] } | undefined;
-			expect(state?.pathApprovals).toHaveLength(1);
-		} finally {
-			await harness.restore();
-		}
+		const state = harness.appendedEntries.filter((entry) => entry.customType === "permissions-state").at(-1)
+			?.data as { pathApprovals?: unknown[] } | undefined;
+		expect(state?.pathApprovals).toHaveLength(1);
 	});
 
 	it("clears the footer status on session shutdown", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			expect(harness.statusUpdates.length).toBeGreaterThan(0);
-			for (const handler of harness.handlers.get("session_shutdown") ?? []) {
-				await handler({}, harness.ctx);
-			}
-			expect(harness.statusUpdates[harness.statusUpdates.length - 1]).toBeUndefined();
-		} finally {
-			await harness.restore();
+		expect(harness.statusUpdates.length).toBeGreaterThan(0);
+		for (const handler of harness.handlers.get("session_shutdown") ?? []) {
+			await handler({}, harness.ctx);
 		}
+		expect(harness.statusUpdates[harness.statusUpdates.length - 1]).toBeUndefined();
 	});
 
 	it("adds the sandbox hint as a prompt section instead of replacing the prompt", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const beforeAgentStart = harness.handlers.get("before_agent_start")?.[0];
-			if (!beforeAgentStart) throw new Error("before_agent_start handler was not registered");
-			const event = {
-				systemPrompt: "base prompt",
-				systemPromptOptions: { sections: {} as Record<string, string> },
-			};
+		const beforeAgentStart = harness.handlers.get("before_agent_start")?.[0];
+		if (!beforeAgentStart) throw new Error("before_agent_start handler was not registered");
+		const event = {
+			systemPrompt: "base prompt",
+			systemPromptOptions: { sections: {} as Record<string, string> },
+		};
 
-			const result = await beforeAgentStart(event, harness.ctx);
+		const result = await beforeAgentStart(event, harness.ctx);
 
-			expect(result).toBeUndefined();
-			expect(event.systemPrompt).toBe("base prompt");
-			expect(event.systemPromptOptions.sections.sandbox).toContain("Sandbox hint for bash");
-		} finally {
-			await harness.restore();
-		}
+		expect(result).toBeUndefined();
+		expect(event.systemPrompt).toBe("base prompt");
+		expect(event.systemPromptOptions.sections.sandbox).toContain("Sandbox hint for bash");
 	});
 
 	it("leaves the prompt untouched when no sandbox is active", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "full-access",
 			sandbox: { enabled: false },
-			now: () => 0,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const beforeAgentStart = harness.handlers.get("before_agent_start")?.[0];
-			if (!beforeAgentStart) throw new Error("before_agent_start handler was not registered");
-			const event = {
-				systemPrompt: "base prompt",
-				systemPromptOptions: { sections: {} as Record<string, string> },
-			};
+		const beforeAgentStart = harness.handlers.get("before_agent_start")?.[0];
+		if (!beforeAgentStart) throw new Error("before_agent_start handler was not registered");
+		const event = {
+			systemPrompt: "base prompt",
+			systemPromptOptions: { sections: {} as Record<string, string> },
+		};
 
-			const result = await beforeAgentStart(event, harness.ctx);
+		const result = await beforeAgentStart(event, harness.ctx);
 
-			expect(result).toBeUndefined();
-			expect(event.systemPromptOptions.sections.sandbox).toBeUndefined();
-		} finally {
-			await harness.restore();
-		}
+		expect(result).toBeUndefined();
+		expect(event.systemPromptOptions.sections.sandbox).toBeUndefined();
 	});
 
 	it("asks before an unclassified tool that declares no annotations", async () => {
 		const approvalTitles: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			approvalTitles,
 			approvalSelection: "Allow once",
 			registeredTools: [{ name: "some_extension_tool", parameters: { properties: {} } }],
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			const result = await toolCall({ toolName: "some_extension_tool", input: {} }, harness.ctx);
-			expect(result).toBeUndefined();
-			expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
-		} finally {
-			await harness.restore();
-		}
+		const toolCall = firstToolCall(harness);
+		const result = await toolCall({ toolName: "some_extension_tool", input: {} }, harness.ctx);
+		expect(result).toBeUndefined();
+		expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
 	});
 
 	it("does not ask before an unclassified tool that declares readOnlyHint", async () => {
 		const approvalTitles: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			approvalTitles,
 			approvalSelection: "Block",
 			registeredTools: [
 				{ name: "mcp__docs__search", parameters: { properties: {} }, annotations: { readOnlyHint: true } },
 			],
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			const result = await toolCall({ toolName: "mcp__docs__search", input: { query: "x" } }, harness.ctx);
-			expect(result).toBeUndefined();
-			expect(approvalTitles).toHaveLength(0);
-		} finally {
-			await harness.restore();
-		}
+		const toolCall = firstToolCall(harness);
+		const result = await toolCall({ toolName: "mcp__docs__search", input: { query: "x" } }, harness.ctx);
+		expect(result).toBeUndefined();
+		expect(approvalTitles).toHaveLength(0);
 	});
 
 	it("asks before an unclassified tool that declares destructiveHint", async () => {
 		const approvalTitles: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			approvalTitles,
 			approvalSelection: "Allow once",
 			registeredTools: [
 				{ name: "purger", parameters: { properties: {} }, annotations: { destructiveHint: true } },
 			],
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			const result = await toolCall({ toolName: "purger", input: {} }, harness.ctx);
-			expect(result).toBeUndefined();
-			expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
-		} finally {
-			await harness.restore();
-		}
+		const toolCall = firstToolCall(harness);
+		const result = await toolCall({ toolName: "purger", input: {} }, harness.ctx);
+		expect(result).toBeUndefined();
+		expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
 	});
 
 	it.each([
@@ -3554,148 +3259,101 @@ describe("permissions extension sandbox lifecycle", () => {
 		"applies the declared annotations for $name to the unclassified-tool default",
 		async ({ toolName, annotations, expectPrompt }) => {
 			const approvalTitles: string[] = [];
-			const harness = await setupPermissionsHarness({
+			const harness = await createHarness({
 				mode: "workspace-write",
-				now: () => 0,
 				approvalTitles,
 				approvalSelection: "Allow once",
 				registeredTools: [{ name: toolName, parameters: { properties: {} }, annotations }],
-				sandboxManager: noopSandboxManager,
 			});
-			try {
-				const toolCall = firstToolCall(harness);
-				const result = await toolCall({ toolName, input: {} }, harness.ctx);
-				expect(result).toBeUndefined();
-				if (expectPrompt) {
-					expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
-				} else {
-					expect(approvalTitles).toHaveLength(0);
-				}
-			} finally {
-				await harness.restore();
+			const toolCall = firstToolCall(harness);
+			const result = await toolCall({ toolName, input: {} }, harness.ctx);
+			expect(result).toBeUndefined();
+			if (expectPrompt) {
+				expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
+			} else {
+				expect(approvalTitles).toHaveLength(0);
 			}
 		},
 	);
 
 	it("lets config disable the annotation default", async () => {
 		const approvalTitles: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			approvalTitles,
 			approvalSelection: "Block",
 			registeredTools: [{ name: "some_extension_tool", parameters: { properties: {} } }],
 			config: { annotations: { enabled: false } },
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			const result = await toolCall({ toolName: "some_extension_tool", input: {} }, harness.ctx);
-			expect(result).toBeUndefined();
-			expect(approvalTitles).toHaveLength(0);
-		} finally {
-			await harness.restore();
-		}
+		const toolCall = firstToolCall(harness);
+		const result = await toolCall({ toolName: "some_extension_tool", input: {} }, harness.ctx);
+		expect(result).toBeUndefined();
+		expect(approvalTitles).toHaveLength(0);
 	});
 
 	it("reports unclassified path tools in /permissions verbose", async () => {
 		const notifications: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			hasUI: false,
-			now: () => 0,
 			notifications,
 			registeredTools: [{ name: "custom_path_tool", parameters: { properties: { path: {} } } }],
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const command = harness.commands.get("permissions");
-			if (!command) throw new Error("/permissions command was not registered");
-			await command.handler("verbose", harness.ctx);
-			expect(notifications.some((message) => message.includes("unclassifiedPathTools=custom_path_tool"))).toBe(
-				true,
-			);
-		} finally {
-			await harness.restore();
-		}
+		const command = harness.commands.get("permissions");
+		if (!command) throw new Error("/permissions command was not registered");
+		await command.handler("verbose", harness.ctx);
+		expect(notifications.some((message) => message.includes("unclassifiedPathTools=custom_path_tool"))).toBe(true);
 	});
 
 	it("publishes policy changes on the shared event bus", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const events = harness.emittedEvents.filter((entry) => entry.channel === "permissions:policy-changed");
-			expect(events.length).toBeGreaterThan(0);
-			expect(events[events.length - 1]?.data).toMatchObject({
-				reason: "reload",
-				mode: "workspace-write",
-				projectConfig: "always",
-			});
-		} finally {
-			await harness.restore();
-		}
+		const events = harness.emittedEvents.filter((entry) => entry.channel === "permissions:policy-changed");
+		expect(events.length).toBeGreaterThan(0);
+		expect(events[events.length - 1]?.data).toMatchObject({
+			reason: "reload",
+			mode: "workspace-write",
+			projectConfig: "always",
+		});
 	});
 
 	it("asks before an unclassified MCP tool that declares no annotations", async () => {
 		const approvalTitles: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
 			approvalTitles,
 			approvalSelection: "Allow once",
 			registeredTools: [{ name: "mcp__github__create_issue", parameters: { properties: {} } }],
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			await toolCall({ toolName: "mcp__github__create_issue", input: { title: "x" } }, harness.ctx);
-			expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
-		} finally {
-			await harness.restore();
-		}
+		const toolCall = firstToolCall(harness);
+		await toolCall({ toolName: "mcp__github__create_issue", input: { title: "x" } }, harness.ctx);
+		expect(approvalTitles.some((title) => title.includes("Permission required"))).toBe(true);
 	});
 
 	it("lets an explicit mcp rule skip the annotation default", async () => {
 		const approvalTitles: string[] = [];
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
 			rules: [{ tool: "mcp", action: "allow" }],
-			now: () => 0,
 			approvalTitles,
 			approvalSelection: "Block",
 			registeredTools: [{ name: "mcp__github__create_issue", parameters: { properties: {} } }],
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const toolCall = firstToolCall(harness);
-			const result = await toolCall(
-				{ toolName: "mcp__github__create_issue", input: { title: "x" } },
-				harness.ctx,
-			);
-			expect(result).toBeUndefined();
-			expect(approvalTitles).toHaveLength(0);
-		} finally {
-			await harness.restore();
-		}
+		const toolCall = firstToolCall(harness);
+		const result = await toolCall({ toolName: "mcp__github__create_issue", input: { title: "x" } }, harness.ctx);
+		expect(result).toBeUndefined();
+		expect(approvalTitles).toHaveLength(0);
 	});
 
 	it("registers its policy skill through resources_discover", async () => {
-		const harness = await setupPermissionsHarness({
+		const harness = await createHarness({
 			mode: "workspace-write",
-			now: () => 0,
-			sandboxManager: noopSandboxManager,
 		});
-		try {
-			const handler = harness.handlers.get("resources_discover")?.[0];
-			if (!handler) throw new Error("resources_discover handler was not registered");
-			const result = (await handler({}, harness.ctx)) as { skillPaths?: string[] } | undefined;
-			expect(result?.skillPaths?.[0]?.endsWith("SKILL.md")).toBe(true);
-		} finally {
-			await harness.restore();
-		}
+		const handler = harness.handlers.get("resources_discover")?.[0];
+		if (!handler) throw new Error("resources_discover handler was not registered");
+		const result = (await handler({}, harness.ctx)) as { skillPaths?: string[] } | undefined;
+		expect(result?.skillPaths?.[0]?.endsWith("SKILL.md")).toBe(true);
 	});
 });
 
