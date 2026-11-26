@@ -3,18 +3,24 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getBuiltinPermissionRules } from "./default-rules";
-import { getBuiltinProtectedResourceMatches, getBuiltinProtectedWorkspaceReadGlobs } from "./protected-resources";
+import {
+	getBuiltinProtectedResourceMatches,
+	getBuiltinProtectedWorkspaceReadGlobs,
+	isEnvFilesProtectedMatch,
+} from "./protected-resources";
 import {
 	type AgentProfile,
 	type EffectivePolicy,
 	type ExternalPathPolicy,
 	type PermissionMode,
 	type PermissionsConfig,
+	type ProtectedAction,
 	type ResolvedAnnotationPolicySettings,
 	type ResolvedClassifierSettings,
 	type ResolvedProtectedResources,
 	type Rule,
 	dedupeStrings,
+	protectedResourceReason,
 } from "./shared";
 
 export function parseJsonc(text: string): unknown {
@@ -388,7 +394,7 @@ export function loadConfig(
 export function resolveProtectedResources(config: PermissionsConfig): ResolvedProtectedResources {
 	const settings = config.protectedResources ?? {};
 	const enabled = settings.enabled ?? true;
-	if (!enabled) return { denyRead: [], denyWrite: [], workspaceRead: [], readAction: "ask" };
+	if (!enabled) return { denyRead: [], denyWrite: [], workspaceRead: [], readAction: "ask", envWriteAction: "ask" };
 
 	const useDefaults = settings.defaults ?? true;
 	const denyReadSource = [
@@ -410,40 +416,28 @@ export function resolveProtectedResources(config: PermissionsConfig): ResolvedPr
 			...(settings.workspaceRead ?? []),
 		]),
 		readAction: settings.readAction ?? "ask",
+		envWriteAction: settings.envWriteAction ?? "ask",
 	};
 }
 
 export function compileProtectedRules(protectedResources: ResolvedProtectedResources): Rule[] {
+	const rule = (tool: Rule["tool"], match: string, action: ProtectedAction): Rule => ({
+		tool,
+		match,
+		action,
+		reason: protectedResourceReason(action),
+		protectedAccess: tool === "read" ? "read" : "write",
+		// Protected resources must be decided by the human, never the auto-mode classifier.
+		autoReview: false,
+	});
+
 	const rules: Rule[] = [];
 	for (const match of protectedResources.denyRead) {
-		rules.push({
-			tool: "read",
-			match,
-			action: protectedResources.readAction,
-			reason:
-				protectedResources.readAction === "block"
-					? "Blocked by protected resource policy"
-					: "Protected resource requires confirmation",
-			protectedAccess: "read",
-			// Protected reads must be decided by the human, never the auto-mode classifier.
-			autoReview: false,
-		});
+		rules.push(rule("read", match, protectedResources.readAction));
 	}
 	for (const match of protectedResources.denyWrite) {
-		rules.push({
-			tool: "write",
-			match,
-			action: "block",
-			reason: "Blocked by protected resource policy",
-			protectedAccess: "write",
-		});
-		rules.push({
-			tool: "edit",
-			match,
-			action: "block",
-			reason: "Blocked by protected resource policy",
-			protectedAccess: "write",
-		});
+		const action = protectedResources.envWriteAction === "ask" && isEnvFilesProtectedMatch(match) ? "ask" : "block";
+		rules.push(rule("write", match, action), rule("edit", match, action));
 	}
 	return rules;
 }

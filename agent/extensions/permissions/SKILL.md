@@ -22,7 +22,9 @@ An ask means the user decides. "Allow once" covers that call only. The other opt
 
 ## Protected resources
 
-Some paths are protected regardless of other rules: `.env` files and key material, `.aws`/`.ssh`/`.gnupg`, Git hooks and config, shell startup files, editor directories, and the MCP config. Reads ask for confirmation by default; writes always block. Only `protectedResources` in the permissions config can change this (`readAction: "block"` makes protected reads a hard denial with no approval path).
+Some paths are protected regardless of other rules: `.env` files and key material, `.aws`/`.ssh`/`.gnupg`, Git hooks and config, shell startup files, editor directories, and the MCP config. Reads ask for confirmation by default; writes always block, except env-file writes, which also ask by default so worktree setup and `cp .env.example .env` can proceed.
+
+While an action is `ask`, env files are not OS-denied for it. Bash prompts when a command names a literal env path (`cat .env`, `cp .env.example .env`); indirect paths such as `cat "$FILE"` are not detected. Set `readAction: "block"` or `envWriteAction: "block"` under `protectedResources` to restore a hard denial in both layers. Other protected resources keep their sandbox denies.
 
 Env templates (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.defaults`) are read-exempt inside the project by default. To let a project's own env file be read by the agent (for tests, dev servers, or worktree setup), add a workspace-scoped exception instead of unprotecting `.env` globally:
 

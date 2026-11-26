@@ -108,8 +108,12 @@
  * .env.defaults) are read-exempt by default and need no configuration.
  *
  * Protected reads resolve to `"ask"` by default, so a human can approve the file for the
- * request, session, or permanently. Set `protectedResources.readAction` to `"block"` to restore
- * a hard denial with no approval path. Protected writes always block.
+ * request, session, or permanently. Env-file writes also ask by default, so worktree setup and
+ * `cp .env.example .env` can proceed. While an action is `ask`, the OS sandbox does not deny env
+ * files for it either, and bash prompts when a command names a literal env path (dynamic paths
+ * are not detected). Set `protectedResources.readAction` or `envWriteAction` to `"block"` to
+ * restore a hard denial in both layers. Other protected reads and writes keep their sandbox
+ * denies.
  *
  * Auto mode ("mode": "auto"):
  *   NOT enabled by default — the default mode is "workspace-write". Switch
@@ -206,6 +210,7 @@ import {
 	resolveProtectedResources,
 } from "./config";
 import { writeApprovalFileAtomic } from "./approval-store";
+import { findBashEnvPathHit } from "./bash-env-paths";
 import { classifyPermissionRequest as classifyPermissionRequestDefault } from "./classifier";
 import {
 	approvalsCoverBash,
@@ -1700,8 +1705,23 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			);
 		}
 
+		// Env files resolve to ask, so the sandbox cannot enforce them. Recover the prompt for
+		// literal env paths here; hard blocks still win, and a saved command approval covers it.
+		const envPathHit = findBashEnvPathHit(parsedBash, ctx.cwd, policy.protectedResources);
+		if (envPathHit?.action === "block") {
+			if (ctx.hasUI) ctx.ui.notify(`🚫 bash: ${envPathHit.reason}`, "warning");
+			return blockPermission(envPathHit.reason);
+		}
+		const commandApproved =
+			isApprovedBashSegment(command) ||
+			(parsedBash.commands.length > 0 &&
+				parsedBash.commands.every((parsed) => isApprovedBashSegment(parsed.source)));
+		const envPathPrompt = envPathHit?.action === "ask" && !commandApproved ? envPathHit.reason : undefined;
+		const allowUnlessEnvPathPrompt = async (): Promise<PermissionDecision> =>
+			envPathPrompt ? askPermission("bash", input, envPathPrompt, projectRoot, ctx) : ALLOW_PERMISSION;
+
 		if (canAutoApproveParsedBash(parsedBash, policy.rules, isApprovedBashSegment)) {
-			return ALLOW_PERMISSION;
+			return allowUnlessEnvPathPrompt();
 		}
 
 		const getUnapprovedBashSegment = (): { segment?: string; parsed?: ParsedCommand } => {
@@ -1711,7 +1731,9 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 		};
 
 		const rule = policy.rules.length > 0 ? matchRule(policy.rules, "bash", input) : undefined;
-		if (!rule) return ALLOW_PERMISSION;
+		if (!rule) {
+			return allowUnlessEnvPathPrompt();
+		}
 
 		if (rule.action === "block") {
 			const reason = rule.reason ?? `Blocked by permissions policy (profile: ${agentName})`;
@@ -1724,9 +1746,12 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			// segment is unapproved, so go straight to finding it.
 			const { segment: unapprovedSegment, parsed: unapprovedParsed } = getUnapprovedBashSegment();
 			const note =
-				rule.reason ?? (unapprovedSegment ? `Unapproved shell segment: ${unapprovedSegment}` : undefined);
+				envPathPrompt ??
+				rule.reason ??
+				(unapprovedSegment ? `Unapproved shell segment: ${unapprovedSegment}` : undefined);
 			if (
-				await maybeAutoApprove(
+				!envPathPrompt &&
+				(await maybeAutoApprove(
 					"bash",
 					input,
 					rule,
@@ -1734,7 +1759,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 					policy.mode,
 					ctx,
 					unapprovedParsed,
-				)
+				))
 			) {
 				return ALLOW_PERMISSION;
 			}
@@ -1755,7 +1780,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			}
 		}
 
-		return ALLOW_PERMISSION;
+		return allowUnlessEnvPathPrompt();
 	}
 
 	function blockedUserBashResult(reason: string): UserBashEventResult {
@@ -1890,7 +1915,14 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			isWorkspaceReadExempt(readExemptionPath, ctx.cwd, policy.protectedResources.workspaceRead)
 				? policy.rules.filter((candidate) => candidate.protectedAccess !== "read")
 				: policy.rules;
-		const rule = rules.length > 0 ? matchRule(rules, toolName, input) : undefined;
+		let rule = rules.length > 0 ? matchRule(rules, toolName, input) : undefined;
+		// Protected asks are prepended invariants, but they resolve to a prompt rather than a block.
+		// A later block rule (plan mode, profile policy, user catch-all) must still win; a later
+		// allow or ask does not remove the prompt.
+		if (rule?.action === "ask" && rule.protectedAccess !== undefined) {
+			const override = matchRule(rules.slice(rules.indexOf(rule) + 1), toolName, input);
+			if (override?.action === "block") rule = override;
+		}
 
 		if (rule) {
 			if (rule.action === "block") {
@@ -1900,9 +1932,9 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			}
 
 			if (rule.action === "ask") {
-				// A protected read outside the workspace never overrides a hard external-path policy.
-				// The approval grants the protected file, not access outside the project.
-				if (rule.protectedAccess === "read" && policy.externalPath === "block") {
+				// A protected read or write outside the workspace never overrides a hard external-path
+				// policy. The approval grants the protected file, not access outside the project.
+				if (rule.protectedAccess !== undefined && policy.externalPath === "block") {
 					const externalPaths = getExternalPaths(toolName, input, ctx.cwd);
 					if (externalPaths.length > 0) {
 						return applyExternalPathPolicy("block", toolName, input, externalPaths, projectRoot, ctx);
@@ -2310,7 +2342,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 					if (protectedResources.denyRead.length > 4)
 						lines.push(`  ${theme.fg("dim", `  ... ${protectedResources.denyRead.length - 4} more`)}`);
 					lines.push(
-						`  ${theme.fg("muted", "Protected write:")}${theme.fg("warning", ` ${protectedResources.denyWrite.length}`)}`,
+						`  ${theme.fg("muted", "Protected write:")}${theme.fg("warning", ` ${protectedResources.denyWrite.length}`)}${theme.fg("dim", protectedResources.envWriteAction === "ask" ? " (env ask)" : "")}`,
 					);
 					for (const pattern of protectedResources.denyWrite.slice(0, 4))
 						lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", pattern)}`);

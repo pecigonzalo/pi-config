@@ -8,13 +8,18 @@ import {
 	baseRestrictionMode,
 	type EffectivePolicy,
 	type PermissionMode,
+	type ProtectedAction,
 	type SandboxManagerLike,
 	type SandboxRuntimeConfigLike,
 	type SandboxSettings,
 	dedupeStrings,
 } from "./shared";
 import { resolveToken, ruleMatch } from "./matching";
-import { getProtectedResourceSandboxDenySpec, type ProtectedResourceAccess } from "./protected-resources";
+import {
+	getProtectedResourceSandboxDenySpec,
+	isEnvFilesProtectedMatch,
+	type ProtectedResourceAccess,
+} from "./protected-resources";
 
 /**
  * Capture the real system tmpdir before sandbox overrides $TMPDIR.
@@ -511,6 +516,12 @@ function getSandboxModeDefault(policy: EffectivePolicy, cwd: string): SandboxMod
 	return modeDefaults[baseRestrictionMode(policy.mode)];
 }
 
+function withoutSoftEnvPatterns(patterns: string[], action: ProtectedAction): string[] {
+	// The sandbox can only enforce a hard deny. Ask-resolved env files rely on Pi's tool rules and
+	// the bash permission policy, so their sandbox denial is dropped for that action.
+	return action === "ask" ? patterns.filter((pattern) => !isEnvFilesProtectedMatch(pattern)) : patterns;
+}
+
 function compileSandboxFilesystemConfig(
 	policy: EffectivePolicy,
 	cwd: string,
@@ -541,8 +552,16 @@ function compileSandboxFilesystemConfig(
 		...dockerBuildxWritePaths,
 		...effectiveTmpDirWritePaths,
 	]);
-	const protectedDenyRead = getProtectedSandboxDenyPaths(policy.protectedResources.denyRead, "read", cwd);
-	const protectedDenyWrite = getProtectedSandboxDenyPaths(policy.protectedResources.denyWrite, "write", cwd);
+	const protectedDenyRead = getProtectedSandboxDenyPaths(
+		withoutSoftEnvPatterns(policy.protectedResources.denyRead, policy.protectedResources.readAction),
+		"read",
+		cwd,
+	);
+	const protectedDenyWrite = getProtectedSandboxDenyPaths(
+		withoutSoftEnvPatterns(policy.protectedResources.denyWrite, policy.protectedResources.envWriteAction),
+		"write",
+		cwd,
+	);
 	// Read exceptions are re-allowed inside the broad protected deny globs. The sandbox runtime
 	// applies them after denyRead, so they win for these paths only.
 	const allowRead = dedupeStrings([

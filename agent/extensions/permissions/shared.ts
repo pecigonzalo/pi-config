@@ -147,9 +147,16 @@ export interface ProtectedResourcesSettings {
 	/**
 	 * What a protected read resolves to. `"ask"` (default) prompts the user, who can approve it
 	 * for the request, session, or permanently. `"block"` is a hard denial with no approval path.
-	 * Protected writes always block.
+	 * Protected writes are controlled separately by `envWriteAction` and otherwise always block.
 	 */
-	readAction?: ProtectedReadAction;
+	readAction?: ProtectedAction;
+	/**
+	 * How writes to env files resolve. `"ask"` (default) prompts, so worktree setup and `cp
+	 * .env.example .env` can proceed after approval; the OS sandbox no longer denies these
+	 * writes. `"block"` restores a hard denial in both layers. Other protected writes always
+	 * block.
+	 */
+	envWriteAction?: ProtectedAction;
 	/**
 	 * Glob patterns relative to cwd that are exempt from read protection when the resolved path
 	 * stays inside the workspace. Writes stay protected, and reads of the same file name outside
@@ -171,7 +178,15 @@ export interface ResolvedAnnotationPolicySettings {
 	askWhenUnannotated: boolean;
 }
 
-export type ProtectedReadAction = "ask" | "block";
+export type ProtectedAction = "ask" | "block";
+
+/** Reason text used by protected-resource rules; bash hits append the resolved path. */
+export const PROTECTED_RESOURCE_BLOCK_REASON = "Blocked by protected resource policy";
+export const PROTECTED_RESOURCE_ASK_REASON = "Protected resource requires confirmation";
+
+export function protectedResourceReason(action: ProtectedAction): string {
+	return action === "block" ? PROTECTED_RESOURCE_BLOCK_REASON : PROTECTED_RESOURCE_ASK_REASON;
+}
 
 export interface ResolvedProtectedResources {
 	denyRead: string[];
@@ -179,7 +194,9 @@ export interface ResolvedProtectedResources {
 	/** Workspace-relative globs exempt from read protection. Includes built-in templates. */
 	workspaceRead: string[];
 	/** How protected reads resolve. Defaults to `"ask"`. */
-	readAction: ProtectedReadAction;
+	readAction: ProtectedAction;
+	/** How env-file writes resolve. Defaults to `"ask"`; other protected writes always block. */
+	envWriteAction: ProtectedAction;
 }
 
 export interface ApprovalsSettings {

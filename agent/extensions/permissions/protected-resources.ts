@@ -20,10 +20,17 @@ export const GIT_METADATA_PROTECTED_RESOURCE_MATCH = "(^|[/])\\.git/(hooks/|conf
 const ENV_FILE_GLOBS = ["**/.env", "**/.env.*"] as const;
 const KEY_MATERIAL_GLOBS = ["**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.crt", "**/*.ca-bundle"] as const;
 
+export const ENV_FILES_PROTECTED_RESOURCE_MATCH = "\\.env(\\..+)?$";
+
+/** True for the built-in env-file protection pattern (the only resource with a soft write policy). */
+export function isEnvFilesProtectedMatch(match: string): boolean {
+	return match === ENV_FILES_PROTECTED_RESOURCE_MATCH;
+}
+
 /**
  * Env templates document required variables and hold no secrets, so reads of them are exempt
- * inside the workspace. Writes stay protected: the sandbox has no allow-within-deny for writes,
- * and creating a real `.env` from a template should remain a deliberate user action.
+ * inside the workspace. Env writes also resolve to "ask" by default, which is why the sandbox
+ * does not hard-deny them.
  */
 const ENV_FILE_TEMPLATE_GLOBS = [
 	"**/.env.example",
@@ -36,7 +43,7 @@ const ENV_FILE_TEMPLATE_GLOBS = [
 const BUILTIN_PROTECTED_RESOURCES: readonly ProtectedResourceDefinition[] = [
 	{
 		id: "env-files",
-		match: "\\.env(\\..+)?$",
+		match: ENV_FILES_PROTECTED_RESOURCE_MATCH,
 		denyRead: true,
 		denyWrite: true,
 		sandboxDenyRead: ENV_FILE_GLOBS,
