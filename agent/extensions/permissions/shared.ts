@@ -145,6 +145,12 @@ export interface ProtectedResourcesSettings {
 	unprotectRead?: string[];
 	unprotectWrite?: string[];
 	/**
+	 * What a protected read resolves to. `"ask"` (default) prompts the user, who can approve it
+	 * for the request, session, or permanently. `"block"` is a hard denial with no approval path.
+	 * Protected writes always block.
+	 */
+	readAction?: ProtectedReadAction;
+	/**
 	 * Glob patterns relative to cwd that are exempt from read protection when the resolved path
 	 * stays inside the workspace. Writes stay protected, and reads of the same file name outside
 	 * cwd stay protected. Intended for env files that the project's own tooling reads.
@@ -165,11 +171,15 @@ export interface ResolvedAnnotationPolicySettings {
 	askWhenUnannotated: boolean;
 }
 
+export type ProtectedReadAction = "ask" | "block";
+
 export interface ResolvedProtectedResources {
 	denyRead: string[];
 	denyWrite: string[];
 	/** Workspace-relative globs exempt from read protection. Includes built-in templates. */
 	workspaceRead: string[];
+	/** How protected reads resolve. Defaults to `"ask"`. */
+	readAction: ProtectedReadAction;
 }
 
 export interface ApprovalsSettings {

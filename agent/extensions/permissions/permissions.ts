@@ -107,6 +107,10 @@
  * protected. Env templates (.env.example, .env.sample, .env.template, .env.dist,
  * .env.defaults) are read-exempt by default and need no configuration.
  *
+ * Protected reads resolve to `"ask"` by default, so a human can approve the file for the
+ * request, session, or permanently. Set `protectedResources.readAction` to `"block"` to restore
+ * a hard denial with no approval path. Protected writes always block.
+ *
  * Auto mode ("mode": "auto"):
  *   NOT enabled by default — the default mode is "workspace-write". Switch
  *   into it for the current session with `/permissions mode auto` (any of
@@ -1896,6 +1900,14 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			}
 
 			if (rule.action === "ask") {
+				// A protected read outside the workspace never overrides a hard external-path policy.
+				// The approval grants the protected file, not access outside the project.
+				if (rule.protectedAccess === "read" && policy.externalPath === "block") {
+					const externalPaths = getExternalPaths(toolName, input, ctx.cwd);
+					if (externalPaths.length > 0) {
+						return applyExternalPathPolicy("block", toolName, input, externalPaths, projectRoot, ctx);
+					}
+				}
 				// For filesystem tools, check if an existing folder/path approval already covers this path
 				if (isFilesystemToolName(toolName)) {
 					const rawPath = getPathInput(input);
@@ -2291,7 +2303,7 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 						`  ${theme.fg("muted", "Sandbox TMPDIR: ")}${theme.fg("dim", sandboxTmpDir ?? getEffectiveSandboxTmpDir(ctx.cwd, config.sandbox))}${theme.fg("dim", sandboxTmpDirEphemeral ? " (session)" : " (shared)")}`,
 					);
 					lines.push(
-						`  ${theme.fg("muted", "Protected read: ")}${theme.fg("warning", `${protectedResources.denyRead.length}`)}`,
+						`  ${theme.fg("muted", "Protected read: ")}${theme.fg("warning", `${protectedResources.denyRead.length}`)}${theme.fg("dim", ` (${protectedResources.readAction})`)}`,
 					);
 					for (const pattern of protectedResources.denyRead.slice(0, 4))
 						lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", pattern)}`);

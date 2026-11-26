@@ -388,7 +388,7 @@ export function loadConfig(
 export function resolveProtectedResources(config: PermissionsConfig): ResolvedProtectedResources {
 	const settings = config.protectedResources ?? {};
 	const enabled = settings.enabled ?? true;
-	if (!enabled) return { denyRead: [], denyWrite: [], workspaceRead: [] };
+	if (!enabled) return { denyRead: [], denyWrite: [], workspaceRead: [], readAction: "ask" };
 
 	const useDefaults = settings.defaults ?? true;
 	const denyReadSource = [
@@ -409,6 +409,7 @@ export function resolveProtectedResources(config: PermissionsConfig): ResolvedPr
 			...(useDefaults ? getBuiltinProtectedWorkspaceReadGlobs() : []),
 			...(settings.workspaceRead ?? []),
 		]),
+		readAction: settings.readAction ?? "ask",
 	};
 }
 
@@ -418,9 +419,14 @@ export function compileProtectedRules(protectedResources: ResolvedProtectedResou
 		rules.push({
 			tool: "read",
 			match,
-			action: "block",
-			reason: "Blocked by protected resource policy",
+			action: protectedResources.readAction,
+			reason:
+				protectedResources.readAction === "block"
+					? "Blocked by protected resource policy"
+					: "Protected resource requires confirmation",
 			protectedAccess: "read",
+			// Protected reads must be decided by the human, never the auto-mode classifier.
+			autoReview: false,
 		});
 	}
 	for (const match of protectedResources.denyWrite) {
