@@ -20,7 +20,7 @@ export const GIT_METADATA_PROTECTED_RESOURCE_MATCH = "(^|[/])\\.git/(hooks/|conf
 const ENV_FILE_GLOBS = ["**/.env", "**/.env.*"] as const;
 const KEY_MATERIAL_GLOBS = ["**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.crt", "**/*.ca-bundle"] as const;
 
-export const ENV_FILES_PROTECTED_RESOURCE_MATCH = "\\.env(\\..+)?$";
+const ENV_FILES_PROTECTED_RESOURCE_MATCH = "\\.env(\\..+)?$";
 
 /** True for the built-in env-file protection pattern (the only resource with a soft write policy). */
 export function isEnvFilesProtectedMatch(match: string): boolean {

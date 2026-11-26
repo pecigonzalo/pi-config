@@ -232,7 +232,7 @@ export function isPathOutsideCwd(rawPath: string, cwd: string): boolean {
 }
 
 /** Translates a workspace-relative glob into a RegExp source (`*`, `**`, and `?` supported). */
-export function globToRegExpSource(glob: string): string {
+function globToRegExpSource(glob: string): string {
 	const normalized = glob.replace(/\\/g, "/");
 	let source = "^";
 
@@ -263,7 +263,7 @@ export function globToRegExpSource(glob: string): string {
 	return `${source}$`;
 }
 
-export function globMatchesPath(glob: string, relativePath: string): boolean {
+function globMatchesPath(glob: string, relativePath: string): boolean {
 	try {
 		return new RegExp(globToRegExpSource(glob)).test(relativePath.replace(/\\/g, "/"));
 	} catch {

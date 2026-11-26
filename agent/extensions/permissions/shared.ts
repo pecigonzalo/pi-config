@@ -182,7 +182,7 @@ export type ProtectedAction = "ask" | "block";
 
 /** Reason text used by protected-resource rules; bash hits append the resolved path. */
 export const PROTECTED_RESOURCE_BLOCK_REASON = "Blocked by protected resource policy";
-export const PROTECTED_RESOURCE_ASK_REASON = "Protected resource requires confirmation";
+const PROTECTED_RESOURCE_ASK_REASON = "Protected resource requires confirmation";
 
 export function protectedResourceReason(action: ProtectedAction): string {
 	return action === "block" ? PROTECTED_RESOURCE_BLOCK_REASON : PROTECTED_RESOURCE_ASK_REASON;
