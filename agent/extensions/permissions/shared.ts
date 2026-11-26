@@ -38,6 +38,11 @@ export interface Rule {
 	 * false to force a human prompt for this rule regardless of classifier confidence.
 	 */
 	autoReview?: boolean;
+	/**
+	 * Marks a rule compiled from `protectedResources`. Read-tagged rules are skipped when the
+	 * target matches a workspace read exception; user rules are never affected.
+	 */
+	protectedAccess?: "read" | "write";
 }
 
 export interface AgentProfile {
@@ -139,6 +144,12 @@ export interface ProtectedResourcesSettings {
 	addDenyWrite?: string[];
 	unprotectRead?: string[];
 	unprotectWrite?: string[];
+	/**
+	 * Glob patterns relative to cwd that are exempt from read protection when the resolved path
+	 * stays inside the workspace. Writes stay protected, and reads of the same file name outside
+	 * cwd stay protected. Intended for env files that the project's own tooling reads.
+	 */
+	workspaceRead?: string[];
 }
 
 /** Settings for the annotation-based default applied to tools no rule classifies. */
@@ -157,6 +168,8 @@ export interface ResolvedAnnotationPolicySettings {
 export interface ResolvedProtectedResources {
 	denyRead: string[];
 	denyWrite: string[];
+	/** Workspace-relative globs exempt from read protection. Includes built-in templates. */
+	workspaceRead: string[];
 }
 
 export interface ApprovalsSettings {
@@ -201,6 +214,7 @@ export interface SandboxSettings {
 	allowPty?: boolean;
 	bypassCommands?: string[];
 	addAllowWrite?: string[];
+	allowRead?: string[];
 	denyRead?: string[];
 	denyWrite?: string[];
 	env?: Record<string, string>;

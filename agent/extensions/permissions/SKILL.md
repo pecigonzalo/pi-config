@@ -24,6 +24,14 @@ An ask means the user decides. "Allow once" covers that call only. The other opt
 
 Some paths are blocked for reads or writes regardless of other rules: `.env` files and key material, `.aws`/`.ssh`/`.gnupg`, Git hooks and config, shell startup files, editor directories, and the MCP config. Only `protectedResources` in the permissions config can remove a protection.
 
+Env templates (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.defaults`) are read-exempt inside the project by default. To let a project's own env file be read by the agent (for tests, dev servers, or worktree setup), add a workspace-scoped exception instead of unprotecting `.env` globally:
+
+```jsonc
+"protectedResources": { "workspaceRead": ["**/.env", "**/.env.*"] }
+```
+
+Exceptions only apply to resolved paths inside the workspace, and writes stay protected.
+
 ## Sandbox
 
 When the OS sandbox is active, bash writes are limited to the workspace, the session temporary directory, and configured cache paths. The system prompt lists the effective limits. A denied write is a policy decision, not a bug: ask the user instead of retrying with another path.

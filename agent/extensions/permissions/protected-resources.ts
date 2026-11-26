@@ -20,6 +20,19 @@ export const GIT_METADATA_PROTECTED_RESOURCE_MATCH = "(^|[/])\\.git/(hooks/|conf
 const ENV_FILE_GLOBS = ["**/.env", "**/.env.*"] as const;
 const KEY_MATERIAL_GLOBS = ["**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.crt", "**/*.ca-bundle"] as const;
 
+/**
+ * Env templates document required variables and hold no secrets, so reads of them are exempt
+ * inside the workspace. Writes stay protected: the sandbox has no allow-within-deny for writes,
+ * and creating a real `.env` from a template should remain a deliberate user action.
+ */
+const ENV_FILE_TEMPLATE_GLOBS = [
+	"**/.env.example",
+	"**/.env.sample",
+	"**/.env.template",
+	"**/.env.dist",
+	"**/.env.defaults",
+] as const;
+
 const BUILTIN_PROTECTED_RESOURCES: readonly ProtectedResourceDefinition[] = [
 	{
 		id: "env-files",
@@ -91,6 +104,11 @@ export function getBuiltinProtectedResourceMatches(access: ProtectedResourceAcce
 	return BUILTIN_PROTECTED_RESOURCES.filter((resource) =>
 		access === "read" ? resource.denyRead === true : resource.denyWrite === true,
 	).map((resource) => resource.match);
+}
+
+/** Globs exempt from protected-resource reads everywhere inside the workspace. */
+export function getBuiltinProtectedWorkspaceReadGlobs(): string[] {
+	return [...ENV_FILE_TEMPLATE_GLOBS];
 }
 
 export function getProtectedResourceSandboxDenySpec(

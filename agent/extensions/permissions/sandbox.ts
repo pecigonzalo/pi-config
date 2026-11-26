@@ -543,6 +543,12 @@ function compileSandboxFilesystemConfig(
 	]);
 	const protectedDenyRead = getProtectedSandboxDenyPaths(policy.protectedResources.denyRead, "read", cwd);
 	const protectedDenyWrite = getProtectedSandboxDenyPaths(policy.protectedResources.denyWrite, "write", cwd);
+	// Read exceptions are re-allowed inside the broad protected deny globs. The sandbox runtime
+	// applies them after denyRead, so they win for these paths only.
+	const allowRead = dedupeStrings([
+		...resolveSandboxPathTokens(policy.protectedResources.workspaceRead, cwd),
+		...resolveSandboxPathTokens(overrides?.allowRead ?? [], cwd),
+	]);
 	const denyRead = dedupeStrings([
 		...protectedDenyRead.paths,
 		...resolveSandboxPathTokens(overrides?.denyRead ?? [], cwd),
@@ -563,6 +569,7 @@ function compileSandboxFilesystemConfig(
 		warnings,
 		filesystem: {
 			denyRead,
+			...(allowRead.length > 0 ? { allowRead } : {}),
 			allowWrite,
 			denyWrite,
 		},

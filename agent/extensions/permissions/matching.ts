@@ -231,6 +231,67 @@ export function isPathOutsideCwd(rawPath: string, cwd: string): boolean {
 	return target !== root && !target.startsWith(normalizedRoot);
 }
 
+/** Translates a workspace-relative glob into a RegExp source (`*`, `**`, and `?` supported). */
+export function globToRegExpSource(glob: string): string {
+	const normalized = glob.replace(/\\/g, "/");
+	let source = "^";
+
+	for (let i = 0; i < normalized.length; i++) {
+		const char = normalized[i];
+		if (char === undefined) break;
+		if (char === "*") {
+			if (normalized[i + 1] === "*") {
+				i++;
+				if (normalized[i + 1] === "/") {
+					i++;
+					source += "(?:.*/)?";
+				} else {
+					source += ".*";
+				}
+			} else {
+				source += "[^/]*";
+			}
+			continue;
+		}
+		if (char === "?") {
+			source += "[^/]";
+			continue;
+		}
+		source += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	}
+
+	return `${source}$`;
+}
+
+export function globMatchesPath(glob: string, relativePath: string): boolean {
+	try {
+		return new RegExp(globToRegExpSource(glob)).test(relativePath.replace(/\\/g, "/"));
+	} catch {
+		return false;
+	}
+}
+
+function workspaceRelativePath(rawPath: string, cwd: string): string | undefined {
+	const target = canonicalizePathToken(rawPath, cwd);
+	const root = canonicalizePath(cwd);
+	if (target === root) return "";
+	const normalizedRoot = root.endsWith(path.sep) ? root : root + path.sep;
+	if (!target.startsWith(normalizedRoot)) return undefined;
+	return target.slice(normalizedRoot.length).split(path.sep).join("/");
+}
+
+/**
+ * True when `rawPath` resolves inside the workspace and matches a read-exemption glob.
+ * Canonicalization prevents a symlink inside the workspace from standing in for a file outside it.
+ */
+export function isWorkspaceReadExempt(rawPath: string, cwd: string, globs: readonly string[] | undefined): boolean {
+	if (!globs || globs.length === 0) return false;
+
+	const relative = workspaceRelativePath(rawPath, cwd);
+	if (relative === undefined || relative === "") return false;
+	return globs.some((glob) => globMatchesPath(glob, relative));
+}
+
 export function getExternalPaths(toolName: PermissionToolName, input: PermissionToolInput, cwd: string): string[] {
 	if (!isFilesystemToolName(toolName)) return [];
 

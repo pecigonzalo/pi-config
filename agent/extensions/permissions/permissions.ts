@@ -38,8 +38,7 @@
  *       //   structured filesystem rule. "inherit" (default) defers to the
  *       //   global policy; "allow" skips the external-path check entirely.
  *       { "tool": "read",  "match": "\\.env$", "action": "block", "reason": "Protected" },
- *       { "tool": "write", "match": "\\.env$", "action": "block", "reason": "Protected" },
- *       { "tool": "read",  "match": "\\.env\\.example$", "action": "allow", "externalPathAction": "allow" }
+ *       { "tool": "write", "match": "\\.env$", "action": "block", "reason": "Protected" }
  *     ],
  *     // What to do when a structured filesystem tool (read/write/edit/grep/find/ls)
  *     // targets a path outside the current working directory.
@@ -101,6 +100,12 @@
  *
  * Protected-resource rules and built-in invariants are evaluated before every configurable
  * rule and are not affected by `inherit`. Disable them through `protectedResources` instead.
+ *
+ * `protectedResources.workspaceRead` lists workspace-relative globs that are exempt from read
+ * protection when the resolved path stays inside cwd, for env files that a project's own tests
+ * or tooling read. Writes stay protected, and reads of matching names outside cwd stay
+ * protected. Env templates (.env.example, .env.sample, .env.template, .env.dist,
+ * .env.defaults) are read-exempt by default and need no configuration.
  *
  * Auto mode ("mode": "auto"):
  *   NOT enabled by default — the default mode is "workspace-write". Switch
@@ -217,6 +222,7 @@ import {
 	getFilesystemApprovalTargets,
 	getMatchTarget,
 	getPathInput,
+	isWorkspaceReadExempt,
 	matchRule,
 	isPathOutsideCwd,
 } from "./matching";
@@ -1865,7 +1871,15 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 			return ALLOW_PERMISSION;
 		}
 
-		const rule = policy.rules.length > 0 ? matchRule(policy.rules, toolName, input) : undefined;
+		const readExemptionPath = toolName === "read" ? getPathInput(input) : undefined;
+		// Workspace read exceptions only ever drop protected-resource read blocks; user rules and
+		// protected writes still apply.
+		const rules =
+			readExemptionPath !== undefined &&
+			isWorkspaceReadExempt(readExemptionPath, ctx.cwd, policy.protectedResources.workspaceRead)
+				? policy.rules.filter((candidate) => candidate.protectedAccess !== "read")
+				: policy.rules;
+		const rule = rules.length > 0 ? matchRule(rules, toolName, input) : undefined;
 
 		if (rule) {
 			if (rule.action === "block") {
@@ -2283,6 +2297,11 @@ export default function (pi: ExtensionAPI, dependencies: PermissionsExtensionDep
 						lines.push(`  ${theme.fg("dim", "  ↳ ")}${theme.fg("dim", pattern)}`);
 					if (protectedResources.denyWrite.length > 4)
 						lines.push(`  ${theme.fg("dim", `  ... ${protectedResources.denyWrite.length - 4} more`)}`);
+					if (protectedResources.workspaceRead.length > 0) {
+						lines.push(
+							`  ${theme.fg("muted", "Read exceptions:")} ${theme.fg("dim", protectedResources.workspaceRead.join(", "))}`,
+						);
+					}
 					const pr = config.protectedResources ?? {};
 					const builtinsState = (pr.enabled ?? true) ? ((pr.defaults ?? true) ? "on" : "off") : "disabled";
 					lines.push(

@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getBuiltinPermissionRules } from "./default-rules";
-import { getBuiltinProtectedResourceMatches } from "./protected-resources";
+import { getBuiltinProtectedResourceMatches, getBuiltinProtectedWorkspaceReadGlobs } from "./protected-resources";
 import {
 	type AgentProfile,
 	type EffectivePolicy,
@@ -277,6 +277,7 @@ export function interpolateConfig(config: PermissionsConfig): PermissionsConfig 
 					allowMachLookup: interpolateStringArray(config.sandbox.allowMachLookup),
 					bypassCommands: interpolateStringArray(config.sandbox.bypassCommands, { regex: true }),
 					addAllowWrite: interpolateStringArray(config.sandbox.addAllowWrite),
+					allowRead: interpolateStringArray(config.sandbox.allowRead),
 					denyRead: interpolateStringArray(config.sandbox.denyRead),
 					denyWrite: interpolateStringArray(config.sandbox.denyWrite),
 					env: interpolateStringRecord(config.sandbox.env),
@@ -289,6 +290,7 @@ export function interpolateConfig(config: PermissionsConfig): PermissionsConfig 
 					addDenyWrite: interpolateStringArray(config.protectedResources.addDenyWrite, { regex: true }),
 					unprotectRead: interpolateStringArray(config.protectedResources.unprotectRead, { regex: true }),
 					unprotectWrite: interpolateStringArray(config.protectedResources.unprotectWrite, { regex: true }),
+					workspaceRead: interpolateStringArray(config.protectedResources.workspaceRead),
 				}
 			: undefined,
 	};
@@ -386,7 +388,7 @@ export function loadConfig(
 export function resolveProtectedResources(config: PermissionsConfig): ResolvedProtectedResources {
 	const settings = config.protectedResources ?? {};
 	const enabled = settings.enabled ?? true;
-	if (!enabled) return { denyRead: [], denyWrite: [] };
+	if (!enabled) return { denyRead: [], denyWrite: [], workspaceRead: [] };
 
 	const useDefaults = settings.defaults ?? true;
 	const denyReadSource = [
@@ -403,17 +405,39 @@ export function resolveProtectedResources(config: PermissionsConfig): ResolvedPr
 	return {
 		denyRead: dedupeStrings(denyReadSource.filter((r) => !unprotectRead.has(r))),
 		denyWrite: dedupeStrings(denyWriteSource.filter((r) => !unprotectWrite.has(r))),
+		workspaceRead: dedupeStrings([
+			...(useDefaults ? getBuiltinProtectedWorkspaceReadGlobs() : []),
+			...(settings.workspaceRead ?? []),
+		]),
 	};
 }
 
 export function compileProtectedRules(protectedResources: ResolvedProtectedResources): Rule[] {
 	const rules: Rule[] = [];
 	for (const match of protectedResources.denyRead) {
-		rules.push({ tool: "read", match, action: "block", reason: "Blocked by protected resource policy" });
+		rules.push({
+			tool: "read",
+			match,
+			action: "block",
+			reason: "Blocked by protected resource policy",
+			protectedAccess: "read",
+		});
 	}
 	for (const match of protectedResources.denyWrite) {
-		rules.push({ tool: "write", match, action: "block", reason: "Blocked by protected resource policy" });
-		rules.push({ tool: "edit", match, action: "block", reason: "Blocked by protected resource policy" });
+		rules.push({
+			tool: "write",
+			match,
+			action: "block",
+			reason: "Blocked by protected resource policy",
+			protectedAccess: "write",
+		});
+		rules.push({
+			tool: "edit",
+			match,
+			action: "block",
+			reason: "Blocked by protected resource policy",
+			protectedAccess: "write",
+		});
 	}
 	return rules;
 }

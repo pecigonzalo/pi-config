@@ -25,6 +25,7 @@ import {
 	getMatchTarget,
 	getPathInput,
 	isPathOutsideCwd,
+	isWorkspaceReadExempt,
 	matchRule,
 	ruleMatch,
 } from "./matching";
@@ -289,6 +290,56 @@ describe("permissions config merge", () => {
 		expect(resolved.denyWrite).toContain("\\.env(\\..+)?$");
 		expect(resolved.denyRead).toContain("\\.(pem|key|p12|pfx|crt|ca-bundle)$");
 		expect(resolved.denyWrite).toContain("\\.(pem|key|p12|pfx|crt|ca-bundle)$");
+	});
+
+	it("exempts env templates from protected reads inside the workspace", () => {
+		const policy = configModule.activePolicy({}, "default");
+
+		for (const template of [".env.example", ".env.sample", ".env.template", ".env.dist", ".env.defaults"]) {
+			expect(policy.protectedResources.workspaceRead).toContain(`**/${template}`);
+			expect(isWorkspaceReadExempt(`/repo/${template}`, "/repo", policy.protectedResources.workspaceRead)).toBe(
+				true,
+			);
+			expect(matchRule(policy.rules, "write", { path: `/repo/${template}` })?.action).toBe("block");
+		}
+
+		for (const secret of [".env", ".env.local", ".env.production", ".env.example.local"]) {
+			const rule = matchRule(policy.rules, "read", { path: `/repo/${secret}` });
+			expect(rule?.action).toBe("block");
+			expect(rule?.protectedAccess).toBe("read");
+			expect(isWorkspaceReadExempt(`/repo/${secret}`, "/repo", policy.protectedResources.workspaceRead)).toBe(
+				false,
+			);
+		}
+	});
+
+	it("drops read exceptions entirely when protected resources are disabled", () => {
+		const resolved = configModule.resolveProtectedResources({ protectedResources: { enabled: false } });
+
+		expect(resolved.workspaceRead).toEqual([]);
+	});
+
+	it("scopes workspace read exceptions to canonical paths inside cwd", async () => {
+		const globs = ["**/.env", "**/.env.*"];
+		expect(isWorkspaceReadExempt("/repo/.env", "/repo", globs)).toBe(true);
+		expect(isWorkspaceReadExempt("/repo/packages/app/.env.local", "/repo", globs)).toBe(true);
+		expect(isWorkspaceReadExempt("/repo/.env.backup", "/repo", ["**/.env"])).toBe(false);
+		expect(isWorkspaceReadExempt("/other/.env", "/repo", globs)).toBe(false);
+		expect(isWorkspaceReadExempt("../../../.env", "/repo/packages/app", globs)).toBe(false);
+		expect(isWorkspaceReadExempt("/repo/.env", "/repo", [])).toBe(false);
+
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "perm-read-exempt-"));
+		const workspace = path.join(tmp, "repo");
+		const outside = path.join(tmp, "outside");
+		await fs.mkdir(workspace, { recursive: true });
+		await fs.mkdir(outside, { recursive: true });
+		await fs.writeFile(path.join(outside, ".env"), "SECRET=1\n");
+		await fs.symlink(path.join(outside, ".env"), path.join(workspace, ".env"));
+		try {
+			expect(isWorkspaceReadExempt(path.join(workspace, ".env"), workspace, ["**/.env"])).toBe(false);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
 	});
 
 	it("can unprotect the MCP config without unprotecting other developer config files", () => {
@@ -1106,7 +1157,7 @@ describe("codemode policy", () => {
 		mode: "workspace-write" as const,
 		rules: [],
 		externalPath: "ask" as const,
-		protectedResources: { denyRead: [], denyWrite: [] },
+		protectedResources: { denyRead: [], denyWrite: [], workspaceRead: [] },
 	};
 
 	it("keeps the active permissions policy separate from analysis capabilities", () => {
@@ -1821,6 +1872,101 @@ describe("permissions extension sandbox lifecycle", () => {
 			await harness.restore();
 		}
 	}
+
+	it("read-exempts env templates at the tool_call boundary", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+
+			const templateResult = await toolCall(
+				{ toolName: "read", input: { path: path.join(harness.cwd, ".env.example") } },
+				harness.ctx,
+			);
+			expect(templateResult).toBeUndefined();
+
+			const relativeTemplateResult = await toolCall(
+				{ toolName: "read", input: { path: ".env.example" } },
+				harness.ctx,
+			);
+			expect(relativeTemplateResult).toBeUndefined();
+
+			const envResult = (await toolCall(
+				{ toolName: "read", input: { path: path.join(harness.cwd, ".env") } },
+				harness.ctx,
+			)) as { block: true; reason: string } | undefined;
+			expect(envResult?.block).toBe(true);
+			expect(envResult?.reason).toBe("Blocked by protected resource policy");
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("applies workspace read exceptions only inside the workspace", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			now: () => 0,
+			config: { protectedResources: { workspaceRead: ["**/.env"] } },
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+
+			const workspaceResult = await toolCall(
+				{ toolName: "read", input: { path: path.join(harness.cwd, ".env") } },
+				harness.ctx,
+			);
+			expect(workspaceResult).toBeUndefined();
+
+			const outsideResult = (await toolCall(
+				{ toolName: "read", input: { path: path.join(harness.cwd, "..", ".env") } },
+				harness.ctx,
+			)) as { block: true; reason: string } | undefined;
+			expect(outsideResult?.block).toBe(true);
+			expect(outsideResult?.reason).toBe("Blocked by protected resource policy");
+		} finally {
+			await harness.restore();
+		}
+	});
+
+	it("keeps user block rules ahead of builtin read exceptions", async () => {
+		const harness = await setupPermissionsHarness({
+			mode: "workspace-write",
+			rules: [{ tool: "read", match: "\\.env\\.example$", action: "block", reason: "team policy" }],
+			now: () => 0,
+			sandboxManager: {
+				initialize: async () => {},
+				reset: async () => {},
+				wrapWithSandbox: async (command: string) => command,
+			},
+		});
+		try {
+			const toolCall = harness.handlers.get("tool_call")?.[0];
+			if (!toolCall) throw new Error("tool_call handler was not registered");
+
+			const result = (await toolCall(
+				{ toolName: "read", input: { path: path.join(harness.cwd, ".env.example") } },
+				harness.ctx,
+			)) as { block: true; reason: string } | undefined;
+			expect(result?.block).toBe(true);
+			expect(result?.reason).toBe("team policy");
+		} finally {
+			await harness.restore();
+		}
+	});
 
 	it("fails closed at the registered filesystem tool_call boundary for a cyclic path", async () => {
 		const harness = await setupPermissionsHarness({
@@ -3495,7 +3641,7 @@ describe("sandbox network config", () => {
 		mode: "workspace-write" as const,
 		rules: [],
 		externalPath: "ask" as const,
-		protectedResources: { denyRead: [], denyWrite: [] },
+		protectedResources: { denyRead: [], denyWrite: [], workspaceRead: [] },
 	};
 
 	it("uses unrestricted network shape by default when enabled", () => {
@@ -3792,6 +3938,7 @@ func TestGoCache(t *testing.T) {}
 			protectedResources: {
 				denyRead: ["\\.(pem|key|p12|pfx|crt|ca-bundle)$"],
 				denyWrite: ["\\.(pem|key|p12|pfx|crt|ca-bundle)$"],
+				workspaceRead: [],
 			},
 		};
 		const compiled = compileSandboxConfig(protectedPolicy, "/repo", {
@@ -3811,6 +3958,7 @@ func TestGoCache(t *testing.T) {}
 			protectedResources: {
 				denyRead: ["\\.env(\\..+)?$", "(^|[/])(\\.aws[/]|\\.ssh[/]|\\.gnupg[/])"],
 				denyWrite: [GIT_METADATA_PROTECTED_RESOURCE_MATCH],
+				workspaceRead: [],
 			},
 		};
 		const compiled = compileSandboxConfig(protectedPolicy, "/repo", { enabled: true });
@@ -3824,12 +3972,43 @@ func TestGoCache(t *testing.T) {}
 		expect(denyWrite).not.toContain(GIT_METADATA_PROTECTED_RESOURCE_MATCH);
 	});
 
+	it("re-allows protected read exceptions inside the sandbox", () => {
+		const protectedPolicy = {
+			...policy,
+			protectedResources: {
+				denyRead: ["\\.env(\\..+)?$"],
+				denyWrite: [],
+				workspaceRead: ["**/.env", "**/.env.example"],
+			},
+		};
+		const compiled = compileSandboxConfig(protectedPolicy, "/repo", {
+			enabled: true,
+			allowRead: ["secrets/readme.txt"],
+		});
+		const allowRead = compiled.config.filesystem?.allowRead ?? [];
+
+		expect(allowRead).toContain("/repo/**/.env");
+		expect(allowRead).toContain("/repo/**/.env.example");
+		expect(allowRead).toContain("/repo/secrets/readme.txt");
+		expect(compiled.config.filesystem?.denyRead).toContain("/repo/**/.env");
+	});
+
+	it("re-allows the default env templates in the sandbox", () => {
+		const compiled = compileSandboxConfig(configModule.activePolicy({}, "default"), "/repo", { enabled: true });
+		const allowRead = compiled.config.filesystem?.allowRead ?? [];
+
+		expect(allowRead).toContain("/repo/**/.env.example");
+		expect(allowRead).toContain("/repo/**/.env.template");
+		expect(compiled.config.filesystem?.denyRead).toContain("/repo/**/.env");
+	});
+
 	it("warns when protected resource regexes cannot be mapped to sandbox paths", () => {
 		const protectedPolicy = {
 			...policy,
 			protectedResources: {
 				denyRead: [],
 				denyWrite: ["(^|[/])custom-secret(/|$)"],
+				workspaceRead: [],
 			},
 		};
 
@@ -3885,7 +4064,11 @@ func TestGoCache(t *testing.T) {}
 			const repoRealPath = await fs.realpath(repo);
 			const protectedPolicy = {
 				...policy,
-				protectedResources: { denyRead: [], denyWrite: [GIT_METADATA_PROTECTED_RESOURCE_MATCH] },
+				protectedResources: {
+					denyRead: [],
+					denyWrite: [GIT_METADATA_PROTECTED_RESOURCE_MATCH],
+					workspaceRead: [],
+				},
 			};
 			const compiled = compileSandboxConfig(protectedPolicy, subdir, { enabled: true });
 			const denyWrite = compiled.config.filesystem?.denyWrite ?? [];
@@ -3920,7 +4103,11 @@ func TestGoCache(t *testing.T) {}
 				: path.resolve(worktree, worktreeGitDir);
 			const protectedPolicy = {
 				...policy,
-				protectedResources: { denyRead: [], denyWrite: [GIT_METADATA_PROTECTED_RESOURCE_MATCH] },
+				protectedResources: {
+					denyRead: [],
+					denyWrite: [GIT_METADATA_PROTECTED_RESOURCE_MATCH],
+					workspaceRead: [],
+				},
 			};
 			const compiled = compileSandboxConfig(protectedPolicy, worktree, { enabled: true });
 			const denyWrite = compiled.config.filesystem?.denyWrite ?? [];
